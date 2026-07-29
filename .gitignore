@@ -17,3 +17,4 @@ src/configs/platform/custom/local_custom.yaml
 src/configs/platform/custom/default_custom.yaml
 src/configs/platform/custom/slurm_custom.yaml
 src/configs/platform/local_akopyane.yaml
+src/configs/platform/local_platform.yaml
