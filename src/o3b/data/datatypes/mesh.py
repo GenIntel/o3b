@@ -182,10 +182,24 @@ def _extract_vert_feats(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(feature_model_name)
-    
+
+    # ── Fusion feature models: concatenate L2-normalized per-vertex features of
+    # two sub-encoders (e.g. PartField part-structure ⊕ DINOv2 semantics). Each
+    # sub-encoder reuses its normal extraction path via recursion, so the two
+    # single-encoder code paths below stay untouched. L2-normalizing each block
+    # before concat keeps neither scale-dominant in the downstream euclidean NN.
+    _FUSION = {"pfdino": ["partfield", "dinov2s"]}
+    if feature_model_name.lower() in _FUSION:
+        blocks = []
+        for sub in _FUSION[feature_model_name.lower()]:
+            f = _extract_vert_feats(mesh, n_views=n_views, resolution=resolution,
+                                    feature_model_name=sub).float()      # (V, C_sub)
+            f = torch.nn.functional.normalize(f, dim=-1)
+            blocks.append(f)
+        return torch.cat(blocks, dim=-1)                                 # (V, sum C_sub)
+
     # ── Models that do their own rendering (diff3f, densematcher/dm) ────────────
-    _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip",
-                       "partfield"}
+    _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip", "partfield"}
     if feature_model_name.lower() in _SELF_RENDERING:
         from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch
