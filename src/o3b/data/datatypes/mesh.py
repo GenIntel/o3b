@@ -199,7 +199,8 @@ def _extract_vert_feats(
         return torch.cat(blocks, dim=-1)                                 # (V, sum C_sub)
 
     # ── Models that do their own rendering (diff3f, densematcher/dm) ────────────
-    _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip", "partfield"}
+    _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip",
+                       "partfield", "cosmo3d"}
     if feature_model_name.lower() in _SELF_RENDERING:
         from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch

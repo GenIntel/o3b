@@ -1,0 +1,7 @@
+class_name: CoSMo3D
+repo_path: "third_party/cosmo3d"          # JinLi998/CoSMo3D clone (PointTransformerV3)
+ckpt_path: "checkpoints/cosmo3d/ours_final.pth"
+n_sample_pts: 5000                        # upstream default; 20k measured no better (within +-0.015 noise)
+grid_size: 0.02                            # GridSample voxel edge, metric (model is not scale-free)
+freeze: true
+use_texture: true                          # published usage; grey measured indistinguishable (see README)

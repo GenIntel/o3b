@@ -33,6 +33,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Diff3F":          "o3b.model.diff3f.model",
     "DenseMatcher":    "o3b.model.densematcher.model",
     "PartField":       "o3b.model.partfield.model",
+    "CoSMo3D":         "o3b.model.cosmo3d.model",
     "GenPose2":        "o3b.model.obj_pose.genpose2.model",
     "ResNetHead":      "o3b.model.resnet.model",
 }
