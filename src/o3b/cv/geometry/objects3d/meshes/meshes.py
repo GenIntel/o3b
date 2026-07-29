@@ -7,7 +7,10 @@ from enum import Enum
 from pathlib import Path
 from typing import List
 
-import nvdiffrast.torch as dr
+try:
+    import nvdiffrast.torch as dr
+except ModuleNotFoundError:
+    dr = None
 
 import torch
 from o3b.cv.geometry.transform import proj3d2d_broadcast
