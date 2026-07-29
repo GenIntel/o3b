@@ -1,3 +1,5 @@
+import os
+os.environ.setdefault("XFORMERS_DISABLED", "1")  # dinov2 MemEffAttention has no backend for compute capability >= 12.0 (Blackwell)
 import logging
 
 logger = logging.getLogger(__name__)
