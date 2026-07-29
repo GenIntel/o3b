@@ -156,6 +156,8 @@ class DenseMatcherModel(OD3D_Model):
     def _ensure_featurizer(self) -> None:
         if self._mesh_featurizer is not None:
             return
+        from o3b.model.xformers_compat import patch_xformers_memory_efficient_attention
+        patch_xformers_memory_efficient_attention()
         # Auto-download checkpoints if the FeatUp checkpoint is missing.
         upsampler = Path(self.pretrained_upsampler_path)
         if not upsampler.exists():
