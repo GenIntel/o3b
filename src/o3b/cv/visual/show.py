@@ -430,10 +430,19 @@ def render_trimesh_to_tensor(
 
     # pyrender.Viewer(scene, shadows=True)
 
-    # Create an offscreen renderer
+    # Create an offscreen renderer (cached per size: creating a fresh renderer
+    # per call leaks one GL context per render, which breaks EGL on WSL/mesa)
     if "DISPLAY" not in os.environ:
         os.environ["PYOPENGL_PLATFORM"] = "egl"
-    renderer = pyrender.OffscreenRenderer(width, height)
+    global _OFFSCREEN_RENDERERS
+    try:
+        _OFFSCREEN_RENDERERS
+    except NameError:
+        _OFFSCREEN_RENDERERS = {}
+    renderer = _OFFSCREEN_RENDERERS.get((width, height))
+    if renderer is None:
+        renderer = pyrender.OffscreenRenderer(width, height)
+        _OFFSCREEN_RENDERERS[(width, height)] = renderer
 
     # Render the scene
     color, depth = renderer.render(scene)
