@@ -400,8 +400,11 @@ class Crsp3DNNTask(OD3D_Task):
       PCK    = fraction where pred target vertex has the correct part label
     """
 
-    def __init__(self, **kwargs):
-        pass
+    def __init__(self, feat_metric: str = "euclidean", **kwargs):
+        # feat_metric: "euclidean" (default, raw cdist) or "cosine"
+        # (L2-normalize features before the nearest-neighbour cdist). Must be an
+        # explicit named param so build_task's config forwarding picks it up.
+        self.feat_metric = feat_metric or "euclidean"
 
     def forward(self, batch: ObjectPairBatch, return_qualit: bool = True) -> Tuple[ObjectPairQuantBatch, ObjectPairQualitBatch]:
         src_verts       = batch.src_verts3d             # (B, V_src, 3)
@@ -443,7 +446,13 @@ class Crsp3DNNTask(OD3D_Task):
         # ── shared: query feats → nearest target vert ─────────────────────────
         def feat_nn_batch(query_feats_b, b):
             """(Q, F) → (Q,) target vert indices via feature nearest-neighbour."""
-            dists = torch.cdist(query_feats_b.float(), trgt_feats[b].float())  # (Q, V_trgt)
+            qf = query_feats_b.float()
+            tf = trgt_feats[b].float()
+            if self.feat_metric == "cosine":
+                # euclidean NN on L2-normalized features == cosine-similarity NN
+                qf = torch.nn.functional.normalize(qf, dim=-1)
+                tf = torch.nn.functional.normalize(tf, dim=-1)
+            dists = torch.cdist(qf, tf)  # (Q, V_trgt)
             if trgt_verts_mask is not None:
                 dists = dists.masked_fill(~trgt_verts_mask[b].unsqueeze(0), float("inf"))
             return dists.argmin(dim=1)  # (Q,)
