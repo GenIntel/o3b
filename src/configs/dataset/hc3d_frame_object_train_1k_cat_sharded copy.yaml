@@ -1,0 +1,70 @@
+# Sharded hc3d_frame_object filtered to a single category (toy_boat).
+#
+# Items are materialised once into
+#   <path_preprocess>/sharded/<sharded_name>
+# and loaded from there on subsequent runs. The category name is part of the
+# sharded_name so per-category shards live side by side.
+#
+# o3b dataset fetch -d hc3d_frame_object_train_cat_sharded
+# o3b dataset index -d hc3d_frame_object_train_cat_sharded
+# o3b dataset viz -d hc3d_frame_object_train_cat_sharded
+
+# 
+# o3b dataset index -d hc3d_frame_object_train_1k_cat_sharded -p slurm_lmbl40 --remote
+# o3b dataset init -d hc3d_frame_object_train_1k_cat_sharded -p slurm_lmbl40 --remote
+# o3b dataset viz -d hc3d_frame_object_train_1k_cat_sharded -p slurm_lmbl40 --remote
+
+
+# o3b dataset viz -d hc3d_frame_object_train_cat_sharded
+
+defaults:
+  - hc3d_frame_object_train
+  - _self_
+
+# Single category to filter for; referenced below via ${category} so the
+# category name is also reflected in the sharded dataset directory.
+category: hair_dryer
+
+categories:
+  - ${category}
+
+
+img_size: 512
+sharded_shard_size: 100 # cache batch size and final shard size
+# note that especially cache batch size heavily affects /dev/shm when using shared memory
+# worker processes for the one-off shard build (items are loaded + serialised to
+# bytes in the workers, so /dev/shm tensor transport is not involved); 0 = sequential
+
+# actually it seems like /dev/shm is currently not affected probably only when 
+#   torch.multiprocessing.set_sharing_strategy("file_system") instead of 
+#   torch.multiprocessing.set_sharing_strategy("file_descriptor")  (DEFAULT)
+
+sharded_num_workers: 4
+# perhaps this should be ram_in_gb / sharded_worker_gb = 20 / 5 = 4
+# sharded_worker_gb: see that each worker usually creates their own dataset copy
+
+filter_count_max: 50000 # 50000 # per category if categories is applied
+
+sharded_transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}  # 512 # 256->512 1% improvement for tooth brush
+  W: ${img_size}
+  # per-side crop margin as a fraction of bbox size (crop spans 1 + 2*bbox_overlap)
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side" # "crop_large_side" | "crop_small_side" | "crop_resize_ratio"
+
+transform:
+
+sharded_name: hc3d_frame_object_train_${filter_count_max}_b${sharded_shard_size}_r${img_size}_c${category}
+sharded_override: true
+
+# overrides the (already-lowered) default from hc3d_frame_object_pair.yaml;
+# kept explicit here since this is the config that actually triggers the build
+#
+ 
+
+# sharded_transform is baked into the shards at build time (applied once per
+# item in the shard-build workers), so reads from the cache pay no crop cost.
+# transform (empty here) would additionally run in __getitem__ on every access.
+# NOTE: changing sharded_transform requires a rebuild (sharded_override: true
+# or bump sharded_name) — an existing cache dir is loaded as-is.
