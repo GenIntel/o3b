@@ -2170,6 +2170,19 @@ def _run_bench_run(args) -> None:
             resolve=True,
         ) if run_ds else dict(ds_base)
 
+        # ── optional training dataset (method.train.dataset_train) ────────────
+        # The method creates this dataset lazily by dataset_name (mirroring its
+        # pose model); only inject the platform's dataset path overrides here so
+        # the named config resolves against the right roots. Keys already set in
+        # the ablation win.
+        _method_cfg = run_raw.get("method")
+        _train_cfg = _method_cfg.get("train") if isinstance(_method_cfg, dict) else None
+        _ds_train = _train_cfg.get("dataset_train") if isinstance(_train_cfg, dict) else None
+        if isinstance(_ds_train, dict) and _ds_train.get("dataset_name"):
+            for _ov in overrides:
+                _key, _, _val = _ov.partition("=")
+                _ds_train.setdefault(_key, _val)
+
         from datetime import datetime
         timestamp = datetime.now().strftime("%m%d_%H%M%S")
         if combo_stem:

@@ -79,6 +79,10 @@ class DatasetConfig:
 
     # O3B_Transform applied to every loaded item (dict with class_name + kwargs)
     transform:             Optional[dict]    = None
+    # O3B_Transform baked into the shards at build time (applied once per item
+    # in the shard-build workers); items read back from the shards are already
+    # transformed, so no per-access cost remains
+    sharded_transform:     Optional[dict]    = None
 
     # HuggingFace sharding: when set, items are materialised once into
     # path_preprocess/sharded/<sharded_name> and loaded from there on subsequent
@@ -86,6 +90,9 @@ class DatasetConfig:
     sharded_name:      Optional[str]        = None
     sharded_override:  bool                 = False
     sharded_shard_size: int                 = 1000
+    # worker processes used to load+encode items while building the shards
+    # (0 = build sequentially in the main process)
+    sharded_num_workers: int                = 0
 
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
@@ -116,9 +123,11 @@ class DatasetConfig:
             "obj_gl_tform4x4_obj_raw": self.obj_gl_tform4x4_obj_raw,
             "cam_tform4x4_cam_raw": self.cam_tform4x4_cam_raw,
             "transform":            self.transform,
+            "sharded_transform":    self.sharded_transform,
             "sharded_name":       self.sharded_name,
             "sharded_override":   self.sharded_override,
             "sharded_shard_size": self.sharded_shard_size,
+            "sharded_num_workers": self.sharded_num_workers,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -149,9 +158,11 @@ class DatasetConfig:
             obj_gl_tform4x4_obj_raw = d.get("obj_gl_tform4x4_obj_raw", d.get("obj_tform4x4")),
             cam_tform4x4_cam_raw = d.get("cam_tform4x4_cam_raw"),
             transform            = d.get("transform"),
+            sharded_transform    = d.get("sharded_transform"),
             sharded_name         = d.get("sharded_name"),
             sharded_override     = bool(d.get("sharded_override", False)),
             sharded_shard_size   = int(d.get("sharded_shard_size", 1000)),
+            sharded_num_workers  = int(d.get("sharded_num_workers", 0)),
             extra           = d.get("extra", {}),
         )
 
@@ -201,6 +212,37 @@ def build_dataset(cfg: DatasetConfig) -> "ConfigurableDataset":
     return _REGISTRY_DATASETS[cfg.class_name](cfg)
 
 
+def build_dataset_from_config_or_name(config: dict) -> "ConfigurableDataset":
+    """Like ``build_dataset``, but if ``config`` has ``dataset_name``, load
+    ``configs/dataset/<dataset_name>.yaml`` (defaults chain) as the base and
+    merge the remaining keys on top — mirroring
+    ``OD3D_Model.create_from_config_or_name``.
+
+    ``path_datasets_raw`` / ``path_datasets_preprocess`` keys in ``config``
+    are applied as overrides while loading the named config, so its path
+    interpolations resolve against them (the bench CLI injects the platform's
+    values there).
+    """
+    from omegaconf import OmegaConf
+    config = dict(config)
+    dataset_name = config.pop("dataset_name", None)
+    if dataset_name is not None:
+        from o3b.dataset.cli import _resolve_dataset_config
+        overrides = [
+            f"{key}={config.pop(key)}"
+            for key in ("path_datasets_raw", "path_datasets_preprocess")
+            if config.get(key) is not None
+        ]
+        base = _load_yaml_with_defaults(
+            _resolve_dataset_config(dataset_name), overrides=overrides
+        )
+        config = OmegaConf.to_container(
+            OmegaConf.merge(OmegaConf.create(base), OmegaConf.create(config)),
+            resolve=True,
+        )
+    return build_dataset(DatasetConfig.from_dict(config))
+
+
 # ── Transform helper ─────────────────────────────────────────────────────────
 
 def _build_transform(transform_cfg: Optional[dict]):
@@ -237,7 +279,10 @@ class ConfigurableDataset(_TorchDataset):
         self.cfg = cfg
         self._index: list = []
         self._sharded = None       # HuggingFace Dataset when sharding is active
+        self._sharded_meshes = None      # mesh sidecar HF dataset (dedup'd meshes)
+        self._sharded_mesh_rows = None   # {object_id: sidecar row index}
         self._transform = _build_transform(cfg.transform)
+        self._sharded_transform = _build_transform(cfg.sharded_transform)
         self._setup()
         if cfg.sharded_name:
             self._setup_sharded()
@@ -277,38 +322,64 @@ class ConfigurableDataset(_TorchDataset):
     def _setup_sharded(self) -> None:
         """Load the sharded dataset, building it from raw items if necessary."""
         from o3b.dataset.sharding import (
-            build_sharded_dataset_from_generator, item_to_record,
+            build_sharded_dataset_from_generator, iter_records,
             read_sharded_dataset, write_sharded_dataset,
+            read_mesh_sidecar, strip_mesh_from_record, write_mesh_sidecar,
         )
 
         path = self._sharded_dir()
         if path.exists() and not self.cfg.sharded_override:
             print(f"Loading sharded dataset from {path}")
             self._sharded = read_sharded_dataset(path)
+            self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
             return
 
         from tqdm import tqdm
 
         action = "Overriding" if path.exists() else "Building"
         n = len(self)
-        print(f"{action} sharded dataset at {path} ({n} items)…")
+        num_workers = self.cfg.sharded_num_workers
+        workers_note = f", {num_workers} workers" if num_workers > 0 else ""
+        print(f"{action} sharded dataset at {path} ({n} items{workers_note})…")
 
         pbar = tqdm(total=n, desc="Sharding", unit="item")
+        meshes: dict = {}   # object_id → encoded mesh, deduplicated across frames
 
         def _gen():
-            for i in range(n):
-                item = self._load_item(i)
+            for record in iter_records(self._load_sharded_item, n, num_workers=num_workers):
                 pbar.update(1)
-                if item is not None:
-                    yield item_to_record(item)
+                if record is not None:
+                    yield strip_mesh_from_record(record, meshes)
 
         hf = build_sharded_dataset_from_generator(_gen, writer_batch_size=self.cfg.sharded_shard_size)
         pbar.close()
         write_sharded_dataset(hf, path, shard_size=self.cfg.sharded_shard_size)
+        if meshes:
+            write_mesh_sidecar(meshes, path)
         self._sharded = read_sharded_dataset(path)
+        self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
         print(f"Done. Wrote {len(self._sharded)} items → {path}")
 
     # ── item loading dispatch ─────────────────────────────────────────────────
+
+    def _load_sharded_item(self, idx: int):
+        """Load a raw item with ``sharded_transform`` baked in (shard-build path)."""
+        return self._apply_transform(self._load_item(idx), self._sharded_transform)
+
+    def _apply_transform(self, item, transform):
+        if transform is None or item is None:
+            return item
+        from o3b.data.datatypes.object import ObjectPair
+        from o3b.data.datatypes.frame_object import FrameObjectPair
+        if isinstance(item, (ObjectPair, FrameObjectPair)):
+            # per-frame transforms (e.g. CropCamBBox2D) apply to each side
+            from dataclasses import replace as _replace
+            return _replace(
+                item,
+                src_object=transform(item.src_object),
+                trgt_object=transform(item.trgt_object),
+            )
+        return transform(item)
 
     def _load_item(self, idx: int):
         if self.cfg.item_type == ItemType.OBJECT:
@@ -350,22 +421,24 @@ class ConfigurableDataset(_TorchDataset):
         if self._sharded is not None:
             from o3b.dataset.sharding import record_to_item
             item = record_to_item(self._sharded[int(idx)], self._item_type_cls())
+            self._attach_sharded_mesh(item)
         else:
             item = self._load_item(idx)
-        if self._transform is not None and item is not None:
-            from o3b.data.datatypes.object import ObjectPair
-            from o3b.data.datatypes.frame_object import FrameObjectPair
-            if isinstance(item, (ObjectPair, FrameObjectPair)):
-                # per-frame transforms (e.g. CropCamBBox2D) apply to each side
-                from dataclasses import replace as _replace
-                item = _replace(
-                    item,
-                    src_object=self._transform(item.src_object),
-                    trgt_object=self._transform(item.trgt_object),
-                )
-            else:
-                item = self._transform(item)
-        return item
+        return self._apply_transform(item, self._transform)
+
+    def _attach_sharded_mesh(self, item) -> None:
+        """Re-attach a mesh that was deduplicated into the sidecar at build time
+        (see strip_mesh_from_record). Decodes fresh per access so items never
+        share a Mesh instance."""
+        if self._sharded_meshes is None or item is None:
+            return
+        if getattr(item, "mesh", None) is not None:
+            return
+        row = self._sharded_mesh_rows.get(getattr(item, "object_id", None))
+        if row is None:
+            return
+        from o3b.dataset.sharding import decode_sidecar_mesh
+        item.mesh = decode_sidecar_mesh(self._sharded_meshes, row)
 
     # ── Collation ─────────────────────────────────────────────────────────────
 

@@ -1,0 +1,12 @@
+class_name: PartField
+ckpt_path: "checkpoints/partfield/model_objaverse.ckpt"
+ckpt_url: "https://huggingface.co/mikaelaangel/partfield-ckpt/resolve/main/model_objaverse.ckpt"
+n_pc_points: 100000        # surface samples fed to the PVCNN encoder
+normalize_extent: 0.9      # longest bbox axis mapped to [-0.9, 0.9]
+n_sample_each: 10000       # triplane-query chunk size (OOM guard)
+triplane_channels_low: 128
+triplane_channels_high: 512
+sdf_channels: 64           # feature dim = triplane_channels_high - sdf_channels = 448
+pvcnn_z_triplane_channels: 256
+pvcnn_z_triplane_resolution: 128
+freeze: true

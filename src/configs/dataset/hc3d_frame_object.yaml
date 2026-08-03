@@ -25,6 +25,8 @@ split: test
 
 # filter_is_real: null → all data  |  false → synthetic only  |  true → real only
 filter_is_real: false
+filter_has_kpts: true
+filter_count_max: 1000 # per category if categories is applied
 
 modalities:
   - rgb                    # GenPose2 input
@@ -59,8 +61,6 @@ modalities:
 #   - obj_syms
 #   - category
 
-filter_has_kpts: true
-filter_count_max: 1000 # per category if categories is applied
 
 
 transform:

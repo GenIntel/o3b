@@ -496,6 +496,7 @@ class FrameObjectBatch:
     fo_mask:          Optional[Tensor]       = None  # (B, H, W)
     obj_kpts2d_mask:  Optional[Tensor]       = None  # (B, K)    bool
     cam_tform4x4_obj: Optional[Tensor]       = None  # (B, 4, 4)
+    cam_tform4x4_obj_ncds: Optional[Tensor]  = None  # (B, 4, 4) ncds→cam
     # object
     pts3d:                   Optional[Tensor] = None  # (B, N, 3)
     pts3d_feats:             Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
@@ -505,7 +506,7 @@ class FrameObjectBatch:
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
     obj_kpts3d:              Optional[Tensor] = None  # (B, K, 3)
     obj_kpts3d_mask:         Optional[Tensor] = None  # (B, K)    bool
-    category:                Optional[Tensor] = None  # (B,)  int64
+    category:                Optional[object] = None  # (B,) int64, or list[str] of names
     mesh:                    Optional[Mesh]   = None  # shared mesh for all B viewpoints
 
 
@@ -655,6 +656,7 @@ def collate_frame_objects(
         fo_mask          = _get("fo_mask"),
         obj_kpts2d_mask  = _get("obj_kpts2d_mask"),
         cam_tform4x4_obj = _get("cam_tform4x4_obj"),
+        cam_tform4x4_obj_ncds = _get("cam_tform4x4_obj_ncds"),
         pts3d                   = _get("pts3d"),
         pts3d_feats             = _get("pts3d_feats"),
         pts3d_feats_mask        = _get("pts3d_feats_mask"),
@@ -663,10 +665,15 @@ def collate_frame_objects(
         obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj"),
         obj_kpts3d              = _get("obj_kpts3d"),
         obj_kpts3d_mask         = _get("obj_kpts3d_mask"),
-        category = _stack_field([
-            torch.tensor(s.category) if s.category is not None else None
-            for s in samples
-        ]) if (include is None or "category" in include) else None,
+        # category may be an int id or a name string (HouseCorr3DFrame stores names)
+        category = (
+            [s.category for s in samples]
+            if any(isinstance(s.category, str) for s in samples)
+            else _stack_field([
+                torch.tensor(s.category) if s.category is not None else None
+                for s in samples
+            ])
+        ) if (include is None or "category" in include) else None,
     )
 
 

@@ -59,9 +59,7 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             print(f"WARNING: could not build method {cls_name!r} ({exc}); "
                   f"running task on raw batch (GT/oracle).")
 
-    print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
-
-    # ── wandb init ────────────────────────────────────────────────────────────
+    # ── wandb init (before training so per-batch train losses are logged) ─────
     _wb = None
     wandb_cfg = run_raw.get("wandb") or {}
     if wandb_cfg is not False:
@@ -78,6 +76,22 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             print(f"W&B:     project={wb_project}  run={run_name}")
         except ImportError:
             print("INFO: wandb not installed — skipping W&B logging")
+
+    # ── training (optional) ───────────────────────────────────────────────────
+    # Methods exposing train_method train themselves before evaluation:
+    # needs_training() decides (train.dataset_train configured and the loaded
+    # checkpoint's epoch below train.epochs), and the method creates its
+    # training dataset lazily from that config, like its pose model. Batch
+    # losses are logged to the active wandb run under train/.
+    if method is not None and hasattr(method, "train_method"):
+        needs_training = getattr(method, "needs_training", None)
+        if callable(needs_training) and needs_training():
+            print("Train:   running method training")
+            method.train_method()
+        else:
+            print("Train:   skipped (no train dataset or checkpoint fully trained)")
+
+    print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
 
     accum: dict[str, list] = {}
     n_samples = 0
@@ -114,7 +128,9 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
                     import numpy as np
                     wb_log[k] = _wb.Image(v) if isinstance(v, np.ndarray) else v
             wb_log["batch/n_samples"] = n_samples
-            _wb.log(wb_log, step=batch_idx)
+            # no explicit step: training already advanced the global wandb
+            # step, and steps must be monotonically increasing
+            _wb.log(wb_log)
 
         bar.set_postfix({"samples": n_samples,
                          **{k: round(sum(v) / len(v), 4) for k, v in accum.items()}})

@@ -1,22 +1,46 @@
-# Sharded hc3d_frame_object filtered to a single category (toy_boat).
-#
-# Items are materialised once into
-#   <path_preprocess>/sharded/<sharded_name>
-# and loaded from there on subsequent runs. The category name is part of the
-# sharded_name so per-category shards live side by side.
-#
-# o3b dataset viz -d hc3d_frame_object_cat_sharded
+# o3b dataset fetch -d hc3d_frame_object
+# o3b dataset index -d hc3d_frame_object --remove
+# o3b dataset index -d hc3d_frame_object --remote -p slurm_lmbl40
+# (filter_count_max stops indexing after this many filter-matching rows; also limits viz)
+
+
+# o3b dataset preprocess -d hc3d_frame_object --remote -p slurm_lmbl40
+
+# o3b dataset viz   -d hc3d_frame_object_cat_sharded
 
 defaults:
   - hc3d_frame_object
   - _self_
 
-# Single category to filter for; referenced below via ${category} so the
-# category name is also reflected in the sharded dataset directory.
-category: facial_cream
-
+category: "hair_dryer"
 categories:
   - ${category}
+sharded_name:  hc3d_frame_object_s${filter_count_max}_c${category}
 
-sharded_name: hc3d_frame_object_${category}
-# sharded_override: false
+sharded_override: true #  true
+# overrides the (already-lowered) default from hc3d_frame_object_pair.yaml;
+# kept explicit here since this is the config that actually triggers the build
+
+#filter_count_max: 10 # per category if categories is applied
+
+img_size: 512
+sharded_shard_size: 100 # cache batch size and final shard size
+# note that especially cache batch size heavily affects /dev/shm when using shared memory
+# worker processes for the one-off shard build (items are loaded + serialised to
+# bytes in the workers, so /dev/shm tensor transport is not involved); 0 = sequential
+
+# actually it seems like /dev/shm is currently not affected probably only when 
+#   torch.multiprocessing.set_sharing_strategy("file_system") instead of 
+#   torch.multiprocessing.set_sharing_strategy("file_descriptor")  (DEFAULT)
+
+sharded_num_workers: 4
+# perhaps this should be ram_in_gb / sharded_worker_gb = 20 / 5 = 4
+# sharded_worker_gb: see that each worker usually creates their own dataset copy
+
+#  /data/lmbraid19/sommerl/datasets/Omni6DPose_Preprocess/sharded/hc3d_frame_object_pair_hair_dryer 
+
+
+# why does it break?
+# -> perhaps too much ram when prepprocessing meshes on the fly
+#   -> that would mean when running it again, it has to preprocess less, so that it works on 2nd time.
+

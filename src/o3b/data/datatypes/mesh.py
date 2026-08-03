@@ -183,8 +183,8 @@ def _extract_vert_feats(
 
     print(feature_model_name)
     
-    # ── Models that do their own rendering (diff3f, densematcher/dm) ────────────
-    _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip"}
+    # ── Models that consume the mesh directly (own rendering or 3D encoder) ─────
+    _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip", "partfield"}
     if feature_model_name.lower() in _SELF_RENDERING:
         from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch

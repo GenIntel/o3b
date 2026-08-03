@@ -31,6 +31,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "PointNet2":       "o3b.model.pointnet2.model",
     "LitePT":          "o3b.model.litept.model",
     "Diff3F":          "o3b.model.diff3f.model",
+    "PartField":       "o3b.model.partfield.model",
     "DenseMatcher":    "o3b.model.densematcher.model",
     "GenPose2":        "o3b.model.obj_pose.genpose2.model",
     "ResNetHead":      "o3b.model.resnet.model",

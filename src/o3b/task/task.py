@@ -16,6 +16,8 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "ObjectTask":       "o3b.task.object.task",
     "Crsp3DNNTask":     "o3b.task.crsp3d_nn.task",
     "CamCrsp3DNNTask":  "o3b.task.cam_crsp3d_nn.task",
+    "CamApp2D3D":       "o3b.task.cam_app2d3d.task",
+    "CamGeo2D3D":       "o3b.task.cam_geo2d3d.task",
 }
 
 

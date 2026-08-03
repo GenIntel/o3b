@@ -38,3 +38,4 @@ filter_count_max: 50000 # per category if categories is applied
 # 10K -> 500K
 # 50K -> 2.5M  # actually maximum is probably around 50K per category
 # 100K -> 5M 
+
