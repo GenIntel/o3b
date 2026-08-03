@@ -401,6 +401,25 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     return "\n".join(lines) + "\n"
 
 
+def _find_setup_script(local_repo_root: str = "") -> Path:
+    """Locate setup_slurm.sh, which ships with o3b (<o3b>/setup/setup_slurm.sh).
+
+    It used to live in the superproject (housecorr3d/setup/), so that location is
+    still accepted as a fallback for checkouts whose o3b submodule predates the
+    move. The script itself is repo-agnostic — it installs whatever REPO_URL /
+    REPO_NAME it is handed.
+    """
+    candidates = [Path(__file__).resolve().parents[2] / "setup" / "setup_slurm.sh"]
+    if local_repo_root:
+        candidates.append(Path(local_repo_root) / "setup" / "setup_slurm.sh")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Setup script not found. Looked in:\n  " + "\n  ".join(str(c) for c in candidates)
+    )
+
+
 def _resolve_env_layout(cfg, repo_path: str, repo_name: str = "") -> dict:
     """Resolve the python environment a platform installs into and runs from.
 
@@ -531,10 +550,7 @@ def _run_platform_setup(args):
         repo_url  = ""
         repo_name = Path(local_repo_root).name
 
-    # Find the setup script in the parent repo
-    setup_script_local = Path(local_repo_root) / "setup" / "setup_slurm.sh"
-    if not setup_script_local.is_file():
-        raise FileNotFoundError(f"Setup script not found: {setup_script_local}")
+    setup_script_local = _find_setup_script(local_repo_root)
 
     remote_setup  = f"{path_ws}/setup_slurm.sh"
     remote_sbatch = f"{path_ws}/setup_slurm_job.sh"
@@ -1225,7 +1241,7 @@ def _run_platform_setupi(args):
     cfg, _ = _load_platform_config(args.platform)
     username = cfg.get("username", "")
 
-    # Locate setup_slurm.sh in the outermost git repo (same logic as _run_platform_setup)
+    # the superproject is only the fallback location (same logic as _run_platform_setup)
     try:
         submodule_root = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"], text=True, cwd=Path(__file__).parent,
@@ -1237,9 +1253,7 @@ def _run_platform_setupi(args):
     except subprocess.CalledProcessError:
         local_repo_root = str(Path.cwd())
 
-    setup_script_local = Path(local_repo_root) / "setup" / "setup_slurm.sh"
-    if not setup_script_local.is_file():
-        raise FileNotFoundError(f"Setup script not found: {setup_script_local}")
+    setup_script_local = _find_setup_script(local_repo_root)
 
     remote_setup = f"{path_ws}/setup_slurm.sh" if path_ws else "~/setup_slurm.sh"
 
