@@ -43,7 +43,7 @@ sharded_num_workers: 4
 # perhaps this should be ram_in_gb / sharded_worker_gb = 20 / 5 = 4
 # sharded_worker_gb: see that each worker usually creates their own dataset copy
 
-filter_count_max: 50000 # 50000 # per category if categories is applied
+filter_count_max: 1000 # 50000 # per category if categories is applied
 
 sharded_transform:
   class_name: CropCamBBox2D
