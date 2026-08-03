@@ -401,6 +401,61 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     return "\n".join(lines) + "\n"
 
 
+def _resolve_env_layout(cfg, repo_path: str, repo_name: str = "") -> dict:
+    """Resolve the python environment a platform installs into and runs from.
+
+    With ``use_conda: False`` (default) that is a venv inside the repo, with
+    ``use_conda: True`` a conda env under ``<path_conda>/envs/``. The same
+    values are exported to setup_slurm.sh (so it installs there) and used by
+    `_srun_env_lines` (so `o3b run` / `o3b runi` activate the same env), which
+    is why the naming lives in one place.
+
+    Returns use_conda / path_conda / cuda_version / env_path plus ``env_vars``,
+    the fragment to merge into the setup script's environment.
+    """
+    import os
+
+    path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
+    python_version = str(cfg.get("python_version", "3.10"))
+    torch_version  = str(cfg.get("torch_version", "2.6.0"))
+    deps           = list(cfg.get("deps", []) or [])
+    deps_tag       = "_".join(sorted(deps)) if deps else ""
+    use_conda      = str(cfg.get("use_conda", False)).lower() in ("true", "1", "yes")
+    path_ws        = cfg.get("path_ws", "") or ""
+    path_conda     = str(cfg.get("path_conda", "") or (f"{path_ws}/miniconda3" if path_ws else ""))
+    # conda ships its own cuda-toolkit; without an explicit cuda_version take the
+    # one named by the system install (…/cuda-12.4 → 12.4)
+    cuda_version   = str(cfg.get("cuda_version", "") or
+                         os.path.basename(path_cuda).replace("cuda-", ""))
+
+    cuda_tag  = "cu" + (cuda_version if use_conda
+                        else os.path.basename(path_cuda).replace("cuda-", "")).replace(".", "")
+    py_tag    = "py" + python_version.replace(".", "")
+    torch_tag = "torch" + ".".join(torch_version.split(".")[:2]).replace(".", "")
+    env_tag   = f"{py_tag}_{cuda_tag}_{torch_tag}" + (f"_{deps_tag}" if deps_tag else "")
+
+    if use_conda:
+        name     = f"{repo_name or Path(repo_path).name}_{env_tag}"
+        env_path = f"{path_conda}/envs/{name}" if path_conda else ""
+    else:
+        env_path = f"{repo_path}/venv_{env_tag}" if repo_path else ""
+
+    return {
+        "use_conda":    use_conda,
+        "path_conda":   path_conda,
+        "cuda_version": cuda_version,
+        "cuda_tag":     cuda_tag,
+        "env_path":     env_path,
+        "env_vars": {
+            "USE_CONDA":      "true" if use_conda else "false",
+            "PATH_CONDA":     path_conda,
+            "CUDA_VERSION":   cuda_version,
+            "CONDA_ENV_PATH": env_path if use_conda else "",
+            "VENV_PATH":      "" if use_conda else env_path,
+        },
+    }
+
+
 def _run_platform_setup(args):
     import re
     import subprocess
@@ -455,8 +510,10 @@ def _run_platform_setup(args):
         repo_name = "housecorr3d"
         local_repo_root = str(Path.cwd())
 
-    # Inject the GitHub token into the HTTPS remote URL so git clone on the
-    # cluster can authenticate through the proxy without SSH keys.
+    # The remote URL stays token-free: authentication on the cluster goes through
+    # the GITHUB_TOKEN-backed credential helper installed by the setup script.
+    # Embedding the token here would freeze it inside the clone's .git/config,
+    # where a later rotation could never reach it.
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
     try:
         raw_remote = subprocess.check_output(
@@ -466,9 +523,9 @@ def _run_platform_setup(args):
         # Convert SSH → HTTPS if needed: git@github.com:Org/Repo → https://github.com/Org/Repo
         if raw_remote.startswith("git@"):
             raw_remote = re.sub(r"git@github\.com:", "https://github.com/", raw_remote)
-        # Strip any existing token then prepend the new one
+        # Strip any existing token
         plain = re.sub(r"https://[^@]+@", "https://", raw_remote)
-        repo_url  = plain.replace("https://", f"https://{token}@") if token else plain
+        repo_url  = plain
         repo_name = Path(re.sub(r"\.git$", "", plain.split("/")[-1])).name
     except subprocess.CalledProcessError:
         repo_url  = ""
@@ -489,6 +546,9 @@ def _run_platform_setup(args):
         print(f"Copying {local} → {target}")
         subprocess.run(["scp", str(local), target], check=True)
 
+    # venv (default) or conda env — same resolution as `o3b run` / `o3b runi`
+    env_layout = _resolve_env_layout(cfg, f"{path_ws}/{repo_name}", repo_name)
+
     # Build sbatch wrapper with #SBATCH headers from the platform config
     _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
     env_vars = {
@@ -497,8 +557,9 @@ def _run_platform_setup(args):
         "PYTHON_VERSION":  python_version,
         "TORCH_VERSION":   torch_version,
         **install_flags,
+        **env_layout["env_vars"],
         "DEPS_TAG":              deps_tag,
-        "REPO_URL":        repo_url,   # housecorr3d HTTPS URL with token
+        "REPO_URL":        repo_url,   # housecorr3d HTTPS URL, token-free
         "REPO_NAME":       repo_name,  # derived from remote URL, e.g. HouseCorr3Dv2
         "GITHUB_TOKEN":    token,
         "BRANCH":          branch,
@@ -525,9 +586,14 @@ def _run_platform_setup(args):
             "PULL_SUBMODULES": "false",
             "HTTP_PROXY": "", "HTTPS_PROXY": "", "http_proxy": "", "https_proxy": "",
         }
-        venv_path = local_root / "venv"
-        if venv_path.is_dir():
-            local_env["VENV_PATH"] = str(venv_path)      # reuse the existing venv
+        if env_layout["use_conda"]:
+            # the conda env lives under path_conda, not in the repo — rename it
+            # after the local checkout directory
+            local_env.update(_resolve_env_layout(cfg, str(local_root), local_root.name)["env_vars"])
+        else:
+            venv_path = local_root / "venv"
+            if venv_path.is_dir():
+                local_env["VENV_PATH"] = str(venv_path)  # reuse the existing venv
         local_copy = _save_script_locally(f"setup_{repo_name}_script", setup_script_local.read_text())
         print(f"Local setup (ssh: {ssh_host!r}) — running {setup_script_local} in {local_root}")
         print(f"  saved locally: {local_copy}")
@@ -789,7 +855,12 @@ def _run_platform_status(args):
 
 
 def _platform_srun_context(platform: str):
-    """Return (ssh_host, srun_base, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache) for srun commands."""
+    """Return the srun context for a platform.
+
+    (ssh_host, srun_base, repo_path, env_path, path_cuda, path_ws,
+     hf_datasets_cache, use_conda, path_conda) — env_path is the venv directory
+    or, with use_conda, the conda env prefix.
+    """
     import os, re, subprocess
     from omegaconf import OmegaConf
 
@@ -824,10 +895,6 @@ def _platform_srun_context(platform: str):
     skip_subs      = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
     hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
 
-    cuda_tag  = "cu" + os.path.basename(path_cuda).replace("cuda-", "").replace(".", "")
-    py_tag    = "py" + python_version.replace(".", "")
-    torch_tag = "torch" + ".".join(torch_version.split(".")[:2]).replace(".", "")
-
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
     try:
         submodule_root = subprocess.check_output(
@@ -843,15 +910,15 @@ def _platform_srun_context(platform: str):
         if raw_remote.startswith("git@"):
             raw_remote = re.sub(r"git@github\.com:", "https://github.com/", raw_remote)
         plain    = re.sub(r"https://[^@]+@", "https://", raw_remote)
-        repo_url  = plain.replace("https://", f"https://{token}@") if token else plain
+        repo_url  = plain   # token-free; auth comes from the GITHUB_TOKEN credential helper
         repo_name = Path(re.sub(r"\.git$", "", plain.split("/")[-1])).name
     except subprocess.CalledProcessError:
         repo_url  = ""
         repo_name = ""
 
-    repo_path = f"{path_ws}/{repo_name}" if (path_ws and repo_name) else path_ws
-    _venv_suffix = f"_{deps_tag}" if deps_tag else ""
-    venv_path = f"{repo_path}/venv_{py_tag}_{cuda_tag}_{torch_tag}{_venv_suffix}" if repo_path else ""
+    repo_path  = f"{path_ws}/{repo_name}" if (path_ws and repo_name) else path_ws
+    env_layout = _resolve_env_layout(cfg, repo_path, repo_name)
+    env_path   = env_layout["env_path"]
 
     srun = (
         f"srun"
@@ -889,20 +956,25 @@ def _platform_srun_context(platform: str):
         f",PULL_SUBMODULES={pull_subs}"
         f",SKIP_SUBMODULES={skip_subs}"
         f",GITHUB_TOKEN={token}"
-        f",CUDA_HOME={path_cuda}"
-        f",CUDACXX={path_cuda}/bin/nvcc"
+        + "".join(f",{k}={v}" for k, v in env_layout["env_vars"].items()) +
         f",DEPS_TAG={deps_tag}"
     )
+    # Under conda the toolchain comes from the env (CONDA_PREFIX), exported by
+    # the preamble once the env is active.
+    if not env_layout["use_conda"]:
+        srun += f",CUDA_HOME={path_cuda},CUDACXX={path_cuda}/bin/nvcc"
 
-    return ssh_host, srun, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache
+    return (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+            env_layout["use_conda"], env_layout["path_conda"])
 
 
-def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str,
-                    hf_datasets_cache: str = "") -> list[str]:
+def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
+                    hf_datasets_cache: str = "", use_conda: bool = False,
+                    path_conda: str = "") -> list[str]:
     """Shell lines that run on the compute node before the actual command.
 
     Order: CUDA env → conditional setup script → conditional pull/checkout
-           → venv activation → cd into repo.
+           → env activation (venv or conda) → cd into repo.
     The SETUP / PULL / PULL_SUBMODULES / BRANCH values come from the srun
     --export env vars so the same script works regardless of platform config.
     """
@@ -912,13 +984,18 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
     lines = [
         _echo("sourcing ~/.bashrc"),
         "[ -f ~/.bashrc ] && . ~/.bashrc",
-        f"export CUDA_HOME={path_cuda}",
-        f"export CUDACXX={path_cuda}/bin/nvcc",
-        f"export PATH={path_cuda}/bin:$PATH",
-        f"export LD_LIBRARY_PATH={path_cuda}/lib64:${{LD_LIBRARY_PATH:-}}",
-        f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
-        f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/x86_64-linux/lib",
     ]
+    # With conda the CUDA toolchain lives inside the env and is exported after
+    # activation below; pointing at the system install here would shadow it.
+    if not use_conda:
+        lines += [
+            f"export CUDA_HOME={path_cuda}",
+            f"export CUDACXX={path_cuda}/bin/nvcc",
+            f"export PATH={path_cuda}/bin:$PATH",
+            f"export LD_LIBRARY_PATH={path_cuda}/lib64:${{LD_LIBRARY_PATH:-}}",
+            f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
+            f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/x86_64-linux/lib",
+        ]
     if hf_datasets_cache:
         lines.append(f"export HF_DATASETS_CACHE={hf_datasets_cache}")
     # acquire the same directory lock used by setup_slurm.sh so concurrent
@@ -939,6 +1016,35 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
             _echo("setup_slurm.sh done", "    "),
             f'fi',
         ]
+    # github auth: the helper stored in ~/.gitconfig references ${GITHUB_TOKEN}
+    # instead of embedding it, so a rotated token takes effect on the next job.
+    # Legacy `url."https://<token>@github.com/".insteadOf` sections carried the
+    # token in the config *key*: rotating appended a second section, and git
+    # breaks insteadOf ties by config order, so the oldest token kept winning.
+    if repo_path:
+        lines += [
+            _echo("configuring github credentials"),
+            # must be exported: the credential helper runs as a git subprocess
+            'export GITHUB_TOKEN="${GITHUB_TOKEN:-}"',
+            "for _k in $(git config --global --name-only --get-regexp "
+            "'^url\\..*github\\.com.*\\.insteadof$' 2>/dev/null || true); do",
+            '    git config --global --remove-section "${_k%.insteadof}" 2>/dev/null || true',
+            "done",
+            'if [ -n "${GITHUB_TOKEN:-}" ]; then',
+            '    git config --global --replace-all credential."https://github.com".helper '
+            "'"'!f() { [ "$1" = get ] || exit 0; echo username=x-access-token; '
+            'echo "password=${GITHUB_TOKEN}"; }; f'"'",
+            "fi",
+            "export GIT_TERMINAL_PROMPT=0",
+            # clones made by older revisions have the token baked into .git/config,
+            # which makes git skip the credential helper entirely
+            f'_url="$(git -C {repo_path} remote get-url origin 2>/dev/null || true)"',
+            'case "${_url}" in',
+            '    https://*@github.com/*)',
+            f'        git -C {repo_path} remote set-url origin '
+            '"https://github.com/${_url#*@github.com/}" ;;',
+            "esac",
+        ]
     # checkout branch and pull when PULL=true
     if repo_path:
         lines += [
@@ -952,9 +1058,7 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
             _echo("git pull done", "    "),
             f'fi',
             f'if [ "${{PULL_SUBMODULES:-false}}" = "true" ]; then',
-            f'    if [ -n "${{GITHUB_TOKEN:-}}" ]; then',
-            f'        git config --global url."https://${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"',
-            f'    fi',
+            f'    git -C {repo_path} submodule sync --recursive',
             f'    if [ -z "${{SKIP_SUBMODULES:-}}" ]; then',
             _echo("submodule update --init --recursive (all submodules)", "        "),
             f'        git -C {repo_path} submodule update --init --recursive',
@@ -979,10 +1083,28 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
             f'exec 200>&-',
             _echo("lock released"),
         ]
-    if venv_path:
+    if env_path and use_conda:
         lines += [
-            _echo(f"activating venv {venv_path}"),
-            f"[ -d {venv_path} ] && source {venv_path}/bin/activate",
+            _echo(f"activating conda env {env_path}"),
+            # conda's shell hook and activate scripts are not `set -u` clean
+            "case $- in *u*) _o3b_had_u=1 ;; *) _o3b_had_u=0 ;; esac",
+            "set +u",
+            f'eval "$({path_conda}/bin/conda shell.bash hook)"',
+            f"conda activate {env_path}",
+            'if [ "${_o3b_had_u}" = "1" ]; then set -u; fi',
+            "hash -r",   # a ~/.local/bin/pip|python may shadow the env's in the hash cache
+            # the cuda-toolkit is installed inside the env (see setup_slurm.sh)
+            "export CUDA_HOME=${CONDA_PREFIX}",
+            "export CUDACXX=${CUDA_HOME}/bin/nvcc",
+            "export PATH=${CUDA_HOME}/bin:$PATH",
+            "export LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}",
+            "export CPATH=${CPATH:-}:${CUDA_HOME}/targets/x86_64-linux/include",
+            "export LIBRARY_PATH=${LIBRARY_PATH:-}:${CUDA_HOME}/targets/x86_64-linux/lib",
+        ]
+    elif env_path:
+        lines += [
+            _echo(f"activating venv {env_path}"),
+            f"[ -d {env_path} ] && source {env_path}/bin/activate",
         ]
     if repo_path:
         lines.append(f"cd {repo_path}")
@@ -994,11 +1116,13 @@ def _run_platform_runi(args):
     import subprocess
     import uuid
 
-    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache = _platform_srun_context(args.platform)
+    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+     use_conda, path_conda) = _platform_srun_context(args.platform)
 
     # Write a small activation script so bash --init-file can source it without
     # wrapping srun in a bash -c subshell (which breaks the PTY).
-    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws, hf_datasets_cache)
+    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+                                 use_conda=use_conda, path_conda=path_conda)
     remote_init = f"{path_ws}/.od3d_init" if path_ws else "~/.od3d_init"
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_init}"],
@@ -1094,7 +1218,8 @@ def _run_platform_setupi(args):
     import re
     import subprocess
 
-    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache = _platform_srun_context(args.platform)
+    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+     use_conda, path_conda) = _platform_srun_context(args.platform)
 
     cfg, _ = _load_platform_config(args.platform)
     username = cfg.get("username", "")
@@ -1126,7 +1251,8 @@ def _run_platform_setupi(args):
 
     _scp(setup_script_local, remote_setup)
 
-    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws, hf_datasets_cache)
+    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+                                 use_conda=use_conda, path_conda=path_conda)
     init_lines += [
         "",
         f'echo "================================================================"',
@@ -2217,10 +2343,6 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     path_home      = cfg.get("path_home", path_ws)
     hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
 
-    cuda_tag  = "cu" + os.path.basename(path_cuda).replace("cuda-", "").replace(".", "")
-    py_tag    = "py" + python_version.replace(".", "")
-    torch_tag = "torch" + ".".join(torch_version.split(".")[:2]).replace(".", "")
-
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
     try:
         submodule_root = subprocess.check_output(
@@ -2236,15 +2358,15 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         if raw_remote.startswith("git@"):
             raw_remote = re.sub(r"git@github\.com:", "https://github.com/", raw_remote)
         plain    = re.sub(r"https://[^@]+@", "https://", raw_remote)
-        repo_url  = plain.replace("https://", f"https://{token}@") if token else plain
+        repo_url  = plain   # token-free; auth comes from the GITHUB_TOKEN credential helper
         repo_name = Path(re.sub(r"\.git$", "", plain.split("/")[-1])).name
     except subprocess.CalledProcessError:
         repo_url  = ""
         repo_name = ""
 
-    repo_path = f"{path_ws}/{repo_name}" if (path_ws and repo_name) else path_ws
-    _venv_suffix = f"_{deps_tag}" if deps_tag else ""
-    venv_path = f"{repo_path}/venv_{py_tag}_{cuda_tag}_{torch_tag}{_venv_suffix}" if repo_path else ""
+    repo_path  = f"{path_ws}/{repo_name}" if (path_ws and repo_name) else path_ws
+    env_layout = _resolve_env_layout(cfg, repo_path, repo_name)
+    env_path   = env_layout["env_path"]
 
     _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
     env_vars = {
@@ -2253,9 +2375,11 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         "PYTHON_VERSION":  python_version,
         "TORCH_VERSION":   torch_version,
         **install_flags,
+        **env_layout["env_vars"],
         "DEPS_TAG":              deps_tag,
         "REPO_URL":        repo_url,
         "REPO_NAME":       repo_name,
+        "GITHUB_TOKEN":    token,
         "SETUP":           setup,
         "BRANCH":          branch,
         "PULL":            pull,
@@ -2272,7 +2396,9 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     # run script: env preamble (CUDA, venv, cd, setup/pull) + the actual command
     run_script_content = "\n".join(
         ["#!/usr/bin/env bash", "set -euo pipefail", ""] +
-        _srun_env_lines(path_cuda, venv_path, repo_path, path_ws, hf_datasets_cache) +
+        _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+                        use_conda=env_layout["use_conda"],
+                        path_conda=env_layout["path_conda"]) +
         ["", command]
     )
     remote_run_script = f"{path_ws}/.bench_run_{job_name}_{ts}.sh"
