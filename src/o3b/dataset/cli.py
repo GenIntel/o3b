@@ -4,6 +4,7 @@ o3b dataset CLI.
 Usage:
   od3d_dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
   od3d_dataset index  -d hc3d_object        [--db index.db] [--platform PLATFORM]
+  od3d_dataset init   -d hc3d_object        [--limit N] [--platform PLATFORM]
   od3d_dataset viz    -d hc3d_object_pair   [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
 
 Pair datasets (hc3d_object_pair, hc3d_frame_object_pair) need no separate index
@@ -106,6 +107,16 @@ def main(argv=None) -> None:
         help="SQLite output file (default: <path_preprocess>/index.db)",
     )
 
+    p_init = sub.add_parser(
+        "init",
+        help="Instantiate the dataset (builds the sharded cache if configured) without visualising",
+    )
+    _add_config(p_init)
+    p_init.add_argument(
+        "--limit", type=int, default=0, metavar="N",
+        help="Additionally load the first N items after construction (default: 0)",
+    )
+
     p_tform = sub.add_parser(
         "tform",
         help="Interactive axis-convention viewer — determine obj_gl_tform4x4_obj_raw for the dataset",
@@ -150,6 +161,8 @@ def main(argv=None) -> None:
         cls.fetch(cfg, url=args.url)
     elif args.command == "index":
         cls.index(cfg, db=args.db)
+    elif args.command == "init":
+        cls.init(cfg, limit=args.limit)
     elif args.command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True

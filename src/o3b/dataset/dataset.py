@@ -471,6 +471,28 @@ class ConfigurableDataset(_TorchDataset):
         raise NotImplementedError(f"{cls.__name__} does not implement index()")
 
     @classmethod
+    def init(cls, cfg: "DatasetConfig", *, limit: int = 0, **_) -> None:
+        """Instantiate the dataset without visualising it.
+
+        Same construction path as `visualize`, so any one-off setup work the
+        constructor performs — most notably building the sharded cache under
+        <path_preprocess>/sharded/<sharded_name> — happens here.  With
+        ``limit > 0`` the first N items are additionally loaded, which
+        exercises the read path (and, for a sharded config, the cache that was
+        just written).
+        """
+        dataset = cls(cfg)
+        n = len(dataset)
+        print(f"Initialised {cls.__name__} (item_type={ItemType(cfg.item_type).value}) — {n} items")
+        if getattr(dataset, "_sharded", None) is not None:
+            print(f"  sharded cache: {dataset._sharded_dir()}")
+
+        if limit > 0 and n:
+            from tqdm import tqdm
+            for i in tqdm(range(min(limit, n)), desc="Loading", unit="item"):
+                dataset[i]
+
+    @classmethod
     def visualize(
         cls,
         cfg: "DatasetConfig",

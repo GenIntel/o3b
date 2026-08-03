@@ -4,6 +4,7 @@ o3b — o3b command-line interface.
 Usage:
   o3b dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
   o3b dataset index  -d hc3d_object        [--db FILE] [--platform PLATFORM] [--remote]
+  o3b dataset init   -d hc3d_object        [--limit N] [--platform PLATFORM] [--remote]
   o3b dataset viz    -d hc3d_object_pair   [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
@@ -24,7 +25,7 @@ from pathlib import Path
 # ── dataset sub-parser ────────────────────────────────────────────────────────
 
 def _build_dataset_parser(sub):
-    p = sub.add_parser("dataset", help="Dataset commands (fetch, index, viz)")
+    p = sub.add_parser("dataset", help="Dataset commands (fetch, index, init, viz)")
     ds_sub = p.add_subparsers(dest="dataset_command", required=True)
 
     def _add_config(q):
@@ -58,6 +59,21 @@ def _build_dataset_parser(sub):
         "--remote", action="store_true",
         help="Run this command on the --platform's compute node via `o3b platform run` "
              "instead of indexing locally",
+    )
+
+    p_init = ds_sub.add_parser(
+        "init",
+        help="Instantiate the dataset (builds the sharded cache if configured) without visualising",
+    )
+    _add_config(p_init)
+    p_init.add_argument(
+        "--limit", type=int, default=0, metavar="N",
+        help="Additionally load the first N items after construction (default: 0)",
+    )
+    p_init.add_argument(
+        "--remote", action="store_true",
+        help="Run this command on the --platform's compute node via `o3b platform run` "
+             "instead of initialising locally",
     )
 
     p_vis = ds_sub.add_parser("viz", help="Summarize and optionally render dataset objects")
@@ -132,25 +148,28 @@ def _build_dataset_parser(sub):
     )
 
 
-def _run_dataset_index_remote(args) -> None:
-    """Re-invoke `o3b dataset index` (minus --remote) on the platform's compute node."""
+def _run_dataset_remote(args) -> None:
+    """Re-invoke `o3b dataset <cmd>` (minus --remote) on the platform's compute node."""
     import shlex
 
-    parts = ["o3b", "dataset", "index", "-d", args.config.stem, "-p", args.platform]
-    if args.db:
+    command = args.dataset_command
+    parts = ["o3b", "dataset", command, "-d", args.config.stem, "-p", args.platform]
+    if getattr(args, "db", None):
         parts += ["--db", str(args.db)]
-    if args.remove:
+    if getattr(args, "remove", False):
         parts.append("--remove")
     if getattr(args, "max_index", None) is not None:
         parts += ["--max", str(args.max_index)]
+    if command == "init" and args.limit:
+        parts += ["--limit", str(args.limit)]
     remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
-    _run_platform_run_cmd(args.platform, remote_cmd, job_name=f"index_{args.config.stem}")
+    _run_platform_run_cmd(args.platform, remote_cmd, job_name=f"{command}_{args.config.stem}")
 
 
 def _run_dataset(args):
-    if args.dataset_command == "index" and getattr(args, "remote", False):
-        _run_dataset_index_remote(args)
+    if args.dataset_command in ("index", "init") and getattr(args, "remote", False):
+        _run_dataset_remote(args)
         return
 
     from o3b.dataset.cli import _load_class_from_config, _platform_to_dataset_overrides
@@ -162,6 +181,8 @@ def _run_dataset(args):
         cls.fetch(cfg, url=args.url)
     elif args.dataset_command == "index":
         cls.index(cfg, db=args.db, remove=args.remove, max_index=getattr(args, "max_index", None))
+    elif args.dataset_command == "init":
+        cls.init(cfg, limit=args.limit)
     elif args.dataset_command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True
