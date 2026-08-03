@@ -1097,9 +1097,10 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
             "export CUDA_HOME=${CONDA_PREFIX}",
             "export CUDACXX=${CUDA_HOME}/bin/nvcc",
             "export PATH=${CUDA_HOME}/bin:$PATH",
+            # conda uses lib/ + include/ where a system CUDA install uses lib64/
             "export LD_LIBRARY_PATH=${CONDA_PREFIX}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}",
-            "export CPATH=${CPATH:-}:${CUDA_HOME}/targets/x86_64-linux/include",
-            "export LIBRARY_PATH=${LIBRARY_PATH:-}:${CUDA_HOME}/targets/x86_64-linux/lib",
+            "export LIBRARY_PATH=${CONDA_PREFIX}/lib:${CUDA_HOME}/targets/x86_64-linux/lib:${LIBRARY_PATH:-}",
+            "export CPATH=${CONDA_PREFIX}/include:${CUDA_HOME}/targets/x86_64-linux/include:${CPATH:-}",
         ]
     elif env_path:
         lines += [
