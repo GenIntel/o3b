@@ -611,4 +611,8 @@ def _load_mesh(entry: Path):
             tform,
         )
     except Exception:
+        # do not stay silent: a parse failure here surfaces upstream as the
+        # misleading "Could not load mesh from <path>" (i.e. looks like a
+        # missing file) — e.g. a truncated GLB written by a concurrent worker.
+        logger.warning("failed to parse mesh %s", mesh_file, exc_info=True)
         return None, None

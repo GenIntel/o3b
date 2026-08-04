@@ -1,4 +1,7 @@
 from __future__ import annotations
+import contextlib
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -6,6 +9,41 @@ import igl
 import numpy as np
 from torch import Tensor
 import torch
+
+logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path):
+    """Exclusive advisory lock on ``<path>``, held for the duration of the block.
+
+    Used to serialise mesh conversion across the shard-build DataLoader workers:
+    consecutive frame rows of one object are dealt to different workers, so
+    without a lock every worker converts (and writes) the same mesh at once.
+
+    Degrades to a no-op when the filesystem doesn't support flock (some network
+    mounts); the tmp-file + ``os.replace`` in ``Mesh.save`` keeps concurrent
+    writers safe on its own, the lock only avoids the duplicated work.
+    """
+    import fcntl
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o666)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as e:
+        logger.debug("could not lock %s (%s) — proceeding unlocked", path, e)
+        if fd is not None:
+            os.close(fd)
+            fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def weld_mesh(
@@ -50,14 +88,33 @@ class Mesh:
     vert_feats:  Optional[Tensor] = None  # (V, C) float — per-vertex feature vectors
 
     def save(self, path: Path) -> None:
-        """Export this mesh to a GLB file, and vert_feats to a sibling .pt file."""
+        """Export this mesh to a GLB file, and vert_feats to a sibling .pt file.
+
+        Both files are written to a process-unique temporary name and then
+        ``os.replace``d into place, so a concurrent reader never observes a
+        half-written GLB (which trimesh reports as an unparseable file).  The
+        feature sidecar is committed *before* the GLB, since ``load`` keys off
+        the GLB and then looks for the sidecar.
+        """
         from o3b.io import _mesh_to_trimesh
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _mesh_to_trimesh(self).export(str(path))
+        # keep the real extension last — trimesh picks the export format from it
+        tmp_name = lambda p: p.with_name(f".{p.stem}.{os.getpid()}.tmp{p.suffix}")
+
         if self.vert_feats is not None:
             feats_path = path.parent / (path.stem + "_vert_feats.pt")
-            torch.save(self.vert_feats, feats_path)
+            feats_tmp  = tmp_name(feats_path)
+            torch.save(self.vert_feats, feats_tmp)
+            os.replace(str(feats_tmp), str(feats_path))
+
+        mesh_tmp = tmp_name(path)
+        try:
+            _mesh_to_trimesh(self).export(str(mesh_tmp))
+            os.replace(str(mesh_tmp), str(path))
+        finally:
+            if mesh_tmp.exists():
+                mesh_tmp.unlink()
 
     @classmethod
     def load(cls, path: Path) -> "Mesh":
@@ -117,17 +174,40 @@ class Mesh:
     ) -> "Mesh":
         """Return the converted mesh, generating and caching it on first call.
 
-        If *converted_path* exists it is loaded directly.  Otherwise the mesh
-        at *default_path* is loaded, converted to *mesh_type* (e.g. ``"mc64"``),
-        saved to *converted_path*, and returned.
+        If *converted_path* exists and loads, it is returned directly.
+        Otherwise the mesh at *default_path* is loaded, converted to *mesh_type*
+        (e.g. ``"mc64"``), saved to *converted_path*, and returned.
+
+        An existing file that fails to load (truncated leftover from a killed
+        run, or a corrupt cache entry) is not fatal: it is reconverted and
+        overwritten.  Conversion runs under a per-mesh lock so parallel workers
+        asking for the same object convert it once instead of N times.
         """
         converted_path = Path(converted_path)
-        if converted_path.exists():
-            return cls.load(converted_path)
-        mesh = cls.load(default_path)
-        converted = convert_mesh(mesh_type, mesh)
-        converted.save(converted_path)
+        mesh = cls._try_load(converted_path)
+        if mesh is not None:
+            return mesh
+
+        with _file_lock(converted_path.with_name(converted_path.name + ".lock")):
+            # another process may have converted it while we waited for the lock
+            mesh = cls._try_load(converted_path)
+            if mesh is not None:
+                return mesh
+            converted = convert_mesh(mesh_type, cls.load(default_path))
+            converted.save(converted_path)
         return converted
+
+    @classmethod
+    def _try_load(cls, path: Path) -> Optional["Mesh"]:
+        """``load`` the mesh at *path*, or return None if it is absent/unreadable."""
+        path = Path(path)
+        if not path.exists():
+            return None
+        try:
+            return cls.load(path)
+        except Exception as e:
+            logger.warning("ignoring unreadable cached mesh %s (%s) — reconverting", path, e)
+            return None
 
 
 def _parse_mc_type(type_str: str) -> dict:
