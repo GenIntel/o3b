@@ -300,14 +300,16 @@ def read_image_exr(fpath: Path):
     import cv2
     import numpy as np
     import torch
-    import os
 
-    os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+    # The OPENCV_IO_ENABLE_OPENEXR gate is armed once in o3b/__init__.py; do not
+    # flip it here — cv2 latches the codec state on the first EXR decode, so a
+    # read that lands while it is off disables EXR for the rest of the process.
     img = cv2.imread(str(fpath), cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    if img is None:
+        raise FileNotFoundError(f"Could not read EXR image {fpath}")
     if len(img.shape) == 3:
         img = img[:, :, 2]
     img = np.array(img * 255, dtype=np.uint8)
-    os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
 
     img = torch.from_numpy(img)[None,]
     return img

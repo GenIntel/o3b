@@ -851,6 +851,37 @@ class HouseCorr3D(ConfigurableDataset):
 
     # ── item loading ──────────────────────────────────────────────────────────
 
+    def _sharded_drop_reason(self, idx: int) -> str:
+        """Name the missing input behind a dropped frame-object.
+
+        Frame items are dropped by CropCamBBox2D when cam_bbox2d is None, which
+        traces back to the instance mask — absent from the index, missing on
+        disk, undecodable (cv2 without EXR support), or empty (occluded).
+        Categories, not paths, so the build tally aggregates.
+        """
+        if self.cfg.item_type != ItemType.FRAME_OBJECT:
+            return super()._sharded_drop_reason(idx)
+
+        row = self._frame_rows[self._frame_rows_id[idx]]
+        if not row.get("mask_path") or row.get("mask_id") is None:
+            return "no mask_path/mask_id in frames.db"
+        mask_path = self.path_raw / row["mask_path"]
+        if not mask_path.exists():
+            return "mask file missing on disk"
+
+        from o3b.dataset.housecorr3d.frame_dataset import _load_mask_tensor
+        mask = _load_mask_tensor(mask_path, int(row["mask_id"]))
+        if mask is None:
+            return "mask file unreadable (cv2 EXR decode failed?)"
+        if not bool(mask.any()):
+            return "object not visible in frame (empty mask)"
+
+        from o3b.cv.visual.draw import get_bboxs_from_masks
+        bbox = get_bboxs_from_masks(mask[None])[0].float()
+        if float(bbox[2] - bbox[0]) < 1.0 or float(bbox[3] - bbox[1]) < 1.0:
+            return "object smaller than 1 px in frame"
+        return super()._sharded_drop_reason(idx)
+
     def _load_frame_object(self, idx: int) -> FrameObject:
         """Load one frame-object from frames.db.
 
@@ -903,7 +934,11 @@ class HouseCorr3D(ConfigurableDataset):
                        if _want("cam_intr4x4", mods) and row.get("cam_intr4x4") else None)
 
         cam_bbox2d = None
-        if _want("cam_bbox2d", mods) and mask is not None:
+        # mask.any() guard: an object fully occluded in this frame has no pixels,
+        # and get_bboxs_from_masks answers that with the *whole image* box (its
+        # except-branch fallback), which would silently bake a full-scene crop
+        # into the shards.  Leaving cam_bbox2d None drops the frame instead.
+        if _want("cam_bbox2d", mods) and mask is not None and bool(mask.any()):
             from o3b.cv.visual.draw import get_bboxs_from_masks
             cam_bbox2d = get_bboxs_from_masks(mask[None])[0].float()
 

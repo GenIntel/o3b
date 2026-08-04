@@ -199,29 +199,62 @@ def record_to_item(record: dict, item_cls):
 
 # ── record iteration (optionally parallel) ─────────────────────────────────────
 
-class _RecordDataset(torch.utils.data.Dataset):
-    """Adapter: index → encoded record (or None), so loading *and* encoding run
-    inside DataLoader worker processes."""
+_DROP_KEY = "__drop__"
 
-    def __init__(self, load_fn, n: int):
+
+def _drop(reason_fn, i: int) -> dict:
+    """Marker yielded in place of a record when ``load_fn(i)`` produced no item.
+
+    The reason is resolved in the same (worker) process that failed to load, so
+    it can inspect the index row / files that caused the drop.
+    """
+    reason = "unknown"
+    if reason_fn is not None:
+        try:
+            reason = reason_fn(i)
+        except Exception as e:                      # diagnostics must never fail a build
+            reason = f"unknown (reason lookup failed: {type(e).__name__})"
+    return {_DROP_KEY: reason}
+
+
+def drop_reason(record) -> str | None:
+    """Return the drop reason if *record* is a drop marker, else None."""
+    if record is None:
+        return "unknown"
+    if isinstance(record, dict) and _DROP_KEY in record and len(record) == 1:
+        return record[_DROP_KEY]
+    return None
+
+
+class _RecordDataset(torch.utils.data.Dataset):
+    """Adapter: index → encoded record (or drop marker), so loading *and*
+    encoding run inside DataLoader worker processes."""
+
+    def __init__(self, load_fn, n: int, reason_fn=None):
         self._load_fn = load_fn
         self._n = n
+        self._reason_fn = reason_fn
 
     def __len__(self) -> int:
         return self._n
 
     def __getitem__(self, i: int):
         item = self._load_fn(i)
-        return item_to_record(item) if item is not None else None
+        return item_to_record(item) if item is not None else _drop(self._reason_fn, i)
 
 
 def _passthrough(x):
     return x
 
 
-def iter_records(load_fn, n: int, num_workers: int = 0):
-    """Yield the encoded record for ``load_fn(i)`` for i in 0..n-1, yielding
-    None where the item is None (filtered / unavailable).
+def iter_records(load_fn, n: int, num_workers: int = 0, reason_fn=None):
+    """Yield the encoded record for ``load_fn(i)`` for i in 0..n-1.
+
+    Where the item is None (filtered / unavailable) a drop marker
+    ``{"__drop__": reason}`` is yielded instead — see ``drop_reason`` — so the
+    caller can report *why* a build produced fewer items than it started with.
+    ``reason_fn(i) -> str`` supplies that reason; without it drops are reported
+    as ``"unknown"``.
 
     With ``num_workers > 0`` the items are loaded and serialised in torch
     DataLoader worker processes while preserving index order.  Records cross
@@ -231,10 +264,10 @@ def iter_records(load_fn, n: int, num_workers: int = 0):
     if num_workers <= 0:
         for i in range(n):
             item = load_fn(i)
-            yield item_to_record(item) if item is not None else None
+            yield item_to_record(item) if item is not None else _drop(reason_fn, i)
         return
     loader = torch.utils.data.DataLoader(
-        _RecordDataset(load_fn, n),
+        _RecordDataset(load_fn, n, reason_fn),
         batch_size=None,           # one record at a time, no collation
         num_workers=num_workers,
         collate_fn=_passthrough,   # records are plain dicts/bytes; keep as-is

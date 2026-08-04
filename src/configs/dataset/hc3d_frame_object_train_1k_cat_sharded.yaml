@@ -14,7 +14,11 @@
 # o3b dataset init -d hc3d_frame_object_train_1k_cat_sharded -p slurm_lmbl40 --remote
 # o3b dataset viz -d hc3d_frame_object_train_1k_cat_sharded -p slurm_lmbl40 --remote
 
+# sharding problems: 
+#   a) only 900 instead of 1000?
+#   b) an error occured 22/900, less workers? or freeing ram? 
 
+# sharding i
 # o3b dataset viz -d hc3d_frame_object_train_cat_sharded
 
 defaults:

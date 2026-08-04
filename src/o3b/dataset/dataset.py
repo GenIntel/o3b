@@ -322,7 +322,7 @@ class ConfigurableDataset(_TorchDataset):
     def _setup_sharded(self) -> None:
         """Load the sharded dataset, building it from raw items if necessary."""
         from o3b.dataset.sharding import (
-            build_sharded_dataset_from_generator, iter_records,
+            build_sharded_dataset_from_generator, drop_reason, iter_records,
             read_sharded_dataset, write_sharded_dataset,
             read_mesh_sidecar, strip_mesh_from_record, write_mesh_sidecar,
         )
@@ -344,15 +344,26 @@ class ConfigurableDataset(_TorchDataset):
 
         pbar = tqdm(total=n, desc="Sharding", unit="item")
         meshes: dict = {}   # object_id → encoded mesh, deduplicated across frames
+        from collections import Counter
+        drops: Counter = Counter()   # drop reason → count (why n_out < n)
 
         def _gen():
-            for record in iter_records(self._load_sharded_item, n, num_workers=num_workers):
+            for record in iter_records(self._load_sharded_item, n,
+                                       num_workers=num_workers,
+                                       reason_fn=self._sharded_drop_reason):
                 pbar.update(1)
-                if record is not None:
-                    yield strip_mesh_from_record(record, meshes)
+                reason = drop_reason(record)
+                if reason is not None:
+                    drops[reason] += 1
+                    continue
+                yield strip_mesh_from_record(record, meshes)
 
         hf = build_sharded_dataset_from_generator(_gen, writer_batch_size=self.cfg.sharded_shard_size)
         pbar.close()
+        if drops:
+            print(f"Skipped {sum(drops.values())}/{n} items:")
+            for reason, count in drops.most_common():
+                print(f"  {count:>6}  {reason}")
         write_sharded_dataset(hf, path, shard_size=self.cfg.sharded_shard_size)
         if meshes:
             write_mesh_sidecar(meshes, path)
@@ -365,6 +376,17 @@ class ConfigurableDataset(_TorchDataset):
     def _load_sharded_item(self, idx: int):
         """Load a raw item with ``sharded_transform`` baked in (shard-build path)."""
         return self._apply_transform(self._load_item(idx), self._sharded_transform)
+
+    def _sharded_drop_reason(self, idx: int) -> str:
+        """Why ``_load_sharded_item(idx)`` yielded nothing — for the build tally.
+
+        Called only for items that were dropped, so it may re-do work.  The
+        generic answer is uninformative; subclasses override it to name the
+        missing input (see ``HouseCorr3D._sharded_drop_reason``).
+        """
+        if self._load_item(idx) is None:
+            return "item could not be loaded"
+        return f"{type(self._sharded_transform).__name__} returned None"
 
     def _apply_transform(self, item, transform):
         if transform is None or item is None:

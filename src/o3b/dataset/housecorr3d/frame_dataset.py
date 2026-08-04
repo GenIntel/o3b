@@ -8,11 +8,44 @@ Provides:
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
 
 import torch
+
+logger = logging.getLogger(__name__)
+
+_exr_warned = False
+
+
+def _warn_exr_once(path, err) -> None:
+    """Report the first EXR read failure in this process, then stay quiet.
+
+    A silent None here is how whole categories of frames disappear from a shard
+    build (mask None → cam_bbox2d None → item dropped), and the cause is
+    normally environmental rather than per-file: a cv2 built without the
+    OpenEXR codec, or the codec gate latched off before o3b was imported (see
+    the OPENCV_IO_ENABLE_OPENEXR note in o3b/__init__.py).  So the first failure
+    carries the environment detail and the rest go to debug.
+    """
+    global _exr_warned
+    if _exr_warned:
+        logger.debug("EXR read failed: %s (%s)", path, err)
+        return
+    _exr_warned = True
+    detail = ""
+    try:
+        import cv2
+        in_build = any("OpenEXR" in l for l in cv2.getBuildInformation().splitlines())
+        detail = (f" [cv2 {cv2.__version__}, OpenEXR in build: {in_build}, "
+                  f"OPENCV_IO_ENABLE_OPENEXR={os.environ.get('OPENCV_IO_ENABLE_OPENEXR')!r}]")
+    except Exception:
+        pass
+    logger.warning("EXR read failed: %s (%s)%s — further failures logged at debug level",
+                   path, err, detail)
 
 
 def _depth_to_pts3d_cam(
@@ -1111,16 +1144,16 @@ def _load_depth_tensor(path: Path) -> Optional[torch.Tensor]:
     if not path.exists():
         return None
     try:
-        import os, cv2, numpy as np
-        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+        import cv2, numpy as np
         arr = cv2.imread(str(path), cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
         if arr is None:
+            _warn_exr_once(path, "cv2.imread returned None")
             return None
         if arr.ndim == 3:
             arr = arr[:, :, 0]
         return torch.from_numpy(arr.astype(np.float32))
-    except Exception:
+    except Exception as e:
+        _warn_exr_once(path, e)
         return None
 
 
@@ -1133,14 +1166,14 @@ def _load_mask_tensor(path: Path, mask_id: int) -> Optional[torch.Tensor]:
     if not path.exists():
         return None
     try:
-        import os, cv2, numpy as np
-        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+        import cv2, numpy as np
         arr = cv2.imread(str(path), cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
         if arr is None:
+            _warn_exr_once(path, "cv2.imread returned None")
             return None
         ids = np.array(arr[:, :, 2] * 255, dtype=np.uint8)
         ids[ids == 255] = 0  # bug fix for test_real subset (spurious 255 values)
         return torch.from_numpy(ids == mask_id)
-    except Exception:
+    except Exception as e:
+        _warn_exr_once(path, e)
         return None

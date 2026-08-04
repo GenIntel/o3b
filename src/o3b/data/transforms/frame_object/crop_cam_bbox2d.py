@@ -63,6 +63,10 @@ class CropCamBBox2D(O3B_Transform):
             return None
 
         bbox = fo.cam_bbox2d.float()
+        # Degenerate box (x0==x1 or y0==y1): resizing it to (H, W) would stretch
+        # a single row/column of pixels across the whole crop.
+        if float(bbox[2] - bbox[0]) < 1.0 or float(bbox[3] - bbox[1]) < 1.0:
+            return None
 
         updates = {}
 
