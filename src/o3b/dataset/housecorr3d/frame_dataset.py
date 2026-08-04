@@ -642,7 +642,9 @@ def _visualize_frame_object_pairs_viser(dataset, debug: bool = False, obj_centri
         print("Install viser: pip install viser")
         return
 
-    server = viser.ViserServer()
+    from o3b.data.viz import make_viser_server
+
+    server = make_viser_server()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
 
     n = len(dataset._frame_pairs_id)
@@ -759,7 +761,9 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
 
     import numpy as np
 
-    server = viser.ViserServer()
+    from o3b.data.viz import make_viser_server
+
+    server = make_viser_server()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
 
     n = len(dataset._frame_rows_id)

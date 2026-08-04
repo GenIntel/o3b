@@ -138,8 +138,9 @@ def run_tform_viewer(cls, cfg, limit: int = 20) -> None:
         sys.exit(1)
 
     from o3b.io import _mesh_to_trimesh
+    from o3b.data.viz import make_viser_server
 
-    server = viser.ViserServer()
+    server = make_viser_server()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
 
     # ── mutable state ──────────────────────────────────────────────────────────

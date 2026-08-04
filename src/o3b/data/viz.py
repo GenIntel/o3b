@@ -180,6 +180,34 @@ def _add_canonical_axes(server, axes_length: float = 1.6) -> None:
             pass
 
 
+def make_viser_server(**kwargs):
+    """Create a viser server, honouring the O3B_VISER_PORT environment variable.
+
+    `o3b dataset viz --port N` (and `--remote`, which tunnels a port from the
+    compute node) set O3B_VISER_PORT so the server binds a *known* port. viser
+    silently increments the port when it is already taken, which would break a
+    tunnel pointing at the requested one — so bind-test first and fail loudly.
+    """
+    import os
+    import socket
+    import viser
+
+    port = os.environ.get("O3B_VISER_PORT")
+    if port and "port" not in kwargs:
+        port = int(port)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", port))
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Requested viser port {port} is already in use on this host "
+                    f"({exc}). Re-run with a different --port."
+                ) from exc
+        kwargs["port"] = port
+    return viser.ViserServer(**kwargs)
+
+
 def visualize_dataset(
     dataset,
     render: bool = False,
@@ -204,7 +232,7 @@ def visualize_dataset(
     import numpy as np
     import torch
 
-    server = viser.ViserServer()
+    server = make_viser_server()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
     _add_canonical_axes(server)
     if debug:

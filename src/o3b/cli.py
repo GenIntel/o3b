@@ -9,6 +9,9 @@ Usage:
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
                                          [--debug] [--platform PLATFORM]
+                                         [--port PORT] [--remote]
+  # --remote runs the viewer on the platform's compute node (interactive srun)
+  # and tunnels its viser port to http://localhost:<--port>.
   # Pair datasets need no separate index step (pairs derived at load time).
   o3b bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
   o3b platform setup    -p <platform>
@@ -98,6 +101,17 @@ def _build_dataset_parser(sub):
                        help="Show front/top/right camera frustums in the viser scene")
     p_vis.add_argument("--object-centric", action="store_true",
                        help="Object-centric view: place object at world origin, camera in object space")
+    p_vis.add_argument(
+        "--port", type=int, default=None, metavar="PORT",
+        help="Pin the viser server to this port (default: viser's own 8080, bumped "
+             "if taken). With --remote this is the local port the remote viser "
+             "server is tunnelled to",
+    )
+    p_vis.add_argument(
+        "--remote", action="store_true",
+        help="Run the visualization on the --platform's compute node via an interactive "
+             "srun and tunnel its viser port to localhost:--port",
+    )
 
     p_tform = ds_sub.add_parser(
         "tform",
@@ -167,10 +181,120 @@ def _run_dataset_remote(args) -> None:
     _run_platform_run_cmd(args.platform, remote_cmd, job_name=f"{command}_{args.config.stem}")
 
 
+def _viz_remote_command(args, remote_port: int) -> str:
+    """Rebuild the `o3b dataset viz` invocation to run on the compute node."""
+    import shlex
+
+    parts = [
+        "o3b", "dataset", "viz",
+        "-d", args.config.stem,
+        "-p", args.platform,
+        "--port", str(remote_port),
+        "--limit", str(args.limit),
+    ]
+    if args.db:
+        parts += ["--db", str(args.db)]
+    if args.object_id:
+        parts += ["--object-id", args.object_id]
+    if args.frame_stride is not None:
+        parts += ["--frame-stride", str(args.frame_stride)]
+    if args.frames_per_scene is not None:
+        parts += ["--frames-per-scene", str(args.frames_per_scene)]
+    if args.filter_has_kpts:
+        parts.append("--filter-has-kpts")
+    if args.render:
+        parts += ["--render", "--render-frames", str(args.render_frames),
+                  "--renderer", args.renderer]
+    if args.debug:
+        parts.append("--debug")
+    if args.object_centric:
+        parts.append("--object-centric")
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _find_free_local_port(port: int, attempts: int = 20) -> int:
+    """Return *port*, or the next free one — ssh -L fails outright on a taken port."""
+    import socket
+
+    for candidate in range(port, port + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+        if candidate != port:
+            print(f"Local port {port} is in use — using {candidate} instead.")
+        return candidate
+    raise RuntimeError(f"No free local port in range {port}–{port + attempts - 1}")
+
+
+def _run_dataset_viz_remote(args) -> None:
+    """Run `o3b dataset viz` on a compute node and tunnel its viser port here.
+
+    Unlike index/init (queued sbatch jobs), the viewer must stay attached: it is
+    started with an interactive srun --pty so Ctrl-C ends both the viewer and the
+    allocation, while a background thread forwards localhost:<--port> to the
+    allocated node once the job is RUNNING.
+    """
+    import subprocess
+    import random
+    import uuid
+
+    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+     use_conda, path_conda) = _platform_srun_context(args.platform)
+
+    # viser silently increments its port when the requested one is taken, which
+    # would leave the tunnel pointing at nothing — a random high port makes a
+    # clash on the shared compute node unlikely, and make_viser_server() aborts
+    # loudly rather than drifting if it does happen.
+    remote_port = random.randint(40000, 60000)
+    local_port  = _find_free_local_port(args.port or 8080)
+    job_name    = f"o3b_viz_{uuid.uuid4().hex[:8]}"
+
+    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+                                 use_conda=use_conda, path_conda=path_conda)
+    init_lines += [
+        "",
+        f"export O3B_VISER_PORT={remote_port}",
+        f'echo "[o3b-viz] viser will listen on $(hostname):{remote_port}"',
+        f'echo "[o3b-viz] open http://localhost:{local_port} once it reports it is running"',
+        "",
+        _viz_remote_command(args, remote_port),
+    ]
+
+    remote_init = f"{path_ws}/.od3d_viz_init_{job_name}" if path_ws else f"~/.od3d_viz_init_{job_name}"
+    subprocess.run(
+        ["ssh", ssh_host, f"cat > {remote_init}"],
+        input="\n".join(init_lines), text=True, check=True,
+    )
+
+    srun += f" --job-name {job_name}"
+    tunnel = _forward_port_once_running(ssh_host, job_name, str(local_port), str(remote_port))
+    # the viewer runs from the init file; the shell stays interactive afterwards
+    # so the allocation can be reused (e.g. to re-run the viewer) instead of
+    # queueing again.
+    srun += f" --pty bash --init-file {remote_init}"
+
+    print(f"Starting remote visualization on {ssh_host} (job {job_name})…")
+    print(f"Once viser starts, open http://localhost:{local_port}")
+    try:
+        subprocess.run(["ssh", "-t", ssh_host, srun])
+    finally:
+        tunnel.stop()
+        subprocess.run(["ssh", ssh_host, f"rm -f {remote_init}"], check=False)
+
+
 def _run_dataset(args):
     if args.dataset_command in ("index", "init") and getattr(args, "remote", False):
         _run_dataset_remote(args)
         return
+    if args.dataset_command == "viz" and getattr(args, "remote", False):
+        _run_dataset_viz_remote(args)
+        return
+    if args.dataset_command == "viz" and getattr(args, "port", None):
+        import os
+        os.environ["O3B_VISER_PORT"] = str(args.port)
 
     from o3b.dataset.cli import _load_class_from_config, _platform_to_dataset_overrides
 
