@@ -14,6 +14,7 @@ defaults:
 
 
 category: "hair_dryer"
+
 categories:
   - ${category}
 
@@ -26,6 +27,7 @@ frame_pair_views_per_instance: 50 # per instance pair, 20 pairs * 5 = 100
 #   aligned → view i of A with view i of B   (~n_views pairs per instance pair)
 #   cross   → every view of A with every view of B  (~n_views^2)
 frame_pair_view_mode: aligned
+img_size: 512
 
 sharded_name: hc3d_frame_object_pair_${img_size}_${category}
 sharded_override: false
@@ -39,7 +41,6 @@ sharded_shard_size: 5  # items per Arrow shard; lower = less peak memory during 
 # kept explicit here since this is the config that actually triggers the build
 
 
-img_size: 512
 sharded_shard_size: 100 # cache batch size and final shard size
 # note that especially cache batch size heavily affects /dev/shm when using shared memory
 # worker processes for the one-off shard build (items are loaded + serialised to
