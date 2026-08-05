@@ -31,7 +31,7 @@ img_size: 512
 
 sharded_name: hc3d_frame_object_pair_${img_size}_${category}
 sharded_override: false
-sharded_shard_size: 5  # items per Arrow shard; lower = less peak memory during build
+sharded_shard_size: 100  # items per Arrow shard; lower = less peak memory during build
 
 
 
@@ -41,7 +41,14 @@ sharded_shard_size: 5  # items per Arrow shard; lower = less peak memory during 
 # kept explicit here since this is the config that actually triggers the build
 
 
-sharded_shard_size: 100 # cache batch size and final shard size
+sharded_num_workers: 4
+# perhaps this should be ram_in_gb / sharded_worker_gb = 20 / 5 = 4
+# sharded_worker_gb: see that each worker usually creates their own dataset copy
+
+#  /data/lmbraid19/sommerl/datasets/Omni6DPose_Preprocess/sharded/hc3d_frame_object_pair_hair_dryer 
+
+
+#sharded_shard_size: 100 # cache batch size and final shard size
 # note that especially cache batch size heavily affects /dev/shm when using shared memory
 # worker processes for the one-off shard build (items are loaded + serialised to
 # bytes in the workers, so /dev/shm tensor transport is not involved); 0 = sequential
@@ -49,9 +56,3 @@ sharded_shard_size: 100 # cache batch size and final shard size
 # actually it seems like /dev/shm is currently not affected probably only when 
 #   torch.multiprocessing.set_sharing_strategy("file_system") instead of 
 #   torch.multiprocessing.set_sharing_strategy("file_descriptor")  (DEFAULT)
-
-sharded_num_workers: 4
-# perhaps this should be ram_in_gb / sharded_worker_gb = 20 / 5 = 4
-# sharded_worker_gb: see that each worker usually creates their own dataset copy
-
-#  /data/lmbraid19/sommerl/datasets/Omni6DPose_Preprocess/sharded/hc3d_frame_object_pair_hair_dryer 
