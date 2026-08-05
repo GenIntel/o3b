@@ -15,6 +15,7 @@ defaults:
 category: "hair_dryer"
 categories:
   - ${category}
+  
 sharded_name:  hc3d_frame_object_s${filter_count_max}_c${category}
 
 sharded_override: true #  true
