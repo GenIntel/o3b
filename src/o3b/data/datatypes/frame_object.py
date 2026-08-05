@@ -14,6 +14,19 @@ class FrameObject(Frame, Object):
     cam_bbox2d:       Optional[Tensor] = None  # (4,)     xyxy pixels
     cam_bbox3d:       Optional[Tensor] = None  # (8, 3)   bounding-box corners in camera space
     fo_mask:          Optional[Tensor] = None  # (H, W)   bool  object-instance mask
+    # (H, W) float32 distance transform of fo_mask, normalised to [0, 1] by the
+    # larger image side (0 outside the mask) — see get_mask_distance_transform_norm.
+    # Distances are in the pixel grid of the *current* image, so CropCamBBox2D
+    # recomputes it from the cropped mask instead of resampling it.
+    fo_mask_dt:       Optional[Tensor] = None
+    # (H, W) bool amodal object mask: the GT mesh rendered under the GT pose,
+    # so it also covers the parts of the object that other objects occlude in
+    # this frame (it is still cut off at the image border).  fo_mask, in
+    # contrast, is the annotated *visible* instance mask.
+    fo_mask_amodal:    Optional[Tensor] = None
+    # (H, W) float32 distance transform of fo_mask_amodal, same normalisation
+    # and same crop-time recomputation as fo_mask_dt.
+    fo_mask_amodal_dt: Optional[Tensor] = None
     obj_kpts2d_mask:  Optional[Tensor] = None  # (K,)     bool  keypoint visible in this frame (occlusion-aware)
     cam_tform4x4_obj:      Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
     cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (4, 4)  ncds→cam (= cam_tform4x4_obj @ obj_ncds0c_tform4x4_obj)
@@ -54,6 +67,13 @@ class FrameObject(Frame, Object):
             ov[..., 1] = 0.9
             ov[..., 3] = m * 0.5
             layers["fo_mask"] = ("overlay", ov)
+
+        if self.fo_mask_amodal is not None:
+            am = self.fo_mask_amodal.float().cpu().numpy()
+            ov = np.zeros((*am.shape, 4), dtype=np.float32)
+            ov[..., 1] = 0.8; ov[..., 2] = 0.9   # cyan, vs the green visible mask
+            ov[..., 3] = am * 0.4
+            layers["fo_mask_amodal"] = ("overlay", ov)
 
         if self.depth is not None:
             import matplotlib.cm as _cm
@@ -494,6 +514,9 @@ class FrameObjectBatch:
     cam_bbox2d:       Optional[Tensor]       = None  # (B, 4)
     cam_bbox3d:       Optional[Tensor]       = None  # (B, 8, 3)
     fo_mask:          Optional[Tensor]       = None  # (B, H, W)
+    fo_mask_dt:       Optional[Tensor]       = None  # (B, H, W) float32, normalised DT of fo_mask
+    fo_mask_amodal:    Optional[Tensor]      = None  # (B, H, W) bool, GT mesh rendered under the GT pose
+    fo_mask_amodal_dt: Optional[Tensor]      = None  # (B, H, W) float32, normalised DT of fo_mask_amodal
     obj_kpts2d_mask:  Optional[Tensor]       = None  # (B, K)    bool
     cam_tform4x4_obj: Optional[Tensor]       = None  # (B, 4, 4)
     cam_tform4x4_obj_ncds: Optional[Tensor]  = None  # (B, 4, 4) ncds→cam
@@ -508,6 +531,9 @@ class FrameObjectBatch:
     obj_kpts3d_mask:         Optional[Tensor] = None  # (B, K)    bool
     category:                Optional[object] = None  # (B,) int64, or list[str] of names
     mesh:                    Optional[Mesh]   = None  # shared mesh for all B viewpoints
+    # per-sample GT meshes — a training batch mixes instances, so vertex counts
+    # differ and these stay a list (like FrameObjectPairBatch.src_meshes)
+    meshes:                  Optional[list]   = None  # list of B Mesh
 
 
 @dataclass(kw_only=True)
@@ -554,6 +580,8 @@ class FrameObjectPairBatch:
     trgt_depth_mask:  Optional[object] = None
     src_fo_mask:      Optional[object] = None  # (B, H, W) bool object instance mask
     trgt_fo_mask:     Optional[object] = None
+    src_fo_mask_dt:   Optional[object] = None  # (B, H, W) float32 normalised DT of fo_mask
+    trgt_fo_mask_dt:  Optional[object] = None
     # ── per-sample meshes (for qualitative rendering) + category ───────────────
     src_meshes:   Optional[list]   = None  # list of B Mesh
     trgt_meshes:  Optional[list]   = None  # list of B Mesh
@@ -615,6 +643,7 @@ def collate_frame_object_pairs(
         setattr(out, f"{side}_depth",                 _stack_or_list("depth", side))
         setattr(out, f"{side}_depth_mask",            _stack_or_list("depth_mask", side))
         setattr(out, f"{side}_fo_mask",               _stack_or_list("fo_mask", side))
+        setattr(out, f"{side}_fo_mask_dt",            _stack_or_list("fo_mask_dt", side))
         setattr(out, f"{side}_meshes",                _meshes(side))
         setattr(out, f"{side}_category",              _cat(side))
         setattr(out, f"{side}_cam_bbox3d",            _get("cam_bbox3d", side))
@@ -654,6 +683,9 @@ def collate_frame_objects(
         cam_bbox2d       = _get("cam_bbox2d"),
         cam_bbox3d       = _get("cam_bbox3d"),
         fo_mask          = _get("fo_mask"),
+        fo_mask_dt       = _get("fo_mask_dt"),
+        fo_mask_amodal    = _get("fo_mask_amodal"),
+        fo_mask_amodal_dt = _get("fo_mask_amodal_dt"),
         obj_kpts2d_mask  = _get("obj_kpts2d_mask"),
         cam_tform4x4_obj = _get("cam_tform4x4_obj"),
         cam_tform4x4_obj_ncds = _get("cam_tform4x4_obj_ncds"),
@@ -665,6 +697,14 @@ def collate_frame_objects(
         obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj"),
         obj_kpts3d              = _get("obj_kpts3d"),
         obj_kpts3d_mask         = _get("obj_kpts3d_mask"),
+        # GT meshes stay per-sample (variable vertex counts); ObjGeo3D's pcl_cd
+        # uses their vertices as the target point cloud
+        meshes = (
+            [s.mesh for s in samples]
+            if (include is None or "mesh" in include)
+            and any(s.mesh is not None for s in samples)
+            else None
+        ),
         # category may be an int id or a name string (HouseCorr3DFrame stores names)
         category = (
             [s.category for s in samples]
@@ -728,6 +768,7 @@ def get_frame_object_from_batch(batch, item_id: int, prefix: str = "") -> FrameO
         depth=_get("depth"),
         depth_mask=_get("depth_mask"),
         fo_mask=_get("fo_mask"),
+        fo_mask_amodal=_get("fo_mask_amodal"),
         cam_bbox3d=cam_bbox3d,
         cam_tform4x4_obj=cam_tform4x4_obj,
         mesh=_get("pred_mesh"),

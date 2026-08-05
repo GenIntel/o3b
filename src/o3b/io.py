@@ -177,7 +177,7 @@ from tqdm import tqdm
 import multiprocessing
 
 
-def _load_yaml_with_defaults(path: Path, overrides=None) -> dict:
+def _load_yaml_with_defaults(path: Path, overrides=None, resolve: bool = True) -> dict:
     """Load a YAML config, resolving the 'defaults:' list via OmegaConf merge.
 
     Supports:
@@ -187,6 +187,11 @@ def _load_yaml_with_defaults(path: Path, overrides=None) -> dict:
     - Dict-form group@package entries: ``credentials@credentials: default``
       loads ``credentials/default.yaml`` and merges it under key ``credentials``
     - Overrides passed as ``["key=value", ...]`` strings
+
+    ``resolve=False`` returns the merged config with its ``${...}`` still
+    unresolved, so a caller that merges further keys on top (e.g.
+    ``build_dataset_from_config_or_name``) can resolve afterwards and have the
+    interpolations see those keys.
     """
     def _merge(yaml_path: Path):
         raw = OmegaConf.load(yaml_path)
@@ -250,7 +255,7 @@ def _load_yaml_with_defaults(path: Path, overrides=None) -> dict:
             except Exception:
                 pass
 
-    return OmegaConf.to_container(cfg, resolve=True)
+    return OmegaConf.to_container(cfg, resolve=resolve)
 
 
 def read_config_extern(fpath: Path) -> DictConfig:

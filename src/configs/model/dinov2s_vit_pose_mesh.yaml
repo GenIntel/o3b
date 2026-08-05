@@ -1,0 +1,65 @@
+# DINOv2s patch features -> ViT blocks (new cls feature over all patch tokens)
+# -> in parallel: a) pose (PoseMLP), b) mesh (CoordMLP SDF decoded by DMTet).
+#
+# The two heads run on independent copies of the batch and their outputs are
+# merged per modality. `input_or_first_not_none` keeps the ViT cls feature that
+# went into the heads (PoseMLP overwrites feat with its 12-dim pose vector and
+# detaches feat/featmap; the merge discards that and keeps the encoder output).
+# The pose / mesh modalities are produced by one branch each, so they pass
+# through untouched.
+
+class_name: SequentialModel
+models:
+    # ── encoder ───────────────────────────────────────────────────────────────
+    -   class_name: DINOv2
+        hub_repo: facebookresearch/dinov2
+        hub_model: dinov2_vits14   # out_dim 384
+        freeze: true
+        downsample_rate: 14
+        normalize: false
+        layers_returned: [0]
+        pca: false
+
+    # ── global feature: learned cls token attends over all patch tokens ───────
+    -   class_name: ViT
+        in_featmap: true           # consume the (B, 384, H, W) DINOv2 map as tokens
+        in_featmap_dim: 384
+        in_feat: false             # no input cls -> a learned cls token is used
+        in_feats: false
+        out_feat: true             # writes the new cls into frames_pred.feat
+        blocks_dim: 384
+        blocks_depth: 4
+        blocks_num_heads: 6
+        mlp_ratio: 4.0
+        qkv_bias: true
+        drop_path_rate: 0.0
+
+    # ── parallel heads on that cls feature ────────────────────────────────────
+    -   class_name: ParallelModel
+        merge_type: input_or_first_not_none
+        models:
+            # a) pose: transl(3) + rot6d(6) + size(3)
+            -   class_name: PoseMLP
+                in_dim: 384
+                out_dims: [3, 6, 3]
+                num_layers: 1
+                hidden_dim: 512
+                dropout: 0.5
+                activation: "none"
+                bias: true
+                rot6d_othant: [false, false, false, false, false, false]
+
+            # b) mesh: feat-conditioned CoordMLP SDF field -> DMTet
+            #    Feat2Mesh == Feat2Field + Field2Mesh; swap it for those two in a
+            #    SequentialModel to get at frames_pred.field on its own.
+            -   class_name: Feat2Mesh
+                in_dim: 384
+                num_layers: 5
+                hidden_dim: 256
+                dropout: 0.0
+                symmetrize: false # true      # mirror -x to +x inside the CoordMLP
+                n_harmonic_functions: 8
+                tet_res: 16           # 8 | 16 | 32 | 64 | 128
+                init_radius: 1.0      # sphere prior the SDF is a delta on
+                grid_scale_rel: 2.2   # tet grid edge length, in units of init_radius
+                jitter_scale: 0.05    # tet-grid jitter, training only

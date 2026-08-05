@@ -119,10 +119,28 @@ class CropCamBBox2D(O3B_Transform):
             updates["depth"] = _crop_nearest(fo.depth)
         if fo.fo_mask is not None:
             updates["fo_mask"] = _crop_nearest(fo.fo_mask)
+        if fo.fo_mask_amodal is not None:
+            updates["fo_mask_amodal"] = _crop_nearest(fo.fo_mask_amodal)
         if fo.depth_mask is not None:
             updates["depth_mask"] = _crop_nearest(fo.depth_mask)
         if fo.mask is not None:
             updates["mask"] = _crop_nearest(fo.mask)
+
+        # ---- mask distance transform ----
+        # Recomputed rather than resampled: fo_mask_dt holds distances in the pixel
+        # grid of its own image, normalised by that image's larger side.  Cropping
+        # and resizing changes both, so a cropped copy of the full-frame DT would
+        # carry the wrong scale.
+        if fo.fo_mask_dt is not None and "fo_mask" in updates:
+            from o3b.cv.visual.mask import get_mask_distance_transform_norm
+            updates["fo_mask_dt"] = get_mask_distance_transform_norm(
+                updates["fo_mask"].bool().cpu(),
+            ).float()
+        if fo.fo_mask_amodal_dt is not None and "fo_mask_amodal" in updates:
+            from o3b.cv.visual.mask import get_mask_distance_transform_norm
+            updates["fo_mask_amodal_dt"] = get_mask_distance_transform_norm(
+                updates["fo_mask_amodal"].bool().cpu(),
+            ).float()
 
         # ---- camera intrinsics ----
         if fo.cam_intr4x4 is not None:

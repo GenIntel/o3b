@@ -930,6 +930,15 @@ class HouseCorr3D(ConfigurableDataset):
         mask = _load_mask_tensor(self.path_raw / row["mask_path"], int(row["mask_id"])) \
             if _want("fo_mask", mods) and row.get("mask_path") and row.get("mask_id") is not None else None
 
+        # Distance transform of the object mask, normalised to [0, 1] by the larger
+        # image side.  Computed here so it can be baked into the shards; when a
+        # crop transform follows, CropCamBBox2D recomputes it from the cropped mask
+        # (distances live in the pixel grid of the image they describe).
+        fo_mask_dt = None
+        if _want("fo_mask_dt", mods) and mask is not None:
+            from o3b.cv.visual.mask import get_mask_distance_transform_norm
+            fo_mask_dt = get_mask_distance_transform_norm(mask.bool().cpu()).float()
+
         cam_intr4x4 = (torch.tensor(json.loads(row["cam_intr4x4"]), dtype=torch.float32)
                        if _want("cam_intr4x4", mods) and row.get("cam_intr4x4") else None)
 
@@ -987,6 +996,28 @@ class HouseCorr3D(ConfigurableDataset):
             from o3b.cv.geometry.transform import transf3d_broadcast as _t3d
             cam_bbox3d = _t3d(obj.obj_bbox3d.float(), cam_tform4x4_obj_metric)  # (8, 3)
 
+        # ── amodal object mask (+ its DT) ─────────────────────────────────────
+        # Rendered from the GT mesh under the GT pose, so unlike fo_mask it also
+        # covers what other objects occlude.  Baked in here (and recomputed by
+        # CropCamBBox2D after a crop) so training reads it instead of rasterising
+        # the GT mesh every batch — see CamGeo2D3D.use_mask_amodal.
+        fo_mask_amodal, fo_mask_amodal_dt = None, None
+        want_amodal    = _want("fo_mask_amodal", mods)
+        want_amodal_dt = _want("fo_mask_amodal_dt", mods)
+        if ((want_amodal or want_amodal_dt) and obj is not None and obj.mesh is not None
+                and cam_tform4x4_obj_metric is not None and tform is not None
+                and row.get("cam_intr4x4")):
+            fo_mask_amodal = self._render_fo_mask_amodal(
+                row, obj, cam_tform4x4_obj_metric, tform, rgb=rgb, mask=mask,
+            )
+            if fo_mask_amodal is not None and want_amodal_dt:
+                from o3b.cv.visual.mask import get_mask_distance_transform_norm
+                fo_mask_amodal_dt = get_mask_distance_transform_norm(
+                    fo_mask_amodal,
+                ).float()
+            if not want_amodal:
+                fo_mask_amodal = None
+
         # ── occlusion-aware 2-D keypoint visibility ───────────────────────────
         obj_kpts2d_mask = None
         if (_want("obj_kpts2d_mask", mods) and obj is not None and obj.mesh is not None
@@ -1004,6 +1035,9 @@ class HouseCorr3D(ConfigurableDataset):
             depth                   = depth,
             depth_mask              = depth_mask,
             fo_mask                 = mask,
+            fo_mask_dt              = fo_mask_dt,
+            fo_mask_amodal          = fo_mask_amodal,
+            fo_mask_amodal_dt       = fo_mask_amodal_dt,
             cam_intr4x4             = cam_intr4x4,
             cam_tform4x4_obj        = cam_tform4x4_obj,
             cam_tform4x4_obj_ncds   = cam_tform4x4_obj_ncds,
@@ -1088,6 +1122,35 @@ class HouseCorr3D(ConfigurableDataset):
         if intr is not None:
             return int(round(2 * float(intr[1, 2]))), int(round(2 * float(intr[0, 2])))
         return None, None
+
+    def _render_fo_mask_amodal(self, row, obj, cam_tform4x4_obj_metric, tform,
+                               rgb=None, mask=None) -> "Optional[torch.Tensor]":
+        """Amodal instance mask: this object's GT mesh alone, under the GT pose.
+
+        Only the target object is rasterised, so occluders leave no hole — the
+        result is the object's full silhouette, cut off only by the image
+        border.  Same transform chain as the scene render used for keypoint
+        visibility (metric cam←obj composed with obj_ncds0c_tform4x4_obj), so
+        the mask lands on the same pixels as fo_mask.
+
+        Returns (H, W) bool at full-frame resolution, or None when the frame
+        has no usable intrinsics / image size or the render fails.
+        """
+        from o3b.dataset.housecorr3d.frame_dataset import render_scene_depth
+
+        intr_full = torch.tensor(json.loads(row["cam_intr4x4"]), dtype=torch.float32)
+        H, W = self._frame_image_hw(rgb, mask, intr_full)
+        if H is None:
+            return None
+
+        ncds = cam_tform4x4_obj_metric @ tform.float()
+        R, t = ncds[:3, :3], ncds[:3, 3]
+        verts_cam = (R @ obj.mesh.verts.float().t()).t() + t
+
+        depth = render_scene_depth([(verts_cam, obj.mesh.faces)], intr_full, H, W)
+        if depth is None:
+            return None
+        return depth > 0  # 0 = no hit → background
 
     def _compute_obj_kpts2d_mask(self, row, obj, cam_tform4x4_obj_metric, tform,
                                  rgb=None, mask=None) -> "Optional[torch.Tensor]":

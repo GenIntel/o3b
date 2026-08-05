@@ -68,6 +68,7 @@ class DMTet_x_Gaussians(Meshes_x_Gaussians):
         sdf_symmetric=True,
         harmonic_functions_count=8,
         init_radius=1.0,
+        init_sphere_radius=None,
         **kwargs,
     ):
         super().__init__(
@@ -109,7 +110,17 @@ class DMTet_x_Gaussians(Meshes_x_Gaussians):
             gs_rotation_requires_grad=gs_rotation_requires_grad,
         )
 
+        # init_radius sizes the tetrahedral grid (tets_scale below), i.e. the
+        # volume the SDF can ever represent: the grid spans +-1.1 * init_radius.
+        # init_sphere_radius is the radius of the *initial* sphere the SDF is
+        # seeded with (see get_sdf). They default to the same value, but should
+        # be set independently when the objects are not roughly spherical:
+        # shrinking init_radius to match the object would also shrink the grid
+        # and make the target geometry unreachable.
         self.init_radius = init_radius
+        self.init_sphere_radius = (
+            init_radius if init_sphere_radius is None else init_sphere_radius
+        )
         self.mesh_update_jitter_scale = 0.05 # 1. / (tet_res + 1)
 
         self.marching_tets = DMTet_Core()
@@ -372,7 +383,7 @@ class DMTet_x_Gaussians(Meshes_x_Gaussians):
             sdf (torch.Tensor): BxN
         """
 
-        sdf_init = pts.detach().norm(dim=-1, keepdim=True) - self.init_radius
+        sdf_init = pts.detach().norm(dim=-1, keepdim=True) - self.init_sphere_radius
         from types import SimpleNamespace
 
         _f = SimpleNamespace(

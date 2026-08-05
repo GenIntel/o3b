@@ -341,6 +341,31 @@ def plotly_fig_2_tensor(fig, width=None, height=None):
     return img
 
 
+_offscreen_renderers: dict = {}
+
+
+def _offscreen_renderer(width: int, height: int):
+    """pyrender OffscreenRenderer for this size, created once per process.
+
+    Building one costs ~135 ms (EGL context + framebuffer setup) against ~4 ms
+    for the render itself, so a per-call renderer dominates any loop over
+    frames — e.g. baking fo_mask_amodal over a dataset. pyrender takes the
+    scene at render time, so one renderer serves every scene of that size.
+
+    Keyed by pid as well: a DataLoader worker forked after the parent rendered
+    would otherwise inherit the parent's GL context, which is not valid in the
+    child.
+    """
+    import pyrender
+
+    key = (os.getpid(), int(width), int(height))
+    if key not in _offscreen_renderers:
+        if "DISPLAY" not in os.environ:
+            os.environ["PYOPENGL_PLATFORM"] = "egl"
+        _offscreen_renderers[key] = pyrender.OffscreenRenderer(*key[1:])
+    return _offscreen_renderers[key]
+
+
 def render_trimesh_to_tensor(
     mesh_trimesh,
     cam_intr4x4,
@@ -430,10 +455,8 @@ def render_trimesh_to_tensor(
 
     # pyrender.Viewer(scene, shadows=True)
 
-    # Create an offscreen renderer
-    if "DISPLAY" not in os.environ:
-        os.environ["PYOPENGL_PLATFORM"] = "egl"
-    renderer = pyrender.OffscreenRenderer(width, height)
+    # Offscreen renderer, reused across calls of the same size
+    renderer = _offscreen_renderer(width, height)
 
     # Render the scene
     color, depth = renderer.render(scene)

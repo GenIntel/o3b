@@ -21,9 +21,13 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "CoordMLP":        "o3b.model.coordmlp.model",
     "PoseMLP":         "o3b.model.posemlp.model",
     "Feat2Pose":       "o3b.model.feat2pose.model",
+    "Feat2Mesh":       "o3b.model.feat2mesh.model",
+    "Feat2Field":      "o3b.model.feat2field.model",
+    "Field2Mesh":      "o3b.model.field2mesh.model",
     "DINOv2":          "o3b.model.dino.model",
     "ViT":             "o3b.model.vit.model",
     "SequentialModel": "o3b.model.sequential.model",
+    "ParallelModel":   "o3b.model.parallel.model",
     "Frames2FeatPCL":  "o3b.model.frames2featpcl.model",
     "SAM3":            "o3b.model.sam3.model",
     "VGGT":            "o3b.model.vggt.model",
@@ -113,6 +117,14 @@ class OD3D_Model(nn.Module):
                 f"Unknown model '{name}'. Registered: {sorted(_REGISTRY_MODELS)}"
             )
         model_cls = _REGISTRY_MODELS[name]
+        # Classes that build their own sub-models (SequentialModel, ParallelModel)
+        # override create_from_config; the generic argspec construction below would
+        # hand them raw DictConfigs instead.
+        if (
+            model_cls.create_from_config.__func__
+            is not OD3D_Model.create_from_config.__func__
+        ):
+            return model_cls.create_from_config(config)
         keys = inspect.getfullargspec(model_cls.__init__)[0][1:]
         return model_cls(
             **{k: config.get(k) for k in keys if config.get(k, None) is not None}

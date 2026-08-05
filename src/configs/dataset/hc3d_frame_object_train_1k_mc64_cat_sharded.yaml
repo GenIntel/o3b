@@ -1,0 +1,17 @@
+# hc3d_frame_object_train_1k_cat_sharded with the marching-cubes GT mesh
+# resolution raised to mc64.
+#
+# o3b dataset index -d hc3d_frame_object_train_1k_mc64_cat_sharded -p slurm_lmbl40 --remote
+# o3b dataset init  -d hc3d_frame_object_train_1k_mc64_cat_sharded -p slurm_lmbl40 --remote
+# o3b dataset viz   -d hc3d_frame_object_train_1k_mc64_cat_sharded -p slurm_lmbl40 --remote
+
+defaults:
+  - hc3d_frame_object_train_1k_cat_sharded
+  - _self_
+
+mesh_type: "mc64"
+
+# The `mesh` modality is baked into the shards' mesh sidecar, so a different
+# mesh_type is a different cache — keep it in sharded_name or the mc16/mc32/mc64
+# variants would silently read each other's shards.
+sharded_name: hc3d_frame_object_train_${filter_count_max}_b${sharded_shard_size}_r${img_size}_${mesh_type}_c${category}

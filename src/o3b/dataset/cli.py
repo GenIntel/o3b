@@ -4,7 +4,7 @@ o3b dataset CLI.
 Usage:
   od3d_dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
   od3d_dataset index  -d hc3d_object        [--db index.db] [--platform PLATFORM]
-  od3d_dataset init   -d hc3d_object        [--limit N] [--platform PLATFORM]
+  od3d_dataset init   -d hc3d_object        [--limit N] [--override] [--platform PLATFORM]
   od3d_dataset viz    -d hc3d_object_pair   [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
 
 Pair datasets (hc3d_object_pair, hc3d_frame_object_pair) need no separate index
@@ -116,6 +116,10 @@ def main(argv=None) -> None:
         "--limit", type=int, default=0, metavar="N",
         help="Additionally load the first N items after construction (default: 0)",
     )
+    p_init.add_argument(
+        "--override", action="store_true",
+        help="Force sharded_override=True — rebuild the sharded cache even if it already exists",
+    )
 
     p_tform = sub.add_parser(
         "tform",
@@ -162,7 +166,7 @@ def main(argv=None) -> None:
     elif args.command == "index":
         cls.index(cfg, db=args.db)
     elif args.command == "init":
-        cls.init(cfg, limit=args.limit)
+        cls.init(cfg, limit=args.limit, override=args.override)
     elif args.command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True

@@ -75,7 +75,11 @@ class ViT(OD3D_Model):
         self.in_feats_dim = in_feats_dim
         if self.in_feats_dim is None:
             self.in_feats_dim = self.blocks_dim
-        
+
+        self.in_featmap_dim = in_featmap_dim
+        if self.in_featmap_dim is None:
+            self.in_featmap_dim = self.blocks_dim
+
 
         self.out_feat = out_feat
 
@@ -103,7 +107,10 @@ class ViT(OD3D_Model):
         else:
             self.linear_in_feats = None
         
-        self.linear_in_featmap = None
+        if self.in_featmap and self.in_featmap_dim != self.blocks_dim:
+            self.linear_in_featmap = nn.Linear(self.in_featmap_dim, self.blocks_dim)
+        else:
+            self.linear_in_featmap = None
         self.linear_in_featmaps = None
 
         self.norm_dim_map = norm_layer(self.blocks_dim)
@@ -152,7 +159,10 @@ class ViT(OD3D_Model):
         x_in_feats = False
         x_in_featmap = False
         x_in_featmaps = False
-        
+        x_in_cls = False
+        x_in_feats_count = 0
+        featmap_shape = None
+
         if self.in_feat and frames_pred.feat is not None:
             if self.linear_in_feat is not None:
                 x_in.append(self.linear_in_feat(frames_pred.feat[:, None]))
@@ -161,23 +171,36 @@ class ViT(OD3D_Model):
             x_in_feat = True
         elif not self.in_feat and self.out_feat:
             x_in_feat = True
-            x_in.append(self.cls_token.expand(len(frames_gt), -1, -1).clone())
+            x_in_cls = True
 
         elif self.in_feat:
             logger.warning("frames_pred.feat is None")
-        
+
         if self.in_feats and frames_pred.feats is not None:
             if self.linear_in_feats is not None:
                 x_in.append(self.linear_in_feats(frames_pred.feats))
             else:
                 x_in.append(frames_pred.feats)
             x_in_feats = True
+            x_in_feats_count = x_in[-1].shape[-2]
         elif self.in_feats:
             logger.warning("frames_pred.feats is None")
 
-        #x.featmaps[-1]  # BxCxHxW
-        #B, C, H, W = x_res.shape[:]
-        #x_res = x_res.reshape(B, C, -1).permute(0, 2, 1)  # B x N x C
+        if self.in_featmap and frames_pred.featmap is not None:
+            featmap = frames_pred.featmap  # BxCxHxW
+            featmap_shape = featmap.shape
+            tokens = featmap.flatten(2).permute(0, 2, 1)  # B x HW x C
+            if self.linear_in_featmap is not None:
+                tokens = self.linear_in_featmap(tokens)
+            x_in.append(tokens)
+            x_in_featmap = True
+        elif self.in_featmap:
+            logger.warning("frames_pred.featmap is None")
+
+        if x_in_cls:
+            # prepended, so the cls feature stays token 0 for all read-outs below
+            B = x_in[0].shape[0] if len(x_in) > 0 else len(frames_gt)
+            x_in.insert(0, self.cls_token.expand(B, -1, -1).clone())
 
         x_in = torch.cat(x_in, dim=-2)
 
@@ -185,16 +208,23 @@ class ViT(OD3D_Model):
 
         x_in = self.blocks(x_in)
 
+        offset = 0
         if x_in_feat:
-            frames_pred.feat = x_in[..., 0, :].clone()
+            frames_pred.feat = x_in[..., offset, :].clone()
+            offset += 1
 
         if x_in_feats:
-            if x_in_feat:
-                frames_pred.feats = x_in[..., 1:, :].clone()
-            else:
-                frames_pred.feats = x_in[..., 0:, :].clone()
-        
-        #x_res = x_res.permute(0, 2, 1).reshape(B, -1, H, W)
-        #x_out = OD3D_ModelData(featmap=x_res)
+            frames_pred.feats = x_in[..., offset:offset + x_in_feats_count, :].clone()
+            offset += x_in_feats_count
+
+        if x_in_featmap:
+            B, _, H, W = featmap_shape
+            frames_pred.featmap = (
+                x_in[..., offset:offset + H * W, :]
+                .permute(0, 2, 1)
+                .reshape(B, self.blocks_dim, H, W)
+                .clone()
+            )
+            offset += H * W
 
         return frames_gt, frames_pred

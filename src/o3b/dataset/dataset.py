@@ -171,10 +171,12 @@ class DatasetConfig:
         return cls.from_dict(_load_yaml_with_defaults(Path(path), overrides=overrides))
 
 
-def _load_yaml_with_defaults(path: Path, overrides: "list[str] | None" = None) -> dict:
-    """Load a YAML config, resolving defaults and ${} interpolations."""
+def _load_yaml_with_defaults(
+    path: Path, overrides: "list[str] | None" = None, resolve: bool = True
+) -> dict:
+    """Load a YAML config, resolving defaults and (unless ``resolve=False``) ${}."""
     from o3b.io import _load_yaml_with_defaults as _impl
-    return _impl(path, overrides=overrides)
+    return _impl(path, overrides=overrides, resolve=resolve)
 
 
 # ── Dataset registry ──────────────────────────────────────────────────────────
@@ -222,6 +224,11 @@ def build_dataset_from_config_or_name(config: dict) -> "ConfigurableDataset":
     are applied as overrides while loading the named config, so its path
     interpolations resolve against them (the bench CLI injects the platform's
     values there).
+
+    The named config is loaded *unresolved* and only resolved after ``config``
+    is merged on top, so overriding a key that the config interpolates
+    propagates: ``{"dataset_name": ..., "category": "bottle"}`` also updates a
+    ``sharded_name: ..._c${category}`` defined in that config.
     """
     from omegaconf import OmegaConf
     config = dict(config)
@@ -234,7 +241,7 @@ def build_dataset_from_config_or_name(config: dict) -> "ConfigurableDataset":
             if config.get(key) is not None
         ]
         base = _load_yaml_with_defaults(
-            _resolve_dataset_config(dataset_name), overrides=overrides
+            _resolve_dataset_config(dataset_name), overrides=overrides, resolve=False
         )
         config = OmegaConf.to_container(
             OmegaConf.merge(OmegaConf.create(base), OmegaConf.create(config)),
@@ -493,7 +500,7 @@ class ConfigurableDataset(_TorchDataset):
         raise NotImplementedError(f"{cls.__name__} does not implement index()")
 
     @classmethod
-    def init(cls, cfg: "DatasetConfig", *, limit: int = 0, **_) -> None:
+    def init(cls, cfg: "DatasetConfig", *, limit: int = 0, override: bool = False, **_) -> None:
         """Instantiate the dataset without visualising it.
 
         Same construction path as `visualize`, so any one-off setup work the
@@ -501,8 +508,12 @@ class ConfigurableDataset(_TorchDataset):
         <path_preprocess>/sharded/<sharded_name> — happens here.  With
         ``limit > 0`` the first N items are additionally loaded, which
         exercises the read path (and, for a sharded config, the cache that was
-        just written).
+        just written).  ``override=True`` forces ``cfg.sharded_override``, so
+        an existing sharded cache is rebuilt instead of loaded.
         """
+        if override and not cfg.sharded_override:
+            print("Overriding sharded_override=True (sharded cache will be rebuilt)")
+            cfg.sharded_override = True
         dataset = cls(cfg)
         n = len(dataset)
         print(f"Initialised {cls.__name__} (item_type={ItemType(cfg.item_type).value}) — {n} items")

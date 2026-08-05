@@ -4,7 +4,7 @@ o3b — o3b command-line interface.
 Usage:
   o3b dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
   o3b dataset index  -d hc3d_object        [--db FILE] [--platform PLATFORM] [--remote]
-  o3b dataset init   -d hc3d_object        [--limit N] [--platform PLATFORM] [--remote]
+  o3b dataset init   -d hc3d_object        [--limit N] [--override] [--platform PLATFORM] [--remote]
   o3b dataset viz    -d hc3d_object_pair   [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
@@ -72,6 +72,10 @@ def _build_dataset_parser(sub):
     p_init.add_argument(
         "--limit", type=int, default=0, metavar="N",
         help="Additionally load the first N items after construction (default: 0)",
+    )
+    p_init.add_argument(
+        "--override", action="store_true",
+        help="Force sharded_override=True — rebuild the sharded cache even if it already exists",
     )
     p_init.add_argument(
         "--remote", action="store_true",
@@ -176,6 +180,8 @@ def _run_dataset_remote(args) -> None:
         parts += ["--max", str(args.max_index)]
     if command == "init" and args.limit:
         parts += ["--limit", str(args.limit)]
+    if command == "init" and getattr(args, "override", False):
+        parts.append("--override")
     remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
     _run_platform_run_cmd(args.platform, remote_cmd, job_name=f"{command}_{args.config.stem}")
@@ -306,7 +312,7 @@ def _run_dataset(args):
     elif args.dataset_command == "index":
         cls.index(cfg, db=args.db, remove=args.remove, max_index=getattr(args, "max_index", None))
     elif args.dataset_command == "init":
-        cls.init(cfg, limit=args.limit)
+        cls.init(cfg, limit=args.limit, override=args.override)
     elif args.dataset_command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True

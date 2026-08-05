@@ -67,6 +67,10 @@ _QUANT_FIELDS = {
     "texture":     "u8",
     "vert_colors": "u8",
     "depth":       "u16",
+    # normalised mask distance transform in [0, 1] → uint16 at 1/1000 resolution
+    # (~0.5 px at 512²), instead of 1 MB of float32 per item
+    "fo_mask_dt":  "u16",
+    "fo_mask_amodal_dt": "u16",
 }
 _U16_SCALE  = 1000.0   # metres → millimetres
 _ZSTD_LEVEL = 3

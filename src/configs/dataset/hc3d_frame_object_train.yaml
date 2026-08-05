@@ -24,6 +24,8 @@ modalities:
   - depth                  # GenPose2 input
   - depth_mask             # GenPose2 input
   - fo_mask                # GenPose2 input (object instance mask)
+  - fo_mask_amodal         # GT mesh rendered under the GT pose (occluders filled in)
+  - fo_mask_amodal_dt      # normalised DT of fo_mask_amodal
   - cam_intr4x4            # crop transform + GenPose2
   - cam_tform4x4_obj       # GT pose
   - cam_tform4x4_obj_ncds  # task: maps obj_kpts3d (NCDS) → camera space
@@ -31,6 +33,8 @@ modalities:
   - cam_bbox3d             # obj-space 3D box side lengths (drawn in qualit)
   - obj_syms                # per-axis symmetry code (see CamCrsp3DNNTask keypoint symmetry eval)
   - category
+  - mesh                   # GT object mesh (mesh_type from hc3d_frame_object); kept by
+                           # collate_frame_objects only when listed here
 
 filter_count_max: 50000 # per category if categories is applied
 

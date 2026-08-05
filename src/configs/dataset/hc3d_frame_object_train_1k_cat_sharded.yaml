@@ -33,6 +33,32 @@ categories:
   - ${category}
 
 
+# Full list — a list in this file replaces the parent's rather than extending it.
+# Same modalities as hc3d_frame_object_train plus fo_mask_dt, the normalised
+# distance transform of fo_mask.  The distance transforms (and fo_mask_amodal,
+# which needs a rasterised GT mesh) are computed once per item while the shards
+# are built — after sharded_transform's crop, so they match the cropped 512²
+# image — and the DTs are stored as uint16, so training reads them instead of
+# paying a distance transform (or a mesh render) per batch, see
+# CamGeo2D3D._get_mask_dt.  Adding a modality here needs a shard rebuild.
+modalities:
+  - rgb                    # GenPose2 input
+  - depth                  # GenPose2 input
+  - depth_mask             # GenPose2 input
+  - fo_mask                # GenPose2 input (object instance mask)
+  - fo_mask_dt             # normalised DT of fo_mask, baked in at shard-build time
+  - fo_mask_amodal         # GT mesh rendered under the GT pose (occluders filled in)
+  - fo_mask_amodal_dt      # normalised DT of fo_mask_amodal, baked in at shard-build time
+  - cam_intr4x4            # crop transform + GenPose2
+  - cam_tform4x4_obj       # GT pose
+  - cam_tform4x4_obj_ncds  # task: maps obj_kpts3d (NCDS) → camera space
+  - cam_bbox2d             # required by the CropCamBBox2D transform
+  - cam_bbox3d             # obj-space 3D box side lengths (drawn in qualit)
+  - obj_syms               # per-axis symmetry code (see CamCrsp3DNNTask keypoint symmetry eval)
+  - category
+  - mesh                   # GT object mesh (deduplicated into the shards' mesh sidecar)
+
+
 img_size: 512
 sharded_shard_size: 100 # cache batch size and final shard size
 # note that especially cache batch size heavily affects /dev/shm when using shared memory
