@@ -4,7 +4,8 @@
 #   <path_preprocess>/sharded/<sharded_name>
 # and loaded from there on subsequent runs (HuggingFace save_to_disk / load_from_disk).
 # Set sharded_override: true to rebuild the shards even if they already exist.
-#
+## o3b dataset init -d hc3d_frame_object_pair_cat_sharded --remote -p slurm_lmbl40
+
 # o3b dataset viz -d hc3d_frame_object_pair_cat_sharded
 
 defaults:
@@ -15,8 +16,25 @@ defaults:
 category: "hair_dryer"
 categories:
   - ${category}
-sharded_name: hc3d_frame_object_pair_${category}
-sharded_override: true #  true
+
+
+# viewpoints (frames) sampled per object instance when forming cross-instance
+# pairs (1 = a single representative frame per instance, -1 = all available frames)
+frame_pair_views_per_instance: 50 # per instance pair, 20 pairs * 5 = 100
+
+# how the two instances' viewpoints combine:
+#   aligned → view i of A with view i of B   (~n_views pairs per instance pair)
+#   cross   → every view of A with every view of B  (~n_views^2)
+frame_pair_view_mode: aligned
+
+sharded_name: hc3d_frame_object_pair_${img_size}_${category}
+sharded_override: false
+sharded_shard_size: 5  # items per Arrow shard; lower = less peak memory during build
+
+
+
+#sharded_name: hc3d_frame_object_pair_${category}
+#sharded_override: true #  true
 # overrides the (already-lowered) default from hc3d_frame_object_pair.yaml;
 # kept explicit here since this is the config that actually triggers the build
 
