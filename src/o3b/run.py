@@ -28,6 +28,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     collate_fn = (collate_frame_object_pairs
                   if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
                   else collate_object_pairs)
+    #from o3b.dataloading import configure_dataloader_sharing
+    #configure_dataloader_sharing()
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
