@@ -675,6 +675,10 @@ def _run_platform_setup(args):
     # CUDA archs for extension builds. Unset = torch auto-detects, which crashes
     # on Grace-Hopper (sm_90a is unparseable by torch 2.6's _get_cuda_arch_flags).
     torch_arch_list  = str(cfg.get("torch_cuda_arch_list", "") or "")
+    # torch.hub cache: JSC homes are quota-tight and compute nodes cannot
+    # download, so point it at shared storage and pre-populate it during setup.
+    torch_home       = str(cfg.get("path_torch_home", "") or "")
+    warm_torch_hub   = " ".join(str(m) for m in list(cfg.get("warm_torch_hub", []) or []))
     username       = cfg.get("username", "")
     path_home      = cfg.get("path_home", path_ws)
     # run the setup on the login node instead of submitting it as a batch job:
@@ -785,6 +789,8 @@ def _run_platform_setup(args):
         "SKIP_SUBMODULES": skip_submodules,
         "MODULES":         modules,
         **({"TORCH_CUDA_ARCH_LIST": torch_arch_list} if torch_arch_list else {}),
+        **({"TORCH_HOME": torch_home} if torch_home else {}),
+        **({"WARM_TORCH_HUB": warm_torch_hub} if warm_torch_hub else {}),
         "CREDENTIALS_SRC":  remote_cred_dir if cred_files else "",
         "CREDENTIALS_DEST": cred_dest_rel if cred_files else "",
         "HTTP_PROXY":      _proxy,
@@ -1303,6 +1309,10 @@ def _platform_srun_context(platform: str):
         srun += f",TORCH_CUDA_ARCH_LIST={torch_arch_list}"
     if wandb_mode:
         srun += f",WANDB_MODE={wandb_mode}"
+    # jobs must read the cache warmed by setup, not $HOME's default
+    _torch_home = str(cfg.get("path_torch_home", "") or "")
+    if _torch_home:
+        srun += f",TORCH_HOME={_torch_home}"
     # Under conda the toolchain comes from the env (CONDA_PREFIX), exported by
     # the preamble once the env is active.
     if not env_layout["use_conda"]:
@@ -2831,6 +2841,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         # login node with `wandb sync`.
         **({"WANDB_MODE": str(cfg.get("wandb_mode", "") or "")}
            if cfg.get("wandb_mode", "") else {}),
+        **({"TORCH_HOME": str(cfg.get("path_torch_home", "") or "")}
+           if cfg.get("path_torch_home", "") else {}),
     }
     if _proxy:
         env_vars.update({

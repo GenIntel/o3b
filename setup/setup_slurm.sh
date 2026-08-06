@@ -369,6 +369,28 @@ pip install -e third_party/o3b --no-build-isolation
 echo "--- pip install housecorr3d ---"
 pip install -e .
 
+# ── torch.hub cache warm-up ───────────────────────────────────────────────────
+# torch.hub.load() downloads on first use. JSC compute nodes have no internet,
+# so that fails at run time with "no internet connection and the repo could not
+# be found in the cache" and the method silently falls back to GT/oracle.
+# Populate the cache here on the login node instead; TORCH_HOME points at shared
+# storage (JSC homes are quota-tight) so the jobs find it.
+# WARM_TORCH_HUB is a space-separated list of "<owner>/<repo>:<model>".
+if [ -n "${WARM_TORCH_HUB:-}" ]; then
+    echo "--- warming torch.hub cache (TORCH_HOME=${TORCH_HOME:-<default>}) ---"
+    for _entry in ${WARM_TORCH_HUB}; do
+        _repo="${_entry%%:*}"
+        _model="${_entry##*:}"
+        if python -c "
+import sys, torch
+torch.hub.load('${_repo}', '${_model}', pretrained=True)
+print('    cached ${_repo} ${_model}')
+"; then :; else
+            echo "WARNING: could not warm ${_repo} ${_model} -- jobs needing it will fall back to GT/oracle"
+        fi
+    done
+fi
+
 echo "--- pip install optional deps ---"
 pip install pyrender2
 pip install xatlas

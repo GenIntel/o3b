@@ -145,6 +145,19 @@ renderer: pytorch3d
 #     wandb sync /e/project1/scale3dcompnet/sommer7/HouseCorr3Dv2/wandb/offline-run-*
 wandb_mode: "offline"
 
+# torch.hub downloads on first use, which a compute node cannot do -- the method
+# then fails to build and the run silently falls back to GT/oracle. So the cache
+# lives on shared storage (not $HOME: that is capped at ~19 GiB here) and
+# `o3b platform setup` pre-populates it on the login node.
+# Listed as "<owner>/<repo>:<model>". All four DINOv2 sizes are warmed because
+# ablations under ablation/morpheus/backbone/ swap between them (~6 GB total).
+path_torch_home: /e/project1/${.project}/sommer7/torch_home
+warm_torch_hub:
+  - facebookresearch/dinov2:dinov2_vits14
+  - facebookresearch/dinov2:dinov2_vitb14
+  - facebookresearch/dinov2:dinov2_vitl14
+  - facebookresearch/dinov2:dinov2_vitg14
+
 mp_start_method: "fork"      # "fork" "spawn" "forkserver"
 mp_sharing_strategy: "file_system"
 nofile_limit: "hard"         # `ulimit -n` for the job, see slurm.yaml
