@@ -43,6 +43,34 @@ CONDA_ENV_PATH="${CONDA_ENV_PATH:-}"
 
 _is_true() { case "${1:-}" in true|True|TRUE|1|yes|Yes) return 0 ;; *) return 1 ;; esac; }
 
+# ── CUDA architectures for extension builds ───────────────────────────────────
+# Set from the platform config (`torch_cuda_arch_list`). Leaving it unset makes
+# torch auto-detect from the visible cards, and on Grace-Hopper that path dies:
+# torch.cuda.get_arch_list() reports sm_90a and _get_cuda_arch_flags does
+# int(arch.split('_')[1]) -> int('90a') -> ValueError. Setting it skips that
+# detection entirely (and makes builds independent of the builder's GPU).
+if [ -n "${TORCH_CUDA_ARCH_LIST:-}" ]; then
+    export TORCH_CUDA_ARCH_LIST
+    echo "--- TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} ---"
+fi
+
+# pytorch3d, installed identically by the diff3f and morpheus blocks below.
+# Prefers the pre-built wheel matching the torch+cuda combo, e.g.
+# TORCH_VERSION=2.6.0 + CUDA_TAG=cu124 -> pytorch3d==0.7.8+pt2.6.0cu124.
+# That index publishes win_amd64/linux_x86_64/macosx only, so on aarch64
+# (JUPITER) nothing matches and we fall back to building from source.
+_install_pytorch3d() {
+    local tag="pt${TORCH_VERSION}${CUDA_TAG}"
+    echo "--- pip install pytorch3d==0.7.8+${tag} ---"
+    if pip install "pytorch3d==0.7.8+${tag}" \
+        --extra-index-url https://miropsota.github.io/torch_packages_builder; then
+        return 0
+    fi
+    echo "--- no pre-built pytorch3d for $(uname -m); building v0.7.8 from source ---"
+    pip install --no-build-isolation \
+        "git+https://github.com/facebookresearch/pytorch3d.git@V0.7.8"
+}
+
 # ── modules ───────────────────────────────────────────────────────────────────
 # JSC systems (juwels/jupiter) ship no usable system python, git or CUDA: those
 # come from Lmod. MODULES is a space-separated list from the platform config's
@@ -359,12 +387,7 @@ done
 
 if [ "${INSTALL_DIFF3F}" = "true" ] || [ "${INSTALL_DIFF3F}" = "True" ]; then
     echo "--- pip install diff3f deps ---"
-    # Always install pytorch3d pre-built wheel matching the torch+cuda combo.
-    # e.g. TORCH_VERSION=2.6.0, CUDA_TAG=cu124  →  pytorch3d==0.7.8+pt2.6.0cu124
-    P3D_TORCH_TAG="pt${TORCH_VERSION}${CUDA_TAG}"
-    echo "--- pip install pytorch3d==0.7.8+${P3D_TORCH_TAG} ---"
-    pip install "pytorch3d==0.7.8+${P3D_TORCH_TAG}" \
-        --extra-index-url https://miropsota.github.io/torch_packages_builder
+    _install_pytorch3d
     pip install diffusers transformers accelerate
     pip install git+https://github.com/skoch9/meshplot.git
     pip install pythreejs
@@ -396,12 +419,7 @@ fi
 
 if [ "${INSTALL_MORPHEUS}" = "true" ] || [ "${INSTALL_MORPHEUS}" = "True" ]; then
     echo "--- pip install morpheus deps ---"
-    # pytorch3d pre-built wheel matching the torch+cuda combo, as in diff3f.
-    # e.g. TORCH_VERSION=2.6.0, CUDA_TAG=cu124  →  pytorch3d==0.7.8+pt2.6.0cu124
-    P3D_TORCH_TAG="pt${TORCH_VERSION}${CUDA_TAG}"
-    echo "--- pip install pytorch3d==0.7.8+${P3D_TORCH_TAG} ---"
-    pip install "pytorch3d==0.7.8+${P3D_TORCH_TAG}" \
-        --extra-index-url https://miropsota.github.io/torch_packages_builder
+    _install_pytorch3d
     # The complete GenPose2 setup is handled by the INSTALL_GENPOSE2 block
     # below (forced on by INSTALL_MORPHEUS).
 fi

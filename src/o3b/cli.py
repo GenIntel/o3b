@@ -672,6 +672,9 @@ def _run_platform_setup(args):
     # Lmod modules to load before anything else (JSC systems have no usable
     # system python/git/CUDA); empty on clusters that need none.
     modules          = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
+    # CUDA archs for extension builds. Unset = torch auto-detects, which crashes
+    # on Grace-Hopper (sm_90a is unparseable by torch 2.6's _get_cuda_arch_flags).
+    torch_arch_list  = str(cfg.get("torch_cuda_arch_list", "") or "")
     username       = cfg.get("username", "")
     path_home      = cfg.get("path_home", path_ws)
     # run the setup on the login node instead of submitting it as a batch job:
@@ -781,6 +784,7 @@ def _run_platform_setup(args):
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
         "SKIP_SUBMODULES": skip_submodules,
         "MODULES":         modules,
+        **({"TORCH_CUDA_ARCH_LIST": torch_arch_list} if torch_arch_list else {}),
         "CREDENTIALS_SRC":  remote_cred_dir if cred_files else "",
         "CREDENTIALS_DEST": cred_dest_rel if cred_files else "",
         "HTTP_PROXY":      _proxy,
@@ -1196,6 +1200,7 @@ def _platform_srun_context(platform: str):
     proxy         = cfg.get("http_proxy", "") or ""   # empty = direct connection
     exclusive_nodes = str(cfg.get("exclusive_nodes", False)).lower() in ("true", "1", "yes")
     modules       = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
+    torch_arch_list = str(cfg.get("torch_cuda_arch_list", "") or "")
     total_mem     = _multiply_metric_with_unit(ram_per_cpu, cpu_count)
 
     path_ws        = cfg.get("path_ws", "")
@@ -1285,6 +1290,8 @@ def _platform_srun_context(platform: str):
         + "".join(f",{k}={v}" for k, v in env_layout["env_vars"].items()) +
         f",DEPS_TAG={deps_tag}"
     )
+    if torch_arch_list:
+        srun += f",TORCH_CUDA_ARCH_LIST={torch_arch_list}"
     # Under conda the toolchain comes from the env (CONDA_PREFIX), exported by
     # the preamble once the env is active.
     if not env_layout["use_conda"]:
@@ -2755,6 +2762,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         "PULL":            pull,
         "PULL_SUBMODULES": pull_subs,
         "MODULES":         modules,
+        **({"TORCH_CUDA_ARCH_LIST": str(cfg.get("torch_cuda_arch_list", "") or "")}
+           if cfg.get("torch_cuda_arch_list", "") else {}),
     }
     if _proxy:
         env_vars.update({

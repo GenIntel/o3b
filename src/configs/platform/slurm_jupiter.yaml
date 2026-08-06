@@ -97,6 +97,13 @@ cuda_version: "12.6"
 python_version: "3.12"
 torch_version: "2.6.0"
 
+# GH200 is compute capability 9.0. This must be set explicitly: left unset, torch
+# auto-detects from the visible cards and dies on this hardware, because
+# torch.cuda.get_arch_list() reports sm_90a and torch 2.6's _get_cuda_arch_flags
+# does int(arch.split('_')[1]) -> int('90a') -> ValueError. It also makes the
+# built extensions independent of which GPU the login node happens to expose.
+torch_cuda_arch_list: "9.0"
+
 # Compute nodes have no route to the internet (verified: curl to github fails
 # with "Couldn't connect to server"), so a batch-job setup could never clone or
 # pip-install. The login nodes do have connectivity and share the Grace-Hopper

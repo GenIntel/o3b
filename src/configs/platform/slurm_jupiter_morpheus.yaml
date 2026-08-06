@@ -1,0 +1,17 @@
+defaults:
+  - slurm_jupiter
+  - _self_
+
+
+deps:
+  #- diff3f
+  - morpheus
+  #- genpose2
+
+# partition: booster
+# node_count: 1
+# gpu_count_per_node: 4
+# cpu_count_per_gpu: 18       # 72 physical cores / 4 GPUs
+# ram_per_cpu: "6gb"          # advisory only: whole nodes (480gb) are allocated
+# exclusive_nodes: True       # JSC rejects --mem
+# walltime: "12:00:00"        # hard cap on booster
