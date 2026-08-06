@@ -49,9 +49,26 @@ partition:  alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-108
 # lmbdlc_gpu-rtx2080: problem: long waiting queue,
 username: sommerl
 
+# Exported by the job preamble (MP_START_METHOD / MP_SHARING_STRATEGY) and
+# applied at `import o3b` — see o3b/dataloading.py. Empty/absent = torch default.
 mp_start_method: "fork" # "fork" "spawn" "forkserver"
 mp_sharing_strategy: "file_system" # "file_descriptor" "file_system"
-# file_descriptor is default but doesnt work on slurm tf 
+# file_descriptor is the torch default but doesnt work on slurm: it passes one
+# fd per shared tensor and the compute nodes' soft RLIMIT_NOFILE is 1024
+# (propagated from the submit host), so DataLoader workers die mid-epoch with
+# "received 0 items of ancdata". file_system passes /dev/shm names instead
+# (/dev/shm is 851gb on dlc2gpu*, so the shm files are not a concern).
+#
+# file_system spawns torch/bin/torch_shm_manager, which is dynamically linked
+# and needs ${CONDA_PREFIX}/lib on LD_LIBRARY_PATH (libcupti.so.12) — the job
+# preamble exports it, but a bare `conda activate` does not, and the failure
+# reads "no response from torch_shm_manager", not a missing-library error.
+
+# `ulimit -n` for the job. "hard" = raise the soft limit to the hard one
+# (131072 on the compute nodes); a number sets it explicitly; absent leaves the
+# inherited 1024. Independent of mp_sharing_strategy — it also covers open
+# dataset shards, sockets and any library still using fd passing.
+nofile_limit: "hard"
 
 node_count: 1
 gpu_count_per_node: 1

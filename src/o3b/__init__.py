@@ -14,3 +14,13 @@ __version__ = "0.1.0"
 # setdefault, so an explicit OPENCV_IO_ENABLE_OPENEXR=0 in the environment still
 # wins — nothing in o3b flips it back off.
 os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
+# Torch multiprocessing settings the platform's job preamble exports (slurm
+# needs file_system sharing, see o3b.dataloading).  Guarded so the torch import
+# only happens when the environment actually asks for something — package
+# import is otherwise torch-free, and this must run before any DataLoader
+# worker is spawned, which package import is the earliest point to guarantee.
+if os.environ.get("MP_SHARING_STRATEGY") or os.environ.get("MP_START_METHOD"):
+    from o3b.dataloading import apply_mp_env
+
+    apply_mp_env()

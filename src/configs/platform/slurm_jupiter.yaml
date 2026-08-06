@@ -1,0 +1,128 @@
+defaults:
+  - default
+  - _self_
+  # - optional custom@: slurm_juwels_custom
+
+
+# SETUP JUELICH
+
+# 1) SETUP SSH
+# there are several hosts on juelich, to create an ssh key:
+
+# 1.1 create ssh key:
+# ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_jupiter
+# 1.2 copy public key: 
+# cat ~/.ssh/id_ed25519_jupiter.pub
+# 1.3 find online what is my ip addr (copy ip addr) 
+# 1.4 insert online: from="<ip-addr>,<ip-addr-mask>" <ssh-public-key>
+# from="132.230.0.0/16" ssh-ed25519 AAAAC3N...
+# 1.5 adapt ssh config
+# nano ~/.ssh/config
+# Host juwels
+#     User sommer7
+#     HostName juwels-booster.fz-juelich.de
+#     ServerAliveInterval 60
+#     IdentityFile ~/.ssh/id_ed25519_juwels
+# Host jupiter
+#     User sommer7
+#     HostName login.jupiter.fz-juelich.de
+#     ServerAliveInterval 60
+#     IdentityFile ~/.ssh/id_ed25519_jupiter
+
+
+
+
+
+# RUN ENVIRONMENT:
+# cd /p/project1/hai_1176/sommer7
+
+# sinfo -p booster
+# srun --partition=booster --account=hai_1176 --time=30:00 --pty /bin/bash 
+# sbatch scripth.sh
+
+# RUN ONCE: 
+# mkdir /p/project1/hai_1176/sommer7
+# mkdir /p/project1/hai_1176/sommer7
+# cd /p/project1/hai_1176/sommer7
+# export MY_PROJECT=hai_1176
+# echo $MY_PROJECT
+# rm /p/home/jusers/sommer7/juwels/.cache
+# rm /p/home/jusers/sommer7/juwels/.apptainer
+# rm /p/home/jusers/sommer7/juwels/.triton
+# [ -d ~/.cache ] && mv ~/.cache /p/scratch/"$MY_PROJECT"/"$USER"/.cache; mkdir -p /p/scratch/"$MY_PROJECT"/"$USER"/.cache; ln -s /p/scratch/"$MY_PROJECT"/"$USER"/.cache ~
+# [ -d ~/.apptainer ] && mv ~/.apptainer /p/scratch/"$MY_PROJECT"/"$USER"/.apptainer; mkdir -p /p/scratch/"$MY_PROJECT"/"$USER"/.apptainer; ln -s /p/scratch/"$MY_PROJECT"/"$USER"/.apptainer ~
+# [ -d ~/.triton ] && mv ~/.triton /p/scratch/"$MY_PROJECT"/"$USER"/.triton; mkdir -p /p/scratch/"$MY_PROJECT"/"$USER"/.triton; ln -s /p/scratch/"$MY_PROJECT"/"$USER"/.triton ~
+# sinfo -p booster
+
+# /p/software/default/stages/2026/software/CUDA/13
+# /p/software/default/stages/2026/software/CUDA/12
+# module use $OTHERSTAGES
+# module load Stages/2025
+# module load CUDA/12
+# module load CUDA/13
+
+
+# module load git
+# module load Python
+# module load Stages/2026
+# module load CUDA/13
+# CUDA_VERSION=?
+# module load Stages/2025
+# CUDA_VERSION="12.6"
+# cd /p/project1/hai_1244/sommer7/od3d
+# source venv_od3d_12.6/bin/activate
+
+# CUDA_HOME=/p/software/default/stages/2025/software/CUDA/12
+# PATH=${CUDA_HOME}/bin:${PATH}
+# LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+# source venv_od3d_12.6/bin/activate
+
+link: local
+#link: juwels_booster # cannot start from 
+use_slurm: True
+slurm_type: juwels # tf, juwels
+
+shared_home_with_local: True
+restart_upon_fail: True
+ws_name: od3d # /work/dlclarge1/sommerl-od3d
+pull_od3d: True
+pull_od3d_submodules: True
+install_od3d: False
+juwels_project: hai_1244
+
+path_od3d: /p/project1/${.juwels_project}/sommer7/od3d
+#path_od3d: /work/dlclarge1/sommerl-od3d/common3d
+path_datasets_raw: /p/project1/${.juwels_project}/sommer7/datasets
+path_datasets_preprocess: /p/project1/${.juwels_project}/sommer7/datasets #for student: create your own directory in dlclarge
+path_exps: /p/project1/${.juwels_project}/sommer7/exps
+#path_cuda: /work/dlclarge1/sommerl-od3d/cudas/cuda-11.7 # should be cuda-11.7
+#path_cuda: /usr/local/cuda-11.7 # cannot use shared file cuda for pytorch3d
+path_cuda: /p/software/default/stages/2025/software/CUDA/12
+#path_cuda: /p/software/default/stages/2026/software/CUDA/13
+path_home: /p/project1/${.juwels_project}/sommer7
+
+partition:  booster 
+username: sommer7 # hai_1176 ${.juwels_project}
+account: ${.juwels_project}
+requeue: False
+
+node_count: 1
+gpu_count_per_node: 4
+cpu_count_per_gpu: 12 # should be 24 but somehow they cap it with billing at 12 (48 for 4 gpus)
+ram_per_cpu: "10gb" # should be 5gb
+walltime: "24:00:00" #  "24:00:00"
+renderer: pytorch3d
+
+mp_start_method: "fork" # "fork" "spawn" "forkserver"
+mp_sharing_strategy: "file_system" # "file_descriptor" "file_system"
+# file_descriptor is default but doesnt work on slurm tf
+nofile_limit: "hard" # `ulimit -n` for the job, see slurm.yaml
+
+
+#nodes_exclude: dlc2gpu10 # ecc cudea error
+# dlc2gpu09,dlc2gpu10,dlc2gpu11,dlc2gpu01,dlc2gpu08  # shm problem, problem for ddp
+# dlc2gpu01 was suddenly having no space left on device problem
+# dlc2gpu08 sometimes had a problem after time (also dlc2gpu03, dlc2gpu13)
+
+# dlc2gpu12

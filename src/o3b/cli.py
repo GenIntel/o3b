@@ -248,7 +248,7 @@ def _run_dataset_viz_remote(args) -> None:
     import uuid
 
     (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-     use_conda, path_conda) = _platform_srun_context(args.platform)
+     use_conda, path_conda, mp_env) = _platform_srun_context(args.platform)
 
     # viser silently increments its port when the requested one is taken, which
     # would leave the tunnel pointing at nothing — a random high port makes a
@@ -259,7 +259,7 @@ def _run_dataset_viz_remote(args) -> None:
     job_name    = f"o3b_viz_{uuid.uuid4().hex[:8]}"
 
     init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
-                                 use_conda=use_conda, path_conda=path_conda)
+                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env)
     init_lines += [
         "",
         f"export O3B_VISER_PORT={remote_port}",
@@ -1021,12 +1021,30 @@ def _run_platform_status(args):
             jobs = _fetch_jobs(ssh_host, username)
 
 
+def _mp_env_from_cfg(cfg) -> dict:
+    """Environment the job preamble exports for torch multiprocessing / fd limits.
+
+    Platform keys (see configs/platform/slurm.yaml):
+      mp_sharing_strategy → MP_SHARING_STRATEGY  applied at `import o3b`
+      mp_start_method     → MP_START_METHOD      applied at `import o3b`
+      nofile_limit        → NOFILE_LIMIT         consumed by `_srun_env_lines`
+                                                 as a `ulimit -n`, not exported
+    Absent keys are omitted, leaving the node's / torch's defaults in place.
+    """
+    keys = {"mp_sharing_strategy": "MP_SHARING_STRATEGY",
+            "mp_start_method":     "MP_START_METHOD",
+            "nofile_limit":        "NOFILE_LIMIT"}
+    return {var: str(cfg.get(key, None)) for key, var in keys.items()
+            if cfg.get(key, None)}
+
+
 def _platform_srun_context(platform: str):
     """Return the srun context for a platform.
 
     (ssh_host, srun_base, repo_path, env_path, path_cuda, path_ws,
-     hf_datasets_cache, use_conda, path_conda) — env_path is the venv directory
-    or, with use_conda, the conda env prefix.
+     hf_datasets_cache, use_conda, path_conda, mp_env) — env_path is the venv
+    directory or, with use_conda, the conda env prefix; mp_env is the
+    multiprocessing / fd-limit environment from `_mp_env_from_cfg`.
     """
     import os, re, subprocess
     from omegaconf import OmegaConf
@@ -1132,18 +1150,21 @@ def _platform_srun_context(platform: str):
         srun += f",CUDA_HOME={path_cuda},CUDACXX={path_cuda}/bin/nvcc"
 
     return (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-            env_layout["use_conda"], env_layout["path_conda"])
+            env_layout["use_conda"], env_layout["path_conda"], _mp_env_from_cfg(cfg))
 
 
 def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
                     hf_datasets_cache: str = "", use_conda: bool = False,
-                    path_conda: str = "") -> list[str]:
+                    path_conda: str = "", mp_env: dict | None = None) -> list[str]:
     """Shell lines that run on the compute node before the actual command.
 
-    Order: CUDA env → conditional setup script → conditional pull/checkout
-           → env activation (venv or conda) → cd into repo.
+    Order: fd limit + multiprocessing env → CUDA env → conditional setup script
+           → conditional pull/checkout → env activation (venv or conda)
+           → cd into repo.
     The SETUP / PULL / PULL_SUBMODULES / BRANCH values come from the srun
     --export env vars so the same script works regardless of platform config.
+    ``mp_env`` comes from `_mp_env_from_cfg`; it is emitted first so it applies
+    to everything the job runs, interactive shell or batch command alike.
     """
     def _echo(msg: str, indent: str = "") -> str:
         return f'{indent}echo "[o3b-init $(date +%T)] {msg}"'
@@ -1152,6 +1173,25 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
         _echo("sourcing ~/.bashrc"),
         "[ -f ~/.bashrc ] && . ~/.bashrc",
     ]
+    mp_env = dict(mp_env or {})
+    nofile = mp_env.pop("NOFILE_LIMIT", "")
+    if nofile:
+        # slurm propagates the submit host's soft limit (1024) to the job, well
+        # below what DataLoader fd passing needs; the hard limit is 131072
+        # and raising within it needs no privileges.  Non-fatal: some shells
+        # refuse, and the run is still worth attempting.
+        target = '"$(ulimit -Hn)"' if str(nofile) == "hard" else str(nofile)
+        lines += [
+            f"ulimit -n {target} 2>/dev/null || true",
+            _echo("open file limit: $(ulimit -Sn) (hard $(ulimit -Hn))"),
+        ]
+    for key, value in mp_env.items():
+        lines.append(f"export {key}={value}")
+    if mp_env:
+        # echo the exported values, not the ones we templated in, so the log
+        # shows what the job actually runs with
+        exported = " ".join(f"{key}=${{{key}}}" for key in mp_env)
+        lines.append(_echo(f"torch multiprocessing: {exported}"))
     # With conda the CUDA toolchain lives inside the env and is exported after
     # activation below; pointing at the system install here would shadow it.
     if not use_conda:
@@ -1285,12 +1325,12 @@ def _run_platform_runi(args):
     import uuid
 
     (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-     use_conda, path_conda) = _platform_srun_context(args.platform)
+     use_conda, path_conda, mp_env) = _platform_srun_context(args.platform)
 
     # Write a small activation script so bash --init-file can source it without
     # wrapping srun in a bash -c subshell (which breaks the PTY).
     init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
-                                 use_conda=use_conda, path_conda=path_conda)
+                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env)
     remote_init = f"{path_ws}/.od3d_init" if path_ws else "~/.od3d_init"
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_init}"],
@@ -1387,7 +1427,7 @@ def _run_platform_setupi(args):
     import subprocess
 
     (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-     use_conda, path_conda) = _platform_srun_context(args.platform)
+     use_conda, path_conda, mp_env) = _platform_srun_context(args.platform)
 
     cfg, _ = _load_platform_config(args.platform)
     username = cfg.get("username", "")
@@ -1418,7 +1458,7 @@ def _run_platform_setupi(args):
     _scp(setup_script_local, remote_setup)
 
     init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
-                                 use_conda=use_conda, path_conda=path_conda)
+                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env)
     init_lines += [
         "",
         f'echo "================================================================"',
@@ -2564,7 +2604,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         ["#!/usr/bin/env bash", "set -euo pipefail", ""] +
         _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
                         use_conda=env_layout["use_conda"],
-                        path_conda=env_layout["path_conda"]) +
+                        path_conda=env_layout["path_conda"],
+                        mp_env=_mp_env_from_cfg(cfg)) +
         ["", command]
     )
     remote_run_script = f"{path_ws}/.bench_run_{job_name}_{ts}.sh"
