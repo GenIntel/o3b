@@ -5,6 +5,11 @@ defaults:
 
 ssh: slurm
 
+# the LMB nodes have no direct route to the internet; everything outbound
+# (github, pypi, huggingface) goes through this proxy. Empty on platforms that
+# route directly -- see slurm_jupiter.yaml.
+http_proxy: http://tfproxy.informatik.intra.uni-freiburg.de:8080
+
 restart_upon_fail: True
 
 branch: main

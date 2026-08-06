@@ -1,130 +1,132 @@
 defaults:
   - default
   - _self_
-  # - optional custom@: slurm_juwels_custom
+  - optional override custom@: jupiter_custom
 
+# JUPITER (JSC Jülich) — NVIDIA Grace-Hopper, **aarch64**.
+#
+#   o3b platform setup -p slurm_jupiter
+#
+# How this differs from the LMB cluster (slurm.yaml), and why each key is set:
+#
+#  * arch      — Grace CPUs are arm64, not x86_64. Every wheel must be an
+#                aarch64 build; CUDA's per-target tree is targets/sbsa-linux/
+#                rather than targets/x86_64-linux/ (handled automatically in
+#                setup_slurm.sh / the job preamble via `uname -m`).
+#  * account   — JSC rejects any job without a budget account.
+#  * walltime  — hard cap of 12:00:00 on the booster partition.
+#  * node      — whole nodes are allocated and charged; --mem is rejected, so
+#                exclusive_nodes disables it. 4 GPUs and 288 SMT cores per node.
+#  * proxy     — JSC routes to the internet directly. Empty on purpose: the
+#                tfproxy inherited from slurm.yaml would break every request.
+#  * modules   — no usable system python / git / CUDA; all come from Lmod.
+#  * conda     — the Anaconda *defaults* channel is blocked here for licensing
+#                reasons, so `conda create python=…` cannot resolve. Use a venv
+#                on top of the Lmod Python instead of the conda layout the LMB
+#                platform uses.
+#
+# SETUP SSH (one-off)
+#   ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_jupiter
+#   cat ~/.ssh/id_ed25519_jupiter.pub
+#   upload via JuDoor with a from= clause, e.g.
+#     from="132.230.0.0/16" ssh-ed25519 AAAAC3N...
+#   ~/.ssh/config:
+#     Host jupiter
+#         User sommer7
+#         HostName login.jupiter.fz-juelich.de
+#         ServerAliveInterval 60
+#         IdentityFile ~/.ssh/id_ed25519_jupiter
+#         ControlMaster auto
+#         ControlPath ~/.ssh/cm-%r@%h:%p
+#         ControlPersist 8h
+#
+# JUPITER additionally requires a TOTP second factor on every connection, which
+# the non-interactive ssh/scp calls `o3b platform setup` makes cannot answer.
+# The ~/.ssh/config entry above therefore sets ControlMaster/ControlPath/
+# ControlPersist: authenticate once per session with
+#     ssh jupiter          # enter the 6-digit token, then exit
+# and every later connection reuses that master socket silently. Check or drop
+# the socket with `ssh -O check jupiter` / `ssh -O exit jupiter`.
 
-# o3b platform setup -p slurm_jupiter
+ssh: jupiter
+username: sommer7
+account: scale3dcompnet
+project: scale3dcompnet
 
-# SETUP JUELICH
+# Login and compute nodes do NOT mount the same tree. Login sees the old JUST5
+# projects under /p (hai_1244 lives there); compute nodes have no /p at all and
+# instead mount the new filesystem under /e, where only scale3dcompnet exists.
+# /e is visible from both, so every path below must be an /e path -- a /p path
+# would work interactively and then fail inside every job.
+#   NOTE: the datasets under /p/project1/hai_1244/sommer7 are therefore NOT
+#   reachable from compute nodes and have to be copied to /e before use.
 
-# 1) SETUP SSH
-# there are several hosts on juelich, to create an ssh key:
+# JSC compute and login nodes reach the internet directly — must stay empty to
+# override the tfproxy that slurm.yaml sets for LMB.
+http_proxy: ""
 
-# 1.1 create ssh key:
-# ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_jupiter
-# 1.2 copy public key: 
-# cat ~/.ssh/id_ed25519_jupiter.pub
-# 1.3 find online what is my ip addr (copy ip addr) 
-# 1.4 insert online: from="<ip-addr>,<ip-addr-mask>" <ssh-public-key>
-# from="132.230.0.0/16" ssh-ed25519 AAAAC3N...
-# 1.5 adapt ssh config
-# nano ~/.ssh/config
-# Host juwels
-#     User sommer7
-#     HostName juwels-booster.fz-juelich.de
-#     ServerAliveInterval 60
-#     IdentityFile ~/.ssh/id_ed25519_juwels
-# Host jupiter
-#     User sommer7
-#     HostName login.jupiter.fz-juelich.de
-#     ServerAliveInterval 60
-#     IdentityFile ~/.ssh/id_ed25519_jupiter
+# Lmod modules, loaded (in order) before anything else by both setup_slurm.sh
+# and the compute-node preamble.
+modules:
+  - Stages/2025
+  - GCC
+  - CUDA/12
+  - Python
+  - git
 
+path_ws: /e/project1/${.project}/sommer7
+path_home: /e/project1/${.project}/sommer7
+path_datasets_raw: /e/project1/${.project}/sommer7/datasets
+path_datasets_preprocess: /e/project1/${.project}/sommer7/datasets
+path_exps: /e/project1/${.project}/sommer7/exps
+# Stage 2025: nvcc 12.6 and Python 3.12.3. Stage 2026 is the current default but
+# ships CUDA 13 / Python 3.13, which torch 2.6 has no wheels for.
+path_cuda: /e/software/default/stages/2025/software/CUDA/12
 
+# scratch is the I/O-heavy tier (auto-purged after 90 days), which is what the
+# HF Arrow build cache wants; the finished shards land in path_datasets_preprocess.
+path_hf_datasets_cache: /e/scratch/${.project}/sommer7/hf_datasets
 
+# venv, not conda — see the note on the blocked defaults channel above.
+use_conda: False
 
+# aarch64 CUDA wheels: torch publishes sbsa builds under the cu126 index.
+# cuda_version drives the wheel index (cu126) and the venv name; it must be set
+# explicitly because JSC's install is .../CUDA/12 (the dir name loses the minor).
+cuda_version: "12.6"
+python_version: "3.12"
+torch_version: "2.6.0"
 
-# RUN ENVIRONMENT:
-# cd /p/project1/hai_1176/sommer7
+# Compute nodes have no route to the internet (verified: curl to github fails
+# with "Couldn't connect to server"), so a batch-job setup could never clone or
+# pip-install. The login nodes do have connectivity and share the Grace-Hopper
+# arch, so CUDA extensions built there are correct for the compute nodes.
+setup_on_login: True
 
-# sinfo -p booster
-# srun --partition=booster --account=hai_1176 --time=30:00 --pty /bin/bash 
-# sbatch scripth.sh
+branch: main
+pull: True
+pull_submodules: True
+skip_submodules:
+  - third_party/od3d
 
-# RUN ONCE: 
-# mkdir /p/project1/hai_1176/sommer7
-# mkdir /p/project1/hai_1176/sommer7
-# cd /p/project1/hai_1176/sommer7
-# export MY_PROJECT=hai_1176
-# echo $MY_PROJECT
-# rm /p/home/jusers/sommer7/juwels/.cache
-# rm /p/home/jusers/sommer7/juwels/.apptainer
-# rm /p/home/jusers/sommer7/juwels/.triton
-# [ -d ~/.cache ] && mv ~/.cache /p/scratch/"$MY_PROJECT"/"$USER"/.cache; mkdir -p /p/scratch/"$MY_PROJECT"/"$USER"/.cache; ln -s /p/scratch/"$MY_PROJECT"/"$USER"/.cache ~
-# [ -d ~/.apptainer ] && mv ~/.apptainer /p/scratch/"$MY_PROJECT"/"$USER"/.apptainer; mkdir -p /p/scratch/"$MY_PROJECT"/"$USER"/.apptainer; ln -s /p/scratch/"$MY_PROJECT"/"$USER"/.apptainer ~
-# [ -d ~/.triton ] && mv ~/.triton /p/scratch/"$MY_PROJECT"/"$USER"/.triton; mkdir -p /p/scratch/"$MY_PROJECT"/"$USER"/.triton; ln -s /p/scratch/"$MY_PROJECT"/"$USER"/.triton ~
-# sinfo -p booster
+setup: False
+restart_upon_fail: False   # JSC accounting charges a requeued job again
 
-# /p/software/default/stages/2026/software/CUDA/13
-# /p/software/default/stages/2026/software/CUDA/12
-# module use $OTHERSTAGES
-# module load Stages/2025
-# module load CUDA/12
-# module load CUDA/13
+deps:
+  #- diff3f
+  #- morpheus
+  #- genpose2
 
-
-# module load git
-# module load Python
-# module load Stages/2026
-# module load CUDA/13
-# CUDA_VERSION=?
-# module load Stages/2025
-# CUDA_VERSION="12.6"
-# cd /p/project1/hai_1244/sommer7/od3d
-# source venv_od3d_12.6/bin/activate
-
-# CUDA_HOME=/p/software/default/stages/2025/software/CUDA/12
-# PATH=${CUDA_HOME}/bin:${PATH}
-# LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
-
-# source venv_od3d_12.6/bin/activate
-
-link: local
-#link: juwels_booster # cannot start from 
-use_slurm: True
-slurm_type: juwels # tf, juwels
-
-shared_home_with_local: True
-restart_upon_fail: True
-ws_name: od3d # /work/dlclarge1/sommerl-od3d
-pull_od3d: True
-pull_od3d_submodules: True
-install_od3d: False
-juwels_project: hai_1244
-
-path_od3d: /p/project1/${.juwels_project}/sommer7/od3d
-#path_od3d: /work/dlclarge1/sommerl-od3d/common3d
-path_datasets_raw: /p/project1/${.juwels_project}/sommer7/datasets
-path_datasets_preprocess: /p/project1/${.juwels_project}/sommer7/datasets #for student: create your own directory in dlclarge
-path_exps: /p/project1/${.juwels_project}/sommer7/exps
-#path_cuda: /work/dlclarge1/sommerl-od3d/cudas/cuda-11.7 # should be cuda-11.7
-#path_cuda: /usr/local/cuda-11.7 # cannot use shared file cuda for pytorch3d
-path_cuda: /p/software/default/stages/2025/software/CUDA/12
-#path_cuda: /p/software/default/stages/2026/software/CUDA/13
-path_home: /p/project1/${.juwels_project}/sommer7
-
-partition:  booster 
-username: sommer7 # hai_1176 ${.juwels_project}
-account: ${.juwels_project}
-requeue: False
-
+partition: booster
 node_count: 1
 gpu_count_per_node: 4
-cpu_count_per_gpu: 12 # should be 24 but somehow they cap it with billing at 12 (48 for 4 gpus)
-ram_per_cpu: "10gb" # should be 5gb
-walltime: "24:00:00" #  "24:00:00"
+cpu_count_per_gpu: 18       # 72 physical cores / 4 GPUs
+ram_per_cpu: "6gb"          # advisory only: whole nodes (480gb) are allocated
+exclusive_nodes: True       # JSC rejects --mem
+walltime: "12:00:00"        # hard cap on booster
+
 renderer: pytorch3d
 
-mp_start_method: "fork" # "fork" "spawn" "forkserver"
-mp_sharing_strategy: "file_system" # "file_descriptor" "file_system"
-# file_descriptor is default but doesnt work on slurm tf
-nofile_limit: "hard" # `ulimit -n` for the job, see slurm.yaml
-
-
-#nodes_exclude: dlc2gpu10 # ecc cudea error
-# dlc2gpu09,dlc2gpu10,dlc2gpu11,dlc2gpu01,dlc2gpu08  # shm problem, problem for ddp
-# dlc2gpu01 was suddenly having no space left on device problem
-# dlc2gpu08 sometimes had a problem after time (also dlc2gpu03, dlc2gpu13)
-
-# dlc2gpu12
+mp_start_method: "fork"      # "fork" "spawn" "forkserver"
+mp_sharing_strategy: "file_system"
+nofile_limit: "hard"         # `ulimit -n` for the job, see slurm.yaml

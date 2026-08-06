@@ -159,11 +159,10 @@ _git_setup_credentials
 # e.g. /usr/local/cuda-12.4 + 3.10 + 2.6.0  →  venv_py310_cu124_torch26
 # Under conda the CUDA version comes from CUDA_VERSION (the conda toolkit),
 # not from the basename of the system PATH_CUDA.
-if _is_true "${USE_CONDA}"; then
-    CUDA_TAG="cu$(echo "${CUDA_VERSION}" | tr -d '.')"
-else
-    CUDA_TAG="cu$(basename "${PATH_CUDA}" | sed 's/cuda-//;s/\.//')"
-fi
+# Always from CUDA_VERSION (o3b defaults it to the basename of PATH_CUDA, so the
+# LMB tag stays cu124). The basename alone breaks on JSC, whose install is
+# .../CUDA/12 with nvcc 12.6 -- that gave "cu12" and a 404 pytorch index URL.
+CUDA_TAG="cu$(echo "${CUDA_VERSION}" | tr -d '.')"
 PY_TAG="py$(echo "${PYTHON_VERSION}" | sed 's/\.//')"
 TORCH_TAG="torch$(echo "${TORCH_VERSION}" | cut -d. -f1,2 | sed 's/\.//')"
 ENV_TAG="${PY_TAG}_${CUDA_TAG}_${TORCH_TAG}${DEPS_TAG:+_${DEPS_TAG}}"
@@ -305,9 +304,21 @@ echo "--- pip bootstrap ---"
 # (-fno-plt, -ftree-vectorize, -fdebug-prefix-map, …), which nvcc rejects with
 # "nvcc fatal: Unknown option", breaking every CUDA extension build below.
 pip install --upgrade pip setuptools wheel ninja
+# Build backends for the dependencies that have no aarch64 wheel and so must be
+# compiled from source: libigl needs scikit_build_core + cmake, gdist needs
+# Cython + numpy. o3b is installed with --no-build-isolation, so pip cannot pull
+# these in itself -- without them the install dies with "Cannot import
+# 'scikit_build_core.build'" / "No module named 'Cython'".
+# No-ops on x86_64, where those dependencies all resolve to wheels.
+pip install --upgrade cmake scikit-build-core pybind11 Cython numpy setuptools-scm
 
-# ensure correct version
-pip install torch torchvision --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
+# ensure correct version -- pinned, not "latest in the index". TORCH_VERSION
+# already names the env (venv_..._torch26) and builds the pytorch3d wheel tag
+# (pt2.6.0cu126) and the torch-scatter URLs below, so an unpinned install that
+# resolves to something else yields an env whose name lies and whose extension
+# wheels are built for the wrong torch ABI. Unpinned happened to give 2.6.0 on
+# the cu124 index but 2.13.0 on cu126.
+pip install "torch==${TORCH_VERSION}" torchvision --index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
 
 # nvcc rejects the default host compiler on ubuntu 24 (gcc-14); pin it to 13.
 # Guarded so nodes without gcc-13 keep their default compiler. Stays exported
@@ -333,6 +344,17 @@ pip install -e .
 echo "--- pip install optional deps ---"
 pip install pyrender2
 pip install xatlas
+
+# open3d and libigl are o3b extras rather than hard dependencies: neither can be
+# installed on linux-aarch64 (see the note in o3b's pyproject.toml). Installed
+# best-effort so x86_64 platforms keep getting them exactly as before, while
+# aarch64 carries on without -- nothing on o3b's core import path needs either.
+for _opt in open3d libigl; do
+    if ! pip install "${_opt}"; then
+        echo "WARNING: ${_opt} unavailable for $(uname -m)/python${PYTHON_VERSION} -- continuing."
+        echo "         Code paths importing it will fail; on JSC use renderer: pytorch3d."
+    fi
+done
 
 
 if [ "${INSTALL_DIFF3F}" = "true" ] || [ "${INSTALL_DIFF3F}" = "True" ]; then

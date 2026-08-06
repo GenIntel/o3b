@@ -248,7 +248,7 @@ def _run_dataset_viz_remote(args) -> None:
     import uuid
 
     (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-     use_conda, path_conda, mp_env) = _platform_srun_context(args.platform)
+     use_conda, path_conda, mp_env, modules) = _platform_srun_context(args.platform)
 
     # viser silently increments its port when the requested one is taken, which
     # would leave the tunnel pointing at nothing — a random high port makes a
@@ -259,7 +259,8 @@ def _run_dataset_viz_remote(args) -> None:
     job_name    = f"o3b_viz_{uuid.uuid4().hex[:8]}"
 
     init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
-                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env)
+                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env,
+                                 modules=modules)
     init_lines += [
         "",
         f"export O3B_VISER_PORT={remote_port}",
@@ -605,8 +606,11 @@ def _resolve_env_layout(cfg, repo_path: str, repo_name: str = "") -> dict:
     cuda_version   = str(cfg.get("cuda_version", "") or
                          os.path.basename(path_cuda).replace("cuda-", ""))
 
-    cuda_tag  = "cu" + (cuda_version if use_conda
-                        else os.path.basename(path_cuda).replace("cuda-", "")).replace(".", "")
+    # Always from cuda_version, which defaults to the basename of path_cuda and
+    # so keeps the LMB tag at cu124. Deriving it from the basename directly
+    # breaks on JSC, where the install is .../CUDA/12 (nvcc 12.6) rather than
+    # .../cuda-12.4 -- that yielded "cu12" and a 404 pytorch index URL.
+    cuda_tag  = "cu" + cuda_version.replace(".", "")
     py_tag    = "py" + python_version.replace(".", "")
     torch_tag = "torch" + ".".join(torch_version.split(".")[:2]).replace(".", "")
     env_tag   = f"{py_tag}_{cuda_tag}_{torch_tag}" + (f"_{deps_tag}" if deps_tag else "")
@@ -670,6 +674,9 @@ def _run_platform_setup(args):
     modules          = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
     username       = cfg.get("username", "")
     path_home      = cfg.get("path_home", path_ws)
+    # run the setup on the login node instead of submitting it as a batch job:
+    # required wherever compute nodes have no internet access (JSC)
+    setup_on_login = str(cfg.get("setup_on_login", False)).lower() in ("true", "1", "yes")
 
     # Walk up from __file__ to find the outermost git repo (the repo that
     # contains o3b as a submodule) via --show-superproject-working-tree.
@@ -754,8 +761,10 @@ def _run_platform_setup(args):
     # venv (default) or conda env — same resolution as `o3b run` / `o3b runi`
     env_layout = _resolve_env_layout(cfg, f"{path_ws}/{repo_name}", repo_name)
 
-    # Build sbatch wrapper with #SBATCH headers from the platform config
-    _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
+    # Build sbatch wrapper with #SBATCH headers from the platform config.
+    # Only LMB reaches the internet through tfproxy; JSC routes directly and a
+    # proxy set there breaks every outbound request, so this is per platform.
+    _proxy = cfg.get("http_proxy", "") or ""
     env_vars = {
         "PATH_WS":         path_ws,
         "PATH_CUDA":       path_cuda,
@@ -812,6 +821,60 @@ def _run_platform_setup(args):
             env={**os.environ, **local_env},
             check=True,
         )
+        return
+
+    # ── login-node setup (setup_on_login: true) ───────────────────────────────
+    # JSC compute nodes have no route to the internet, so the usual "submit the
+    # setup as a batch job" model cannot clone or pip-install there at all. The
+    # login nodes do have connectivity (and, on JUPITER, the same Grace-Hopper
+    # arch as the compute nodes, so CUDA extensions build correctly). Run the
+    # script over ssh instead of sbatch, streaming its output.
+    if setup_on_login:
+        runner = "\n".join([
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            "",
+            "\n".join(f"export {k}={v!r}" for k, v in env_vars.items()),
+            "",
+            f"bash {remote_setup}",
+        ]) + "\n"
+        local_runner = _save_script_locally(f"setup_{repo_name}_login", runner, ts)
+        print(f"  saved locally: {local_runner}")
+
+        subprocess.run(
+            ["ssh", ssh_host, f"mkdir -p {remote_run_dir} && chmod 700 {remote_run_dir}"],
+            check=True,
+        )
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as tmp:
+            tmp.write(runner)
+            tmp_runner = tmp.name
+        remote_runner = f"{remote_run_dir}/setup_login.sh"
+        try:
+            _scp(setup_script_local, remote_setup)
+            _scp(tmp_runner, remote_runner)
+        finally:
+            Path(tmp_runner).unlink(missing_ok=True)
+
+        if cred_files:
+            subprocess.run(
+                ["ssh", ssh_host, f"mkdir -p {remote_cred_dir} && chmod 700 {remote_cred_dir}"],
+                check=True,
+            )
+            for cred in cred_files:
+                _scp(cred, f"{remote_cred_dir}/{cred.name}")
+            subprocess.run(["ssh", ssh_host, f"chmod 600 {remote_cred_dir}/*.yaml"], check=True)
+
+        # keep the canonical copy fresh for `o3b platform setupi`; mv, not scp,
+        # so a concurrent run reading it is not truncated mid-line
+        print(f"Running setup on {ssh_host} (login node)…")
+        remote_cmd = (
+            f"chmod +x {remote_setup} {remote_runner} && "
+            f"cp {remote_setup} {path_ws}/.setup_slurm.sh.new && "
+            f"mv -f {path_ws}/.setup_slurm.sh.new {path_ws}/setup_slurm.sh && "
+            f"bash {remote_runner}"
+        )
+        subprocess.run(["ssh", ssh_host, remote_cmd], check=True)
         return
 
     sbatch_script = _make_sbatch_script(
@@ -1131,6 +1194,7 @@ def _platform_srun_context(platform: str):
     nodes_exclude = cfg.get("nodes_exclude", None)
     account       = cfg.get("account", None)          # mandatory on JSC, unset at LMB
     proxy         = cfg.get("http_proxy", "") or ""   # empty = direct connection
+    exclusive_nodes = str(cfg.get("exclusive_nodes", False)).lower() in ("true", "1", "yes")
     modules       = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
     total_mem     = _multiply_metric_with_unit(ram_per_cpu, cpu_count)
 
@@ -1179,9 +1243,11 @@ def _platform_srun_context(platform: str):
         f" --ntasks-per-node 1"
         f" --gres gpu:{gpu_count}"
         f" --cpus-per-task {cpu_count}"
-        f" --mem {total_mem}"
         f" --time {walltime}"
     )
+    # JSC allocates (and charges) whole nodes and rejects --mem outright
+    if not exclusive_nodes:
+        srun += f" --mem {total_mem}"
     if partition:
         srun += f" --partition {partition}"
     if account:
@@ -1416,12 +1482,13 @@ def _run_platform_runi(args):
     import uuid
 
     (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-     use_conda, path_conda, mp_env) = _platform_srun_context(args.platform)
+     use_conda, path_conda, mp_env, modules) = _platform_srun_context(args.platform)
 
     # Write a small activation script so bash --init-file can source it without
     # wrapping srun in a bash -c subshell (which breaks the PTY).
     init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
-                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env)
+                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env,
+                                 modules=modules)
     remote_init = f"{path_ws}/.od3d_init" if path_ws else "~/.od3d_init"
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_init}"],
@@ -1518,7 +1585,7 @@ def _run_platform_setupi(args):
     import subprocess
 
     (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-     use_conda, path_conda, mp_env) = _platform_srun_context(args.platform)
+     use_conda, path_conda, mp_env, modules) = _platform_srun_context(args.platform)
 
     cfg, _ = _load_platform_config(args.platform)
     username = cfg.get("username", "")
@@ -1552,7 +1619,8 @@ def _run_platform_setupi(args):
     subprocess.run(["ssh", ssh_host, f"mv -f {remote_setup}.new {remote_setup}"], check=True)
 
     init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
-                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env)
+                                 use_conda=use_conda, path_conda=path_conda, mp_env=mp_env,
+                                 modules=modules)
     init_lines += [
         "",
         f'echo "================================================================"',
@@ -2668,7 +2736,9 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     env_layout = _resolve_env_layout(cfg, repo_path, repo_name)
     env_path   = env_layout["env_path"]
 
-    _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
+    # empty on platforms with a direct connection (JSC); only LMB needs tfproxy
+    _proxy  = cfg.get("http_proxy", "") or ""
+    modules = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
     env_vars = {
         "PATH_WS":         path_ws,
         "PATH_CUDA":       path_cuda,
@@ -2684,11 +2754,13 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         "BRANCH":          branch,
         "PULL":            pull,
         "PULL_SUBMODULES": pull_subs,
-        "HTTP_PROXY":      _proxy,
-        "HTTPS_PROXY":     _proxy,
-        "http_proxy":      _proxy,
-        "https_proxy":     _proxy,
+        "MODULES":         modules,
     }
+    if _proxy:
+        env_vars.update({
+            "HTTP_PROXY": _proxy, "HTTPS_PROXY": _proxy,
+            "http_proxy": _proxy, "https_proxy": _proxy,
+        })
 
     from datetime import datetime
     ts = datetime.now().strftime("%m%d_%H%M%S")
@@ -2699,7 +2771,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
                         use_conda=env_layout["use_conda"],
                         path_conda=env_layout["path_conda"],
-                        mp_env=_mp_env_from_cfg(cfg)) +
+                        mp_env=_mp_env_from_cfg(cfg),
+                        modules=modules) +
         ["", command]
     )
     remote_run_script = f"{path_ws}/.bench_run_{job_name}_{ts}.sh"

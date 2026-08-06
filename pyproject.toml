@@ -12,8 +12,6 @@ dependencies = [
     "omegaconf",
     "opencv-python<5",  # opencv 5.0 wheels dropped OpenEXR support (depth/mask .exr loading)
     "torchvision",
-    "open3d",
-    "libigl",
     "potpourri3d", # fmap
     "robust-laplacian", # fmap
     "xatlas",
@@ -38,6 +36,17 @@ od3d_dataset = "o3b.dataset.cli:main"
 [project.optional-dependencies]
 pyrender = ["pyrender2"]
 nvdiffrast = ["nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git"]
+# Optional because neither installs on linux-aarch64 (JUPITER's Grace nodes):
+#  * open3d ships aarch64 wheels only up to 0.18.0/cp311, and JSC offers python
+#    3.12+ only, so no wheel can ever match.
+#  * libigl has no aarch64 wheel and its sdist compiles but then dies in
+#    nanobind stub generation with "ImportError: std::bad_cast".
+# Neither is on the core import path -- o3b, o3b.cli, the dataset loaders,
+# datatypes and viz all import cleanly without them -- so they are hard
+# requirements nowhere and setup_slurm.sh installs them best-effort, which keeps
+# every x86_64 platform exactly as before.
+open3d = ["open3d"]
+libigl = ["libigl"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
