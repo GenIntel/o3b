@@ -706,6 +706,23 @@ def _run_platform_setup(args):
     remote_setup  = f"{path_ws}/setup_slurm.sh"
     remote_sbatch = f"{path_ws}/setup_slurm_job.sh"
 
+    # credentials/custom/*.yaml is gitignored, so the remote clone never carries
+    # it and every credential resolves to the "..." placeholder in
+    # credentials/default.yaml. Ship the local files alongside the setup script;
+    # setup_slurm.sh copies them into the repo once the o3b submodule is checked
+    # out (the destination lives inside it, so it cannot exist before that).
+    cred_src_dir  = configs_dir / "credentials" / "custom"
+    cred_files    = [p for p in sorted(cred_src_dir.glob("*.yaml"))
+                     if not p.name.endswith("_template.yaml")]
+    remote_cred_dir  = f"{path_ws}/setup_credentials"
+    try:
+        cred_dest_rel = str(cred_src_dir.relative_to(local_repo_root))
+    except ValueError:
+        # o3b resolved from outside the checkout (e.g. site-packages) — nothing
+        # to place relative to the remote repo, so skip the copy.
+        cred_files = []
+        cred_dest_rel = ""
+
     def _scp(local, remote):
         target = f"{ssh_host}:{remote}"
         if username:
@@ -733,6 +750,8 @@ def _run_platform_setup(args):
         "PULL":            "true" if pull else "false",
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
         "SKIP_SUBMODULES": skip_submodules,
+        "CREDENTIALS_SRC":  remote_cred_dir if cred_files else "",
+        "CREDENTIALS_DEST": cred_dest_rel if cred_files else "",
         "HTTP_PROXY":      _proxy,
         "HTTPS_PROXY":     _proxy,
         "http_proxy":      _proxy,
@@ -751,6 +770,8 @@ def _run_platform_setup(args):
             "REPO_URL":        "",                       # repo already present → skip clone
             "PULL":            "false",                  # don't disturb the local working tree
             "PULL_SUBMODULES": "false",
+            "CREDENTIALS_SRC": "",                       # already in place locally
+            "CREDENTIALS_DEST": "",
             "HTTP_PROXY": "", "HTTPS_PROXY": "", "http_proxy": "", "https_proxy": "",
         }
         if env_layout["use_conda"]:
@@ -795,6 +816,17 @@ def _run_platform_setup(args):
         _scp(tmp_path, remote_sbatch)
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+    if cred_files:
+        # 0700/0600 from the start: the staging directory holds plaintext tokens
+        # and PATH_WS is group-readable on the cluster.
+        subprocess.run(
+            ["ssh", ssh_host, f"mkdir -p {remote_cred_dir} && chmod 700 {remote_cred_dir}"],
+            check=True,
+        )
+        for cred in cred_files:
+            _scp(cred, f"{remote_cred_dir}/{cred.name}")
+        subprocess.run(["ssh", ssh_host, f"chmod 600 {remote_cred_dir}/*.yaml"], check=True)
 
     # Ensure output log directory exists, then submit via sbatch
     remote_cmd = (

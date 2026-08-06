@@ -24,6 +24,13 @@ INSTALL_MORPHEUS="${INSTALL_MORPHEUS:-false}"
 INSTALL_MAGICPONY="${INSTALL_MAGICPONY:-false}"
 INSTALL_PARTFIELD="${INSTALL_PARTFIELD:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
+GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
+GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
+
+# `o3b platform setup` scp's the gitignored credentials/custom/*.yaml here before
+# submitting; they are copied into the freshly cloned/pulled repo further below.
+CREDENTIALS_SRC="${CREDENTIALS_SRC:-}"    # absolute path on this host
+CREDENTIALS_DEST="${CREDENTIALS_DEST:-}"  # repo-relative destination directory
 
 # When USE_CONDA is set, everything is installed into a conda env instead of a
 # venv, and the CUDA toolchain comes from that env (conda -c nvidia) instead of
@@ -89,6 +96,22 @@ _git_setup_credentials() {
     export GIT_TERMINAL_PROMPT=0   # fail fast instead of hanging on a compute node
 }
 
+# github is only reachable through tfproxy, which intermittently answers CONNECT
+# with 503 ("CONNECT tunnel failed"). Under `set -e` a single hiccup aborts the
+# whole setup job seconds after it starts, so retry the network-facing git steps.
+_git_retry() {
+    local _n=1
+    until "$@"; do
+        if [ "${_n}" -ge "${GIT_RETRIES}" ]; then
+            echo "ERROR: '$*' failed after ${_n} attempts" >&2
+            return 1
+        fi
+        echo "--- git step failed, retry ${_n}/${GIT_RETRIES} in ${GIT_RETRY_WAIT}s: $* ---"
+        sleep "${GIT_RETRY_WAIT}"
+        _n=$((_n + 1))
+    done
+}
+
 # Strip an embedded token from a repo's origin URL so the credential helper is
 # consulted (git ignores helpers when the URL already carries a password).
 _git_scrub_token_urls() {
@@ -143,7 +166,7 @@ if [ ! -d "${REPO_PATH}" ]; then
         exit 1
     fi
     echo "--- git clone ${REPO_URL} ---"
-    git clone "${REPO_URL}" "${REPO_PATH}"
+    _git_retry git clone "${REPO_URL}" "${REPO_PATH}"
 fi
 
 cd "${REPO_PATH}"
@@ -153,7 +176,7 @@ _git_scrub_token_urls "${REPO_PATH}"
 
 if [ "${PULL}" = "true" ] || [ "${PULL}" = "True" ]; then
     echo "--- git pull origin ${BRANCH} ---"
-    git pull origin "${BRANCH}"
+    _git_retry git pull origin "${BRANCH}"
 fi
 
 if [ "${PULL_SUBMODULES}" = "true" ] || [ "${PULL_SUBMODULES}" = "True" ]; then
@@ -161,7 +184,7 @@ if [ "${PULL_SUBMODULES}" = "true" ] || [ "${PULL_SUBMODULES}" = "True" ]; then
     # resets submodule URLs to the token-free ones in .gitmodules
     git submodule sync --recursive
     if [ -z "${SKIP_SUBMODULES}" ]; then
-        git submodule update --init --recursive
+        _git_retry git submodule update --init --recursive
     else
         git submodule init
         for sub in $(git submodule status | awk '{print $2}'); do
@@ -170,10 +193,28 @@ if [ "${PULL_SUBMODULES}" = "true" ] || [ "${PULL_SUBMODULES}" = "True" ]; then
                 [ "$sub" = "$s" ] && _skip=true && break
             done
             if [ "$_skip" = "false" ]; then
-                git submodule update --init --recursive -- "$sub"
+                _git_retry git submodule update --init --recursive -- "$sub"
             fi
         done
     fi
+fi
+
+# ── credentials ───────────────────────────────────────────────────────────────
+# credentials/custom/*.yaml is gitignored, so neither the clone nor the pull ever
+# brings it along and the config falls back to the "..." placeholders in
+# credentials/default.yaml. `o3b platform setup` stages the local copies in
+# CREDENTIALS_SRC; install them now that the submodule holding the destination
+# has been checked out.
+if [ -n "${CREDENTIALS_SRC}" ] && [ -n "${CREDENTIALS_DEST}" ] && [ -d "${CREDENTIALS_SRC}" ]; then
+    echo "--- installing credentials into ${CREDENTIALS_DEST} ---"
+    mkdir -p "${REPO_PATH}/${CREDENTIALS_DEST}"
+    # per file, so the tracked *_template.yaml sitting in the same directory
+    # keeps its 644 and does not show up as a git mode change
+    for _cred in "${CREDENTIALS_SRC}"/*.yaml; do
+        [ -f "${_cred}" ] || continue
+        echo "      $(basename "${_cred}")"
+        install -m 600 "${_cred}" "${REPO_PATH}/${CREDENTIALS_DEST}/$(basename "${_cred}")"
+    done
 fi
 
 if _is_true "${USE_CONDA}"; then

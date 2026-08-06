@@ -1,6 +1,8 @@
 defaults:
   - slurm
 
+# o3b platform setup -p slurm_lmbl40_morpheus
+
 partition: lmbdlc2_gpu-l40s # addlc2_gpu-l40s alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmbdlc2_gpu-l40s alldlc2_gpu-l40s #  alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-1080ti, lmb_gpu-rtx2080, testdlc_gpu-rtx2080, alldlc_gpu-rtx3080, alldlc_gpu-rtx2080, lmbdlc_gpu-rtx2080
 gpu_count_per_node: 1
 cpu_count_per_gpu: 5 # wrong config on slurm
