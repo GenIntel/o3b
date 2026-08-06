@@ -140,11 +140,40 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     # that belongs in a runtime comparison), time_total_s the whole pass incl.
     # dataloading.  The peak allocator stats are reset here, after training, so
     # eval memory is not attributed the (much larger) training peak.
+    #
+    # All CUDA calls are scoped to the method's own device (its `device:`
+    # config, cuda:0 for methods that do not expose one): the no-arg forms act
+    # on the *current* device and would silently measure cuda:0 while the
+    # method ran on cuda:1.  Iterating over all visible devices instead is not
+    # an option — synchronizing a device creates a CUDA context on it.
+    #
+    # gpu_mem_peak_gb is the allocator's peak *allocated*, _reserved_gb its
+    # peak *reserved* from the driver (larger by caching/fragmentation, and the
+    # number that decides which GPU the run fits on).  Both miss memory taken
+    # outside the torch allocator: the CUDA context and nvdiffrast's buffers.
     import time
     import torch as _torch
-    _cuda = _torch.cuda.is_available()
-    if _cuda:
-        _torch.cuda.reset_peak_memory_stats()
+
+    _mem_dev = None
+    if _torch.cuda.is_available():
+        _dev_cfg = getattr(method, "device", None) if method is not None else None
+        try:
+            _mem_dev = _torch.device(_dev_cfg) if _dev_cfg is not None else None
+        except (TypeError, ValueError, RuntimeError):
+            _mem_dev = None
+        if _mem_dev is None or _mem_dev.type != "cuda":
+            _mem_dev = _torch.device("cuda", _torch.cuda.current_device())
+
+    def _cuda_mem(fn):
+        """fn(device) → bytes, or None if that device has no CUDA context yet."""
+        if _mem_dev is None:
+            return None
+        try:
+            return fn(_mem_dev)
+        except RuntimeError:
+            return None  # device never initialised → nothing was allocated
+
+    _cuda_mem(_torch.cuda.reset_peak_memory_stats)
     t_method_total = 0.0
     t_eval_start = time.perf_counter()
 
@@ -157,12 +186,12 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         if method is not None:
             # synchronize on both sides: CUDA kernels are launched
             # asynchronously, so without this we would time launches, not work
-            if _cuda:
-                _torch.cuda.synchronize()
+            if _mem_dev is not None:
+                _torch.cuda.synchronize(_mem_dev)
             _t_method_start = time.perf_counter()
             result = method(batch, return_qualit=return_qualit)
-            if _cuda:
-                _torch.cuda.synchronize()
+            if _mem_dev is not None:
+                _torch.cuda.synchronize(_mem_dev)
             t_method_total += time.perf_counter() - _t_method_start
             if isinstance(result, tuple):
                 batch, method_qualit = result
@@ -197,11 +226,11 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     cost_metrics = {"time_total_s": time.perf_counter() - t_eval_start}
     if method is not None:
         cost_metrics["time_method_s_per_sample"] = t_method_total / max(n_samples, 1)
-    if _cuda:
-        # allocator peak only — excludes the CUDA context and any memory held
-        # by non-PyTorch back-ends (nvdiffrast, pyrender), but it is the
-        # reproducible number to compare methods with on a shared node
-        cost_metrics["gpu_mem_peak_gb"] = _torch.cuda.max_memory_allocated() / 2 ** 30
+    _peak_alloc = _cuda_mem(_torch.cuda.max_memory_allocated)
+    _peak_resv  = _cuda_mem(_torch.cuda.max_memory_reserved)
+    if _peak_alloc is not None:
+        cost_metrics["gpu_mem_peak_gb"] = _peak_alloc / 2 ** 30
+        cost_metrics["gpu_mem_peak_reserved_gb"] = _peak_resv / 2 ** 30
 
     print(f"\n{'─'*50}")
     print(f"Results  ({n_samples} samples)")
