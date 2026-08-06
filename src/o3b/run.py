@@ -135,6 +135,19 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     n_samples = 0
     qualit_log_batches = eval_cfg.get("qualit_log_batches", 8)
 
+    # ── cost metrics ──────────────────────────────────────────────────────────
+    # time_method_s_per_sample times only the method's forward pass (the number
+    # that belongs in a runtime comparison), time_total_s the whole pass incl.
+    # dataloading.  The peak allocator stats are reset here, after training, so
+    # eval memory is not attributed the (much larger) training peak.
+    import time
+    import torch as _torch
+    _cuda = _torch.cuda.is_available()
+    if _cuda:
+        _torch.cuda.reset_peak_memory_stats()
+    t_method_total = 0.0
+    t_eval_start = time.perf_counter()
+
     from tqdm import tqdm
     bar = tqdm(loader, total=len(loader), unit="batch", desc="eval")
     for batch_idx, batch in enumerate(bar):
@@ -142,7 +155,15 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
         method_qualit = None
         if method is not None:
+            # synchronize on both sides: CUDA kernels are launched
+            # asynchronously, so without this we would time launches, not work
+            if _cuda:
+                _torch.cuda.synchronize()
+            _t_method_start = time.perf_counter()
             result = method(batch, return_qualit=return_qualit)
+            if _cuda:
+                _torch.cuda.synchronize()
+            t_method_total += time.perf_counter() - _t_method_start
             if isinstance(result, tuple):
                 batch, method_qualit = result
             else:
@@ -173,13 +194,25 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         bar.set_postfix({"samples": n_samples,
                          **{k: round(sum(v) / len(v), 4) for k, v in accum.items()}})
 
+    cost_metrics = {"time_total_s": time.perf_counter() - t_eval_start}
+    if method is not None:
+        cost_metrics["time_method_s_per_sample"] = t_method_total / max(n_samples, 1)
+    if _cuda:
+        # allocator peak only — excludes the CUDA context and any memory held
+        # by non-PyTorch back-ends (nvdiffrast, pyrender), but it is the
+        # reproducible number to compare methods with on a shared node
+        cost_metrics["gpu_mem_peak_gb"] = _torch.cuda.max_memory_allocated() / 2 ** 30
+
     print(f"\n{'─'*50}")
     print(f"Results  ({n_samples} samples)")
     for k, vals in accum.items():
         print(f"  {k:<25} {sum(vals)/len(vals):.4f}")
+    for k, v in cost_metrics.items():
+        print(f"  {k:<25} {v:.4f}")
 
     if _wb is not None:
         final_metrics = {f"eval/{k}": sum(v) / len(v) for k, v in accum.items()}
         final_metrics["eval/n_samples"] = n_samples
+        final_metrics.update({f"eval/{k}": v for k, v in cost_metrics.items()})
         _wb.log(final_metrics)
         _wb.finish()

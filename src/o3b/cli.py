@@ -1980,7 +1980,18 @@ def _build_bench_parser(sub):
 
 
 def _run_bench_fetch(args) -> None:
-    """Fetch eval/* metrics from wandb for all job names that rrun would submit."""
+    """Fetch eval/* and train/* metrics from wandb for all job names rrun would submit.
+
+    By default every numeric ``eval/*`` and ``train/*`` key in the run summary
+    becomes a column.  A benchmark YAML may narrow that to an explicit list::
+
+        metrics:
+          - eval/cam_kpts_trgt_pck01
+          - train/time_total_s
+
+    With ``metrics:`` present, only those keys are fetched, in the listed order
+    (missing ones are simply left empty for that run).
+    """
     import csv
     import re
     import yaml
@@ -1989,6 +2000,9 @@ def _run_bench_fetch(args) -> None:
 
     with open(args.benchmark) as f:
         raw = yaml.safe_load(f) or {}
+    metrics_wanted = raw.get("metrics") or None
+    if metrics_wanted is not None:
+        metrics_wanted = [str(m) for m in metrics_wanted]
     wandb_cfg = raw.get("wandb") or {}
     wb_project = wandb_cfg.get("project", bench_stem)
     wb_entity   = args.entity or wandb_cfg.get("entity", None)
@@ -2046,19 +2060,38 @@ def _run_bench_fetch(args) -> None:
         for col, f in zip(ablation_col_names, combo):
             row[col] = f.stem
         for k, v in run.summary.items():
-            if k.startswith("eval/") and isinstance(v, (int, float)):
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                continue
+            if metrics_wanted is not None:
+                if k in metrics_wanted:
+                    row[k] = round(float(v), 6)
+            elif k.startswith(("eval/", "train/")):
                 row[k] = round(float(v), 6)
         rows.append(row)
-        n_metrics = sum(1 for k in row if k.startswith("eval/"))
-        print(f"  {run.name}  state={run.state}  eval_metrics={n_metrics}")
+        n_eval  = sum(1 for k in row if k.startswith("eval/"))
+        n_train = sum(1 for k in row if k.startswith("train/"))
+        print(f"  {run.name}  state={run.state}  "
+              f"eval_metrics={n_eval}  train_metrics={n_train}")
 
     if not rows:
         print("No matching runs found.")
         return
 
-    meta_cols   = ["job", "wandb_run", "state"] + ablation_col_names
-    metric_cols = sorted({k for row in rows for k in row if k.startswith("eval/")})
-    fieldnames  = meta_cols + metric_cols
+    meta_cols = ["job", "wandb_run", "state"] + ablation_col_names
+    if metrics_wanted is not None:
+        # keep the YAML order, and keep requested-but-absent keys as empty
+        # columns so a typo or a never-logged metric is visible in the table
+        metric_cols = list(dict.fromkeys(metrics_wanted))
+        missing = [m for m in metric_cols
+                   if not any(m in row for row in rows)]
+        if missing:
+            print(f"WARNING: metrics: requested but not found in any run: "
+                  f"{', '.join(missing)}")
+    else:
+        found = {k for row in rows for k in row}
+        metric_cols = (sorted(k for k in found if k.startswith("eval/"))
+                       + sorted(k for k in found if k.startswith("train/")))
+    fieldnames = meta_cols + metric_cols
 
     if ablation_col_names:
         safe = [n.replace("/", "_") for n in ablation_col_names]
@@ -2410,9 +2443,11 @@ def _run_bench_viz(args) -> None:
         all_rows  = list(reader)
         fieldnames = reader.fieldnames or []
 
-    metric_cols = [c for c in fieldnames if c.startswith("eval/") and c != "eval/n_samples"]
+    metric_cols = [c for c in fieldnames
+                   if c.startswith(("eval/", "train/"))
+                   and c not in ("eval/n_samples", "train/epoch")]
     if not metric_cols:
-        print("No eval/* columns found in CSV.")
+        print("No eval/* or train/* columns found in CSV.")
         return
 
     # For each job keep only the latest finished run that has at least one metric value
