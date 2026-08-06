@@ -510,12 +510,18 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     partition       = cfg.get("partition", None)
     nodes_exclude   = cfg.get("nodes_exclude", None)
     restart         = cfg.get("restart_upon_fail", False)
+    # JSC (juwels/jupiter) rejects every job without a budget account; the LMB
+    # cluster has no accounting and leaves this unset.
+    account         = cfg.get("account", None)
+    # JSC allocates whole nodes and rejects --mem; ram_per_cpu is then advisory
+    exclusive_nodes = str(cfg.get("exclusive_nodes", False)).lower() in ("true", "1", "yes")
     # path_home is defined in the custom overlay; fall back to path_ws
     path_home       = cfg.get("path_home", cfg.get("path_ws", "/tmp"))
 
     total_mem = _multiply_metric_with_unit(ram_per_cpu, cpu_count)
 
     optional = {
+        "account":        f"#SBATCH --account={account}"          if account       else "",
         "requeue":        "#SBATCH --requeue"                    if restart       else "",
         "partition":      f"#SBATCH --partition {partition}"     if partition     else "",
         "nodes_exclude":  f"#SBATCH --exclude {nodes_exclude}"   if nodes_exclude else "",
@@ -531,12 +537,13 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         f"#SBATCH --time {walltime}",
         f"#SBATCH --gres gpu:{gpu_count}",
         f"#SBATCH --cpus-per-task {cpu_count}",
-        f"#SBATCH --mem {total_mem}",
         "#SBATCH --open-mode=append",
         f"#SBATCH -o {path_home}/slurm_jobs/%x_%j.o",
         "#SBATCH --mail-type=FAIL",
         "#SBATCH --signal=B:SIGUSR1@60",
     ]
+    if not exclusive_nodes:
+        lines.append(f"#SBATCH --mem {total_mem}")
     for v in optional.values():
         if v:
             lines.append(v)
@@ -658,6 +665,9 @@ def _run_platform_setup(args):
     pull           = cfg.get("pull", True)
     pull_submodules  = cfg.get("pull_submodules", True)
     skip_submodules  = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
+    # Lmod modules to load before anything else (JSC systems have no usable
+    # system python/git/CUDA); empty on clusters that need none.
+    modules          = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
     username       = cfg.get("username", "")
     path_home      = cfg.get("path_home", path_ws)
 
@@ -703,8 +713,19 @@ def _run_platform_setup(args):
 
     setup_script_local = _find_setup_script(local_repo_root)
 
-    remote_setup  = f"{path_ws}/setup_slurm.sh"
-    remote_sbatch = f"{path_ws}/setup_slurm_job.sh"
+    # One directory per submission. Every run used to scp over the same
+    # $PATH_WS/setup_slurm.sh, which silently corrupts a setup job that is still
+    # running: bash reads a script incrementally, so replacing the file under a
+    # running job resumes it at a stale byte offset, mid-line -- the symptom is a
+    # nonsense "line NNN: p: command not found" and exit 127, minutes into the
+    # install. The timestamp is shared with the local ~/.o3b/scripts copies so
+    # the two can be correlated.
+    from datetime import datetime
+    ts = datetime.now().strftime("%m%d_%H%M%S")
+
+    remote_run_dir = f"{path_ws}/setup_runs/{ts}"
+    remote_setup   = f"{remote_run_dir}/setup_slurm.sh"
+    remote_sbatch  = f"{remote_run_dir}/setup_slurm_job.sh"
 
     # credentials/custom/*.yaml is gitignored, so the remote clone never carries
     # it and every credential resolves to the "..." placeholder in
@@ -714,7 +735,7 @@ def _run_platform_setup(args):
     cred_src_dir  = configs_dir / "credentials" / "custom"
     cred_files    = [p for p in sorted(cred_src_dir.glob("*.yaml"))
                      if not p.name.endswith("_template.yaml")]
-    remote_cred_dir  = f"{path_ws}/setup_credentials"
+    remote_cred_dir  = f"{remote_run_dir}/credentials"
     try:
         cred_dest_rel = str(cred_src_dir.relative_to(local_repo_root))
     except ValueError:
@@ -750,6 +771,7 @@ def _run_platform_setup(args):
         "PULL":            "true" if pull else "false",
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
         "SKIP_SUBMODULES": skip_submodules,
+        "MODULES":         modules,
         "CREDENTIALS_SRC":  remote_cred_dir if cred_files else "",
         "CREDENTIALS_DEST": cred_dest_rel if cred_files else "",
         "HTTP_PROXY":      _proxy,
@@ -799,11 +821,18 @@ def _run_platform_setup(args):
         remote_setup_script=remote_setup,
     )
 
-    # Save both scripts locally with timestamp before sending to remote
-    local_setup_copy = _save_script_locally(f"setup_{repo_name}_script", setup_script_local.read_text())
-    local_sbatch     = _save_script_locally(f"setup_{repo_name}_sbatch", sbatch_script)
+    # Save both scripts locally under the same timestamp as the remote run dir
+    local_setup_copy = _save_script_locally(f"setup_{repo_name}_script", setup_script_local.read_text(), ts)
+    local_sbatch     = _save_script_locally(f"setup_{repo_name}_sbatch", sbatch_script, ts)
     print(f"  saved locally: {local_setup_copy}")
     print(f"  saved locally: {local_sbatch}")
+
+    # 0700 on the run dir: the staged credentials below are plaintext tokens and
+    # PATH_WS is group-readable on the cluster.
+    subprocess.run(
+        ["ssh", ssh_host, f"mkdir -p {remote_run_dir} && chmod 700 {remote_run_dir}"],
+        check=True,
+    )
 
     # Write sbatch script to a temp file and SCP both scripts
     import tempfile
@@ -818,8 +847,6 @@ def _run_platform_setup(args):
         Path(tmp_path).unlink(missing_ok=True)
 
     if cred_files:
-        # 0700/0600 from the start: the staging directory holds plaintext tokens
-        # and PATH_WS is group-readable on the cluster.
         subprocess.run(
             ["ssh", ssh_host, f"mkdir -p {remote_cred_dir} && chmod 700 {remote_cred_dir}"],
             check=True,
@@ -828,10 +855,16 @@ def _run_platform_setup(args):
             _scp(cred, f"{remote_cred_dir}/{cred.name}")
         subprocess.run(["ssh", ssh_host, f"chmod 600 {remote_cred_dir}/*.yaml"], check=True)
 
-    # Ensure output log directory exists, then submit via sbatch
+    # Ensure output log directory exists, then submit via sbatch.
+    # The canonical $PATH_WS/setup_slurm.sh is still read by the `setup: true`
+    # job preamble and by `o3b platform setupi`, so keep refreshing it -- but via
+    # mv, which swaps the directory entry. A job already executing the old file
+    # keeps reading that inode intact instead of resuming mid-line in the new one.
     remote_cmd = (
         f"mkdir -p {path_home}/slurm_jobs && "
         f"chmod +x {remote_setup} {remote_sbatch} && "
+        f"cp {remote_setup} {path_ws}/.setup_slurm.sh.new && "
+        f"mv -f {path_ws}/.setup_slurm.sh.new {path_ws}/setup_slurm.sh && "
         f"sbatch {remote_sbatch}"
     )
     print(f"Submitting setup job on {ssh_host}…")
@@ -1096,6 +1129,9 @@ def _platform_srun_context(platform: str):
     ram_per_cpu   = cfg.get("ram_per_cpu", "5gb")
     walltime      = cfg.get("walltime", "24:00:00")
     nodes_exclude = cfg.get("nodes_exclude", None)
+    account       = cfg.get("account", None)          # mandatory on JSC, unset at LMB
+    proxy         = cfg.get("http_proxy", "") or ""   # empty = direct connection
+    modules       = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
     total_mem     = _multiply_metric_with_unit(ram_per_cpu, cpu_count)
 
     path_ws        = cfg.get("path_ws", "")
@@ -1148,18 +1184,25 @@ def _platform_srun_context(platform: str):
     )
     if partition:
         srun += f" --partition {partition}"
+    if account:
+        srun += f" --account={account}"
     if nodes_exclude:
         srun += f" --exclude {nodes_exclude}"
     if path_ws:
         srun += f" --chdir {path_ws}"
 
-    _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
+    srun += " --export=ALL"
+    # The LMB cluster only reaches the internet through tfproxy; JSC nodes route
+    # directly and setting a proxy there breaks every outbound request. Configured
+    # per platform (`http_proxy:`), empty = no proxy.
+    if proxy:
+        srun += (
+            f",HTTP_PROXY={proxy}"
+            f",HTTPS_PROXY={proxy}"
+            f",http_proxy={proxy}"
+            f",https_proxy={proxy}"
+        )
     srun += (
-        f" --export=ALL"
-        f",HTTP_PROXY={_proxy}"
-        f",HTTPS_PROXY={_proxy}"
-        f",http_proxy={_proxy}"
-        f",https_proxy={_proxy}"
         f",PATH_WS={path_ws}"
         f",PATH_CUDA={path_cuda}"
         f",PYTHON_VERSION={python_version}"
@@ -1182,12 +1225,14 @@ def _platform_srun_context(platform: str):
         srun += f",CUDA_HOME={path_cuda},CUDACXX={path_cuda}/bin/nvcc"
 
     return (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
-            env_layout["use_conda"], env_layout["path_conda"], _mp_env_from_cfg(cfg))
+            env_layout["use_conda"], env_layout["path_conda"], _mp_env_from_cfg(cfg),
+            modules)
 
 
 def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
                     hf_datasets_cache: str = "", use_conda: bool = False,
-                    path_conda: str = "", mp_env: dict | None = None) -> list[str]:
+                    path_conda: str = "", mp_env: dict | None = None,
+                    modules: str = "") -> list[str]:
     """Shell lines that run on the compute node before the actual command.
 
     Order: fd limit + multiprocessing env → CUDA env → conditional setup script
@@ -1226,14 +1271,28 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
         lines.append(_echo(f"torch multiprocessing: {exported}"))
     # With conda the CUDA toolchain lives inside the env and is exported after
     # activation below; pointing at the system install here would shadow it.
+    if modules:
+        # JSC systems provide python/git/CUDA only through Lmod. Not `set -e`
+        # clean, and non-interactive shells may lack the init sourced by .bashrc.
+        lines += [
+            _echo(f"module load {modules}"),
+            "command -v module >/dev/null 2>&1 || "
+            "{ [ -f /usr/share/lmod/lmod/init/bash ] && . /usr/share/lmod/lmod/init/bash; }",
+        ]
+        lines += [f'module load {m} || echo "WARNING: module load {m} failed"'
+                  for m in modules.split()]
     if not use_conda:
+        # targets/<triple> follows the CPU: sbsa-linux on JUPITER's Grace nodes,
+        # x86_64-linux elsewhere. Resolved on the compute node, not here.
         lines += [
             f"export CUDA_HOME={path_cuda}",
             f"export CUDACXX={path_cuda}/bin/nvcc",
             f"export PATH={path_cuda}/bin:$PATH",
             f"export LD_LIBRARY_PATH={path_cuda}/lib64:${{LD_LIBRARY_PATH:-}}",
-            f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
-            f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/x86_64-linux/lib",
+            'case "$(uname -m)" in aarch64|arm64) _cuda_triple=sbsa-linux ;; '
+            "*) _cuda_triple=x86_64-linux ;; esac",
+            f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/${{_cuda_triple}}/include",
+            f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/${{_cuda_triple}}/lib",
         ]
     if hf_datasets_cache:
         lines.append(f"export HF_DATASETS_CACHE={hf_datasets_cache}")
@@ -1487,7 +1546,10 @@ def _run_platform_setupi(args):
         print(f"Copying {local} → {target}")
         subprocess.run(["scp", str(local), target], check=True)
 
-    _scp(setup_script_local, remote_setup)
+    # scp truncates in place, which would corrupt a setup job currently reading
+    # this path; stage next to it and swap the directory entry instead.
+    _scp(setup_script_local, f"{remote_setup}.new")
+    subprocess.run(["ssh", ssh_host, f"mv -f {remote_setup}.new {remote_setup}"], check=True)
 
     init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
                                  use_conda=use_conda, path_conda=path_conda, mp_env=mp_env)

@@ -1,6 +1,21 @@
 from __future__ import annotations
 
 
+def _requests_cuda(cfg) -> bool:
+    """True if any ``device: cuda…`` entry appears anywhere in the config."""
+    if isinstance(cfg, dict):
+        for key, value in cfg.items():
+            if (isinstance(key, str) and "device" in key
+                    and isinstance(value, str) and value.startswith("cuda")):
+                return True
+            if _requests_cuda(value):
+                return True
+        return False
+    if isinstance(cfg, (list, tuple)):
+        return any(_requests_cuda(v) for v in cfg)
+    return False
+
+
 def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     """Execute one benchmark evaluation pass given a fully-resolved config dict.
 
@@ -16,6 +31,21 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     from o3b.task.task import build_task
     from o3b.data.datatypes.object import collate_object_pairs
     from o3b.data.datatypes.frame_object import collate_frame_object_pairs
+
+    # ── fail fast on a GPU-less environment ───────────────────────────────────
+    # Nothing recovers from a missing GPU: the method would crash in .to(device),
+    # get swallowed by the fallback below and the whole benchmark would run as
+    # GT/oracle — burning the allocation and reporting misleading numbers.
+    if _requests_cuda(run_raw):
+        import os
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "config requests a CUDA device but no CUDA GPU is available "
+                f"(CUDA_VISIBLE_DEVICES="
+                f"{os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')!r}) — "
+                "ending the run instead of continuing with partial init."
+            )
 
     dataset_cfg = DatasetConfig.from_dict(run_raw["dataset"])
     dataset     = build_dataset(dataset_cfg)
@@ -44,7 +74,9 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     # ── method (optional) ─────────────────────────────────────────────────────
     # The method runs on each batch before the task (e.g. a pose estimator that
     # writes predicted poses). If it cannot be built (e.g. missing dependency)
-    # we warn and fall back to the task on the raw batch (GT/oracle).
+    # we warn and fall back to the task on the raw batch (GT/oracle) — except
+    # for CUDA failures (no GPU, driver error, OOM), which are environment
+    # problems the fallback would only hide: those end the run.
     method = None
     method_cfg = run_raw.get("method")
     if method_cfg:
@@ -56,6 +88,12 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         except Exception as exc:
             import traceback
             traceback.print_exc()
+            if "CUDA" in str(exc):
+                raise RuntimeError(
+                    f"could not build method {cls_name!r}: CUDA failure "
+                    f"({exc}) — ending the run instead of continuing with "
+                    f"partial init."
+                ) from exc
             print(f"WARNING: could not build method {cls_name!r} ({exc}); "
                   f"running task on raw batch (GT/oracle).")
 

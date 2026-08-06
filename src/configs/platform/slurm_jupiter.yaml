@@ -4,6 +4,8 @@ defaults:
   # - optional custom@: slurm_juwels_custom
 
 
+# o3b platform setup -p slurm_jupiter
+
 # SETUP JUELICH
 
 # 1) SETUP SSH

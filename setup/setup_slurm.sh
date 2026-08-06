@@ -43,11 +43,40 @@ CONDA_ENV_PATH="${CONDA_ENV_PATH:-}"
 
 _is_true() { case "${1:-}" in true|True|TRUE|1|yes|Yes) return 0 ;; *) return 1 ;; esac; }
 
+# ── modules ───────────────────────────────────────────────────────────────────
+# JSC systems (juwels/jupiter) ship no usable system python, git or CUDA: those
+# come from Lmod. MODULES is a space-separated list from the platform config's
+# `modules:`; empty on clusters that need none (the LMB cluster).
+MODULES="${MODULES:-}"
+if [ -n "${MODULES}" ]; then
+    echo "--- module load ${MODULES} ---"
+    # Lmod's shell functions are not `set -u`/`set -e` clean
+    set +eu
+    # non-interactive shells often lack the Lmod init that ~/.bashrc performs
+    if ! command -v module >/dev/null 2>&1 && [ -f /usr/share/lmod/lmod/init/bash ]; then
+        . /usr/share/lmod/lmod/init/bash
+    fi
+    for _m in ${MODULES}; do
+        module load "${_m}" || echo "WARNING: module load ${_m} failed"
+    done
+    set -eu
+    module list 2>&1 || true
+fi
+
 # Morpheus needs pytorch3d (same wheel as diff3f) plus the complete GenPose2
 # setup; force the GenPose2 block on so its deps are not duplicated here.
 if [ "${INSTALL_MORPHEUS}" = "true" ] || [ "${INSTALL_MORPHEUS}" = "True" ]; then
     INSTALL_GENPOSE2="true"
 fi
+
+# CUDA lays its per-target tree out under targets/<triple>/. The triple follows
+# the CPU, not the GPU: sbsa-linux on arm64 (JUPITER's Grace-Hopper nodes),
+# x86_64-linux everywhere else. Hardcoding x86_64 silently yields a CPATH that
+# does not exist, and the extension builds then fail on a missing cuda_runtime.h.
+case "$(uname -m)" in
+    aarch64|arm64) CUDA_TARGET_TRIPLE="sbsa-linux" ;;
+    *)             CUDA_TARGET_TRIPLE="x86_64-linux" ;;
+esac
 
 # Point the CUDA toolchain env at $1 (a system CUDA dir, or $CONDA_PREFIX when
 # the toolkit is installed into the conda env).
@@ -56,8 +85,8 @@ _export_cuda_env() {
     export PATH="${CUDA_HOME}/bin:${PATH}"
     export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
     export CUDACXX="${CUDA_HOME}/bin/nvcc"                                    # nvcc requires this (pointnet install)
-    export CPATH="${CPATH:-}:${CUDA_HOME}/targets/x86_64-linux/include"       # pycuda requires this
-    export LIBRARY_PATH="${LIBRARY_PATH:-}:${CUDA_HOME}/targets/x86_64-linux/lib"
+    export CPATH="${CPATH:-}:${CUDA_HOME}/targets/${CUDA_TARGET_TRIPLE}/include"  # pycuda requires this
+    export LIBRARY_PATH="${LIBRARY_PATH:-}:${CUDA_HOME}/targets/${CUDA_TARGET_TRIPLE}/lib"
 }
 
 # Under conda the toolchain is exported after the env is activated (CONDA_PREFIX
