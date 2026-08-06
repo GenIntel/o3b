@@ -30,9 +30,16 @@ from o3b.cv.geometry.transform import (
 
 from o3b.cv.visual.sample import sample_pxl2d_grid
 from o3b.cv.geometry.grid import get_pxl2d
-from typing import Union
-import open3d as o3d
+from typing import Union, TYPE_CHECKING
 import numpy as np
+
+# open3d is an optional extra: it publishes no linux-aarch64 wheel for the
+# pythons JSC offers, so importing it here made this module -- and hence
+# MorpheusMethod, via dmtet -> dmtet_x_gaussians -> meshes -- unimportable on
+# JUPITER. Only the four from_o3d/to_o3d/create_sphere/load_by_name helpers
+# below need it, and they import it themselves.
+if TYPE_CHECKING:
+    import open3d as o3d
 from o3b.cv.geometry.objects3d.objects3d import (
     PROJECT_MODALITIES,
     OD3D_Objects3D,
@@ -703,6 +710,8 @@ class Meshes(OD3D_Objects3D):
             # (verts_count - 2) / 2  <= resolution **2
             import math
 
+            import open3d as o3d
+
             resolution = int(math.floor(math.sqrt((verts_count - 2.0) / 2.0)))
             o3d_mesh = o3d.geometry.TriangleMesh.create_sphere(
                 radius=radius,
@@ -1128,11 +1137,13 @@ class Meshes(OD3D_Objects3D):
 
     @staticmethod
     def from_o3d(
-        mesh_o3d: Union[List, o3d.geometry.TriangleMesh],
+        mesh_o3d: Union[List, "o3d.geometry.TriangleMesh"],
         device="cpu",
         load_texts=True,
         **kwargs,
     ):
+        import open3d as o3d
+
         if not isinstance(mesh_o3d, List):
             meshes_o3d = [mesh_o3d]
         else:
@@ -1229,6 +1240,8 @@ class Meshes(OD3D_Objects3D):
         return [self.get_meshes_with_ids([mesh_id]).to_o3d() for mesh_id in meshes_ids]
 
     def to_o3d(self, meshes_ids=None):
+        import open3d as o3d
+
         if meshes_ids is None:
             meshes_ids = list(range(len(self)))
 
@@ -1731,6 +1744,8 @@ class Meshes(OD3D_Objects3D):
 
     @staticmethod
     def load_by_name(name: str, device="cpu", faces_count=None):
+        import open3d as o3d
+
         if name == "bunny":
             bunny_data = o3d.data.BunnyMesh()
             bunny_mesh_open3d = o3d.io.read_triangle_mesh(bunny_data.path)

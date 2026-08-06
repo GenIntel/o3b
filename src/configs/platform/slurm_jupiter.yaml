@@ -139,6 +139,12 @@ walltime: "12:00:00"        # hard cap on booster
 
 renderer: pytorch3d
 
+# Compute nodes cannot reach the wandb servers, and there is no API key here
+# (LMB authenticates via ~/.netrc). Offline mode needs neither: runs are written
+# to a local wandb/ directory and can be uploaded afterwards from a login node:
+#     wandb sync /e/project1/scale3dcompnet/sommer7/HouseCorr3Dv2/wandb/offline-run-*
+wandb_mode: "offline"
+
 mp_start_method: "fork"      # "fork" "spawn" "forkserver"
 mp_sharing_strategy: "file_system"
 nofile_limit: "hard"         # `ulimit -n` for the job, see slurm.yaml

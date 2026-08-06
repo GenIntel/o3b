@@ -1201,6 +1201,8 @@ def _platform_srun_context(platform: str):
     exclusive_nodes = str(cfg.get("exclusive_nodes", False)).lower() in ("true", "1", "yes")
     modules       = " ".join(str(m) for m in list(cfg.get("modules", []) or []))
     torch_arch_list = str(cfg.get("torch_cuda_arch_list", "") or "")
+    # "offline" where the compute nodes cannot reach the wandb servers (JSC)
+    wandb_mode    = str(cfg.get("wandb_mode", "") or "")
     total_mem     = _multiply_metric_with_unit(ram_per_cpu, cpu_count)
 
     path_ws        = cfg.get("path_ws", "")
@@ -1292,6 +1294,8 @@ def _platform_srun_context(platform: str):
     )
     if torch_arch_list:
         srun += f",TORCH_CUDA_ARCH_LIST={torch_arch_list}"
+    if wandb_mode:
+        srun += f",WANDB_MODE={wandb_mode}"
     # Under conda the toolchain comes from the env (CONDA_PREFIX), exported by
     # the preamble once the env is active.
     if not env_layout["use_conda"]:
@@ -2808,6 +2812,11 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         "MODULES":         modules,
         **({"TORCH_CUDA_ARCH_LIST": str(cfg.get("torch_cuda_arch_list", "") or "")}
            if cfg.get("torch_cuda_arch_list", "") else {}),
+        # wandb cannot reach its servers from a JSC compute node; "offline"
+        # needs neither network nor an API key and is synced later from a
+        # login node with `wandb sync`.
+        **({"WANDB_MODE": str(cfg.get("wandb_mode", "") or "")}
+           if cfg.get("wandb_mode", "") else {}),
     }
     if _proxy:
         env_vars.update({
