@@ -1321,7 +1321,16 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
 
     lines = [
         _echo("sourcing ~/.bashrc"),
+        # Site bashrc files are not `set -u` clean and the job script runs under
+        # `set -euo pipefail`. JSC's /etc/bashrc opens with
+        # `if [ -z "$BASHRCSOURCED" ]` on an unset variable, which aborts every
+        # job on line 2 with "BASHRCSOURCED: unbound variable". Drop -u across
+        # the sourcing and restore it only if it was on -- `o3b platform runi`
+        # reuses this preamble for an interactive shell that never set it.
+        "case $- in *u*) _o3b_had_u=1 ;; *) _o3b_had_u=0 ;; esac",
+        "set +u",
         "[ -f ~/.bashrc ] && . ~/.bashrc",
+        'if [ "${_o3b_had_u}" = "1" ]; then set -u; fi',
     ]
     mp_env = dict(mp_env or {})
     nofile = mp_env.pop("NOFILE_LIMIT", "")
