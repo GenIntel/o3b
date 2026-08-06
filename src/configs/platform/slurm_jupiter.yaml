@@ -111,13 +111,13 @@ torch_cuda_arch_list: "9.0"
 setup_on_login: True
 
 branch: main
-# Both False because the job preamble runs them on a *compute* node, which has
-# no route to github -- a fetch there fails the job outright with "Failed to
-# connect to github.com port 443". The checkout is instead brought up to date by
-# `o3b platform setup`, which runs on the login node where the network works.
-# Re-run that whenever you want the cluster to pick up new commits.
-pull: False
-pull_submodules: False
+# True, and read only by `o3b platform setup`, which runs on the login node
+# where the network works. The compute-node job preamble skips fetching
+# automatically because setup_on_login is set -- it has no route to github, and
+# a fetch there fails the job with "Failed to connect to github.com port 443".
+# So: re-run `o3b platform setup -p slurm_jupiter*` to pick up new commits.
+pull: True
+pull_submodules: True
 skip_submodules:
   - third_party/od3d
 

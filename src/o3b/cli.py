@@ -1216,6 +1216,13 @@ def _platform_srun_context(platform: str):
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
     pull_subs      = str(cfg.get("pull_submodules", True)).lower()
+    # The compute-node preamble cannot fetch where setup_on_login is set: that
+    # flag means the compute nodes have no route to github (which is precisely
+    # why setup runs on the login node), and a fetch there fails the whole job.
+    # `o3b platform setup` keeps the checkout current instead. Kept separate
+    # from the `pull` key itself, which setup on the login node still honours.
+    if str(cfg.get("setup_on_login", False)).lower() in ("true", "1", "yes"):
+        pull, pull_subs = "false", "false"
     skip_subs      = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
     hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
 
@@ -2763,6 +2770,13 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
     pull_subs      = str(cfg.get("pull_submodules", True)).lower()
+    # The compute-node preamble cannot fetch where setup_on_login is set: that
+    # flag means the compute nodes have no route to github (which is precisely
+    # why setup runs on the login node), and a fetch there fails the whole job.
+    # `o3b platform setup` keeps the checkout current instead. Kept separate
+    # from the `pull` key itself, which setup on the login node still honours.
+    if str(cfg.get("setup_on_login", False)).lower() in ("true", "1", "yes"):
+        pull, pull_subs = "false", "false"
     path_home      = cfg.get("path_home", path_ws)
     hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
 
