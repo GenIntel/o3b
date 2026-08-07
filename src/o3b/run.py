@@ -31,6 +31,19 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     from o3b.task.task import build_task
     from o3b.data.datatypes.object import collate_object_pairs
     from o3b.data.datatypes.frame_object import collate_frame_object_pairs
+    from o3b import ddp
+
+    # ── distributed (torchrun) ────────────────────────────────────────────────
+    # No-op unless WORLD_SIZE > 1, i.e. unless the job preamble launched this
+    # through torchrun (platform.gpu_count_per_node / node_count > 1).  Only
+    # *training* is data-parallel: every rank builds the method and runs
+    # train_method, then the non-zero ranks leave and rank 0 evaluates alone —
+    # eval numbers are then identical to a single-GPU run, and no rank sits in
+    # a collective long enough to trip the NCCL timeout.
+    rank, world_size, _ = ddp.init_distributed()
+    is_main = rank == 0
+    if world_size > 1:
+        print(f"DDP:     rank {rank}/{world_size} (local_rank {ddp.get_local_rank()})")
 
     # ── fail fast on a GPU-less environment ───────────────────────────────────
     # Nothing recovers from a missing GPU: the method would crash in .to(device),
@@ -47,29 +60,34 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
                 "ending the run instead of continuing with partial init."
             )
 
-    dataset_cfg = DatasetConfig.from_dict(run_raw["dataset"])
-    dataset     = build_dataset(dataset_cfg)
-    print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
-
     eval_cfg    = run_raw.get("eval") or {}
     batch_size  = eval_cfg.get("batch_size", 4)
     num_workers = int(eval_cfg.get("num_workers", 4))
 
-    collate_fn = (collate_frame_object_pairs
-                  if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
-                  else collate_object_pairs)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        collate_fn=collate_fn,
-        shuffle=False,
-        num_workers=num_workers,
-        persistent_workers=num_workers > 0,
-    )
+    # The eval dataset, its loader and the task belong to rank 0 alone — the
+    # other ranks would only pay for the (potentially cold) cache build and
+    # race each other writing it.
+    dataset = loader = task = None
+    if is_main:
+        dataset_cfg = DatasetConfig.from_dict(run_raw["dataset"])
+        dataset     = build_dataset(dataset_cfg)
+        print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
 
-    task_cfg = OmegaConf.create(run_raw["task"])
-    task     = build_task(task_cfg)
-    print(f"Task:    {run_raw['task']['class_name']}")
+        collate_fn = (collate_frame_object_pairs
+                      if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
+                      else collate_object_pairs)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            collate_fn=collate_fn,
+            shuffle=False,
+            num_workers=num_workers,
+            persistent_workers=num_workers > 0,
+        )
+
+        task_cfg = OmegaConf.create(run_raw["task"])
+        task     = build_task(task_cfg)
+        print(f"Task:    {run_raw['task']['class_name']}")
 
     # ── method (optional) ─────────────────────────────────────────────────────
     # The method runs on each batch before the task (e.g. a pose estimator that
@@ -108,9 +126,11 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
                   f"was explicitly enabled. Results are NOT {cls_name!r}.")
 
     # ── wandb init (before training so per-batch train losses are logged) ─────
+    # Rank 0 owns the run: every rank logging into the same project would
+    # produce world_size runs whose train/* curves interleave at random.
     _wb = None
     wandb_cfg = run_raw.get("wandb") or {}
-    if wandb_cfg is not False:
+    if wandb_cfg is not False and is_main:
         try:
             import wandb as _wb_mod
             wb_project = wandb_cfg.get("project", run_name)
@@ -138,6 +158,17 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             method.train_method()
         else:
             print("Train:   skipped (no train dataset or checkpoint fully trained)")
+
+    # ── the non-zero ranks are done ───────────────────────────────────────────
+    # One barrier while every rank is still here (so no NCCL work is left in
+    # flight when the group goes down), then they leave: eval takes longer than
+    # any collective timeout and rank 0 issues no further collectives anyway.
+    ddp.dist_sync_processes()
+    if not is_main:
+        print(f"Eval:    skipped on rank {rank} (rank 0 evaluates)")
+        ddp.cleanup_process_group()
+        return
+    ddp.cleanup_process_group()
 
     print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
 

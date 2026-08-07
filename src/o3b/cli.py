@@ -503,9 +503,13 @@ def _save_script_locally(name: str, content: str, ts: str | None = None) -> Path
 def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script: str) -> str:
     """Return a complete sbatch script string built from platform config values."""
 
-    node_count      = cfg.get("node_count", 1)
-    gpu_count       = cfg.get("gpu_count_per_node", 1)
-    cpu_count       = cfg.get("cpu_count_per_gpu", 8)
+    node_count      = int(cfg.get("node_count", 1))
+    gpu_count       = int(cfg.get("gpu_count_per_node", 1))
+    cpu_count_gpu   = int(cfg.get("cpu_count_per_gpu", 8))
+    # one task per node holds the node's whole GPU allocation (torchrun forks a
+    # process per GPU inside it), so the task needs cpu_count_per_gpu cores for
+    # each of them — dataloader workers scale with the GPU count
+    cpu_count       = cpu_count_gpu * gpu_count
     ram_per_cpu     = cfg.get("ram_per_cpu", "5gb")
     walltime        = cfg.get("walltime", "24:00:00")
     partition       = cfg.get("partition", None)
@@ -549,13 +553,23 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         if v:
             lines.append(v)
 
+    # Multi-node: the run script has to execute once per node (each invocation
+    # starts the node's torchrun with node_rank=$SLURM_PROCID — see the
+    # distributed block in `_srun_env_lines`).  A single node needs no srun:
+    # sbatch already put us on it, and torchrun covers its GPUs from there.
+    if node_count > 1:
+        launch = (f"srun --nodes={node_count} --ntasks={node_count} "
+                  f"--ntasks-per-node=1 bash {remote_setup_script}")
+    else:
+        launch = f"bash {remote_setup_script}"
+
     lines += [
         "",
         "set -euo pipefail",
         "",
         env_block,
         "",
-        f"bash {remote_setup_script}",
+        launch,
     ]
     return "\n".join(lines) + "\n"
 
@@ -1196,9 +1210,11 @@ def _platform_srun_context(platform: str):
         )
 
     partition     = cfg.get("partition", None)
-    node_count    = cfg.get("node_count", 1)
-    gpu_count     = cfg.get("gpu_count_per_node", 1)
-    cpu_count     = cfg.get("cpu_count_per_gpu", 8)
+    node_count    = int(cfg.get("node_count", 1))
+    gpu_count     = int(cfg.get("gpu_count_per_node", 1))
+    # cores (and hence memory) for the task's whole GPU allocation — see
+    # `_make_sbatch_script`, which sizes the batch jobs the same way
+    cpu_count     = int(cfg.get("cpu_count_per_gpu", 8)) * gpu_count
     ram_per_cpu   = cfg.get("ram_per_cpu", "5gb")
     walltime      = cfg.get("walltime", "24:00:00")
     nodes_exclude = cfg.get("nodes_exclude", None)
@@ -1326,16 +1342,24 @@ def _platform_srun_context(platform: str):
 def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
                     hf_datasets_cache: str = "", use_conda: bool = False,
                     path_conda: str = "", mp_env: dict | None = None,
-                    modules: str = "") -> list[str]:
+                    modules: str = "", node_count: int = 1,
+                    gpu_count: int = 1, nccl_env: dict | None = None) -> list[str]:
     """Shell lines that run on the compute node before the actual command.
 
     Order: fd limit + multiprocessing env → CUDA env → conditional setup script
            → conditional pull/checkout → env activation (venv or conda)
-           → cd into repo.
+           → cd into repo → distributed (torchrun) setup.
     The SETUP / PULL / PULL_SUBMODULES / BRANCH values come from the srun
     --export env vars so the same script works regardless of platform config.
     ``mp_env`` comes from `_mp_env_from_cfg`; it is emitted first so it applies
     to everything the job runs, interactive shell or batch command alike.
+
+    ``node_count`` / ``gpu_count`` (per node) come from the platform config and
+    its ablation overrides.  With more than one GPU in total the preamble ends
+    with the whole distributed setup — rendezvous address and port, NCCL env,
+    and the ``o3b_launch`` wrapper that runs a command under torchrun.  It
+    lives here, in the shared preamble, so a batch job and an interactive
+    ``o3b platform runi`` shell set up multi-GPU identically.
     """
     def _echo(msg: str, indent: str = "") -> str:
         return f'{indent}echo "[o3b-init $(date +%T)] {msg}"'
@@ -1510,6 +1534,60 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
         ]
     if repo_path:
         lines.append(f"cd {repo_path}")
+
+    # ── distributed (torchrun) setup ──────────────────────────────────────────
+    # O3B_NNODES / O3B_NPROC_PER_NODE are what `o3b_launch` reads.  The whole
+    # block is emitted whatever the counts are, so an interactive session can
+    # go multi-GPU by exporting O3B_NPROC_PER_NODE before calling o3b_launch.
+    # On one GPU it changes nothing: o3b_launch execs the command directly, and
+    # MASTER_ADDR / MASTER_PORT alone create no process group — that needs the
+    # WORLD_SIZE only torchrun exports (see o3b.ddp.init_distributed).
+    lines += [
+        f"export O3B_NNODES={int(node_count)}",
+        f"export O3B_NPROC_PER_NODE={int(gpu_count)}",
+    ]
+    for key, value in (nccl_env or {}).items():
+        lines.append(f"export {key}={value}")
+    lines += [
+        # every node runs this same preamble and they must agree on the
+        # rendezvous without talking to each other first: the address is the
+        # allocation's first node, the port is derived from the job id (a
+        # random draw would differ per node). Both yield to a value already in
+        # the environment.
+        'if [ -z "${MASTER_ADDR:-}" ]; then',
+        '    if [ -n "${SLURM_JOB_NODELIST:-}" ] && command -v scontrol >/dev/null 2>&1; then',
+        '        MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)"',
+        "    else",
+        "        MASTER_ADDR=127.0.0.1",
+        "    fi",
+        "fi",
+        'if [ -z "${MASTER_PORT:-}" ]; then',
+        '    MASTER_PORT="$(( 20000 + ${SLURM_JOB_ID:-0} % 20000 ))"',
+        "fi",
+        "export MASTER_ADDR MASTER_PORT",
+        'if [ "$(( ${O3B_NNODES:-1} * ${O3B_NPROC_PER_NODE:-1} ))" -gt 1 ]; then',
+        _echo("distributed: ${O3B_NNODES} node(s) x ${O3B_NPROC_PER_NODE} gpu(s), "
+              "rendezvous ${MASTER_ADDR}:${MASTER_PORT}, "
+              "node_rank ${SLURM_PROCID:-0}", "    "),
+        "fi",
+        # `o3b_launch <console-script> <args…>` runs the command under torchrun
+        # when the job holds more than one GPU, and plainly otherwise. torchrun
+        # wants a script path, hence the `command -v` — the console script in
+        # the active env is a python file it can exec.
+        "o3b_launch() {",
+        '    if [ "$(( ${O3B_NNODES:-1} * ${O3B_NPROC_PER_NODE:-1} ))" -le 1 ]; then',
+        '        "$@"',
+        "        return",
+        "    fi",
+        '    local _bin; _bin="$(command -v "$1")" || { echo "o3b_launch: $1 not found" >&2; return 127; }',
+        "    shift",
+        '    torchrun --nnodes="${O3B_NNODES}" --nproc_per_node="${O3B_NPROC_PER_NODE}"'
+        ' --node_rank="${SLURM_PROCID:-0}"'
+        ' --master_addr="${MASTER_ADDR}" --master_port="${MASTER_PORT}"'
+        ' "$_bin" "$@"',
+        "}",
+    ]
+
     lines.append(_echo("init done, dropping into shell"))
     return lines
 
@@ -2815,12 +2893,24 @@ def _run_bench_run(args) -> None:
         _run_bench_run_with_cfg({**run_raw, "dataset": ds_merged}, run_name)
 
 
-def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_override: list | None = None) -> None:
-    """Upload a run script + sbatch wrapper and submit via sbatch."""
+def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
+                          deps_override: list | None = None,
+                          platform_override: dict | None = None) -> None:
+    """Upload a run script + sbatch wrapper and submit via sbatch.
+
+    ``platform_override`` is the ``platform:`` block collected from the run's
+    ablation YAMLs (see `_run_bench_rrun`). It is merged over the platform
+    config, so an ablation can size its own job — node_count /
+    gpu_count_per_node for the multi-GPU ablations, but equally walltime or
+    partition — without a platform config per variant. ``deps_override``
+    stays separate: it is also settable from the CLI, which wins over both.
+    """
     import os, re, subprocess
     from omegaconf import OmegaConf
 
     cfg, _ = _load_platform_config(platform)
+    if platform_override:
+        cfg = OmegaConf.merge(cfg, OmegaConf.create(dict(platform_override)))
 
     ssh_host = cfg.get("ssh")
     if not ssh_host or ssh_host is False:
@@ -2910,15 +3000,27 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     from datetime import datetime
     ts = datetime.now().strftime("%m%d_%H%M%S")
 
-    # run script: env preamble (CUDA, venv, cd, setup/pull) + the actual command
+    # run script: env preamble (CUDA, venv, cd, setup/pull, distributed) + the
+    # actual command.  The command goes through `o3b_launch`, defined by the
+    # preamble: it is a plain exec on one GPU and a torchrun launch on more.
+    node_count = int(cfg.get("node_count", 1))
+    gpu_count  = int(cfg.get("gpu_count_per_node", 1))
+    # optional platform key: NCCL_* settings a fabric needs (e.g. P2P/SHM
+    # disables for nodes whose peer-to-peer transport is broken)
+    _nccl      = OmegaConf.select(cfg, "nccl_env", default=None)
+    nccl_env   = ({str(k): str(v)
+                   for k, v in OmegaConf.to_container(_nccl, resolve=True).items()}
+                  if _nccl else {})
     run_script_content = "\n".join(
         ["#!/usr/bin/env bash", "set -euo pipefail", ""] +
         _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
                         use_conda=env_layout["use_conda"],
                         path_conda=env_layout["path_conda"],
                         mp_env=_mp_env_from_cfg(cfg),
-                        modules=modules) +
-        ["", command]
+                        modules=modules,
+                        node_count=node_count, gpu_count=gpu_count,
+                        nccl_env=nccl_env) +
+        ["", f"o3b_launch {command}"]
     )
     remote_run_script = f"{path_ws}/.bench_run_{job_name}_{ts}.sh"
 
@@ -3072,11 +3174,17 @@ def _run_bench_rrun(args) -> None:
     width = len(str(n_total))
 
     for i, combo in enumerate(combos, 1):
-        # collect platform.deps from ablation YAMLs (union across all files in combo)
+        # collect the ablation YAMLs' platform: block (merged in combo order,
+        # later files win) — deps are unioned instead, and job sizing keys such
+        # as node_count / gpu_count_per_node override the platform config
         ablation_deps: list | None = None
+        ablation_platform = _OC.create({})
         for f in combo:
             try:
                 acfg = _OC.load(f)
+                file_platform = _OC.select(acfg, "platform", default=None)
+                if file_platform is not None:
+                    ablation_platform = _OC.merge(ablation_platform, file_platform)
                 file_deps = _OC.select(acfg, "platform.deps", default=None)
                 if file_deps is not None:
                     if ablation_deps is None:
@@ -3084,6 +3192,8 @@ def _run_bench_rrun(args) -> None:
                     ablation_deps.extend(list(file_deps))
             except Exception:
                 pass
+        platform_override = _OC.to_container(ablation_platform, resolve=False)
+        platform_override.pop("deps", None)  # handled by deps_override
         # precedence: CLI -d > ablation platform.deps > platform config deps
         effective_deps = cli_deps if cli_deps is not None else ablation_deps
 
@@ -3124,9 +3234,15 @@ def _run_bench_rrun(args) -> None:
             parts += ["-a", ",".join(abl_args)]
         remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
+        _size = " ".join(f"{k}={platform_override[k]}"
+                         for k in ("node_count", "gpu_count_per_node")
+                         if k in platform_override)
         print(f"{prefix} submit {job_name}"
+              + (f" [{_size}]" if _size else "")
               + (f" (local configs → {stage})" if upload_configs else ""))
-        _run_bench_sbatch_cmd(platform, remote_cmd, job_name, deps_override=effective_deps)
+        _run_bench_sbatch_cmd(platform, remote_cmd, job_name,
+                              deps_override=effective_deps,
+                              platform_override=platform_override)
         n_submitted += 1
         time.sleep(1)
 
