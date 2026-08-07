@@ -42,6 +42,10 @@ dependencies = [
     "numpy", #==1.26.3",
     "tensorboardX", #==2.6.2.2",
     "tensorboard", #==2.17.0",
+    # genpose2.runners.infer does `from flask import Flask` and builds a Flask
+    # app at module level, so importing it -- which _init_genpose2 does -- needs
+    # flask present. It was simply never declared.
+    "flask",
     # open3d moved to the optional-dependencies below: it has no linux-aarch64
     # wheel for python 3.12+ (JUPITER's Grace nodes), and nothing genpose2
     # imports on the path o3b uses needs it. setup_slurm.sh installs it
