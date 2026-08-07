@@ -1174,20 +1174,36 @@ def _run_platform_status(args):
 
 
 def _mp_env_from_cfg(cfg) -> dict:
-    """Environment the job preamble exports for torch multiprocessing / fd limits.
+    """Environment the job preamble exports before it runs anything.
 
     Platform keys (see configs/platform/slurm.yaml):
       mp_sharing_strategy → MP_SHARING_STRATEGY  applied at `import o3b`
       mp_start_method     → MP_START_METHOD      applied at `import o3b`
       nofile_limit        → NOFILE_LIMIT         consumed by `_srun_env_lines`
                                                  as a `ulimit -n`, not exported
+      env: {NAME: value}  → exported verbatim
     Absent keys are omitted, leaving the node's / torch's defaults in place.
+
+    The free-form ``env:`` block is for variables a run has to set *before* the
+    process starts, which is the only point at which some of them are still
+    read — OMP_NUM_THREADS is fixed at the first torch import, and torchrun
+    only defaults it to 1 when it is not already in the environment. Because
+    `o3b bench rrun` merges an ablation's ``platform:`` block over the platform
+    config, an ablation can set one per variant (morpheus/omp_num_threads)
+    without a platform config per value.
     """
     keys = {"mp_sharing_strategy": "MP_SHARING_STRATEGY",
             "mp_start_method":     "MP_START_METHOD",
             "nofile_limit":        "NOFILE_LIMIT"}
-    return {var: str(cfg.get(key, None)) for key, var in keys.items()
-            if cfg.get(key, None)}
+    env = {var: str(cfg.get(key, None)) for key, var in keys.items()
+           if cfg.get(key, None)}
+    from omegaconf import OmegaConf
+    extra = cfg.get("env", None)
+    if extra:
+        if OmegaConf.is_config(extra):
+            extra = OmegaConf.to_container(extra, resolve=True)
+        env.update({str(k): str(v) for k, v in dict(extra).items()})
+    return env
 
 
 def _platform_srun_context(platform: str):
@@ -1395,7 +1411,7 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
         # echo the exported values, not the ones we templated in, so the log
         # shows what the job actually runs with
         exported = " ".join(f"{key}=${{{key}}}" for key in mp_env)
-        lines.append(_echo(f"torch multiprocessing: {exported}"))
+        lines.append(_echo(f"environment: {exported}"))
     # With conda the CUDA toolchain lives inside the env and is exported after
     # activation below; pointing at the system install here would shadow it.
     if modules:
@@ -1545,6 +1561,19 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
     lines += [
         f"export O3B_NNODES={int(node_count)}",
         f"export O3B_NPROC_PER_NODE={int(gpu_count)}",
+        # torchrun sets OMP_NUM_THREADS=1 whenever it is unset, so every rank of
+        # a multi-GPU job would run its CPU-side work (collate, mask distance
+        # transforms, mesh ops) single-threaded while the 1-GPU baseline — which
+        # never goes through torchrun — uses the whole allocation.  That alone
+        # makes the two incomparable.  Split the cores slurm actually granted
+        # over the ranks sharing them rather than trusting the requested count,
+        # and yield to a value the caller already set.
+        'if [ -z "${OMP_NUM_THREADS:-}" ]; then',
+        '    _o3b_cpus="${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-1}}"',
+        '    OMP_NUM_THREADS=$(( _o3b_cpus / ${O3B_NPROC_PER_NODE:-1} ))',
+        '    [ "${OMP_NUM_THREADS}" -lt 1 ] && OMP_NUM_THREADS=1',
+        "    export OMP_NUM_THREADS",
+        "fi",
     ]
     for key, value in (nccl_env or {}).items():
         lines.append(f"export {key}={value}")
@@ -2910,6 +2939,14 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
 
     cfg, _ = _load_platform_config(platform)
     if platform_override:
+        # Hydra composes the platform config in struct mode, which rejects any
+        # key the config did not already declare — including a *new* key inside
+        # a declared-but-empty mapping, so `env: {}` in slurm.yaml plus an
+        # ablation's `platform: {env: {OMP_NUM_THREADS: 5}}` raises
+        # "Key 'OMP_NUM_THREADS' is not in struct".  An ablation's platform
+        # block is meant to add keys, not only to retune declared ones, so the
+        # override is applied with struct off.
+        OmegaConf.set_struct(cfg, False)
         cfg = OmegaConf.merge(cfg, OmegaConf.create(dict(platform_override)))
 
     ssh_host = cfg.get("ssh")

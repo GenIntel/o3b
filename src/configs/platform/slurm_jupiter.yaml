@@ -16,7 +16,12 @@ defaults:
 #  * account   — JSC rejects any job without a budget account.
 #  * walltime  — hard cap of 12:00:00 on the booster partition.
 #  * node      — whole nodes are allocated and charged; --mem is rejected, so
-#                exclusive_nodes disables it. 4 GPUs and 288 SMT cores per node.
+#                exclusive_nodes disables it. 4 GPUs and 288 cores per node
+#                (4 Grace modules x 72, one thread per core — not SMT).
+#  * nccl_env   — deliberately absent. This file extends `default`, NOT `slurm`,
+#                so it inherits none of slurm.yaml's NCCL settings, and it must
+#                stay that way: both of them are workarounds for LMB hardware
+#                defects that do not exist here (see the block at the bottom).
 #  * proxy     — JSC routes to the internet directly. Empty on purpose: the
 #                tfproxy inherited from slurm.yaml would break every request.
 #  * modules   — no usable system python / git / CUDA; all come from Lmod.
@@ -132,7 +137,16 @@ deps:
 partition: booster
 node_count: 1
 gpu_count_per_node: 4
-cpu_count_per_gpu: 18       # 72 physical cores / 4 GPUs
+# 288 physical cores / 4 GPUs.  A booster node is 4 Grace modules of 72 cores
+# each (lscpu: Core(s) per socket 72, Socket(s) 4, 1 thread per core) = 288, not
+# the 72 an earlier version of this comment assumed.  Since JSC allocates and
+# charges whole nodes, the bill is the same either way — asking for less only
+# shrinks the affinity mask:
+#   --cpus-per-task 72   ->  affinity 0-71,  AllocTRES billing=288,cpu=288
+#   --cpus-per-task 288  ->  affinity 0-287, AllocTRES billing=288,cpu=288
+# Do not drop the key to "inherit the node": with no --cpus-per-task at all srun
+# pins the task to a single CPU (verified — affinity list "0").
+cpu_count_per_gpu: 72
 ram_per_cpu: "6gb"          # advisory only: whole nodes (480gb) are allocated
 exclusive_nodes: True       # JSC rejects --mem
 walltime: "12:00:00"        # hard cap on booster
@@ -161,3 +175,30 @@ warm_torch_hub:
 mp_start_method: "fork"      # "fork" "spawn" "forkserver"
 mp_sharing_strategy: "file_system"
 nofile_limit: "hard"         # `ulimit -n` for the job, see slurm.yaml
+
+# NCCL — nothing set on purpose; NCCL's own defaults are already right here.
+#
+# Do NOT copy slurm.yaml's nccl_env over. Both of its entries are workarounds
+# for LMB hardware and would be cargo-culted here:
+#
+#   NCCL_SHM_DISABLE=1  works around a broken /dev/shm NCCL segment on specific
+#                       dlc2gpu nodes. No such defect on the booster.
+#   NCCL_P2P_LEVEL=SYS  is needed because the L40S pairs are `NODE` in
+#                       nvidia-smi topo -m (PCIe host bridge), which NCCL's
+#                       default P2P level will not cross. The GH200s here are
+#                       NVLink/NVSwitch and NCCL selects P2P unaided.
+#
+# Measured on jpbo-016-30, 4x GH200, all-reduce of 1.13 GiB (ViT-L/14 fp32
+# gradients) with this empty nccl_env:
+#
+#   P2P/CUMEM   5.6 ms   216 GB/s algbw   324 GB/s busbw
+#
+# versus 519.6 ms / 3.51 GB/s for the same collective on slurm_lmbl40 as it was
+# configured before NCCL_P2P_LEVEL was added — a 93x gap. Single node only.
+#
+# NOT MEASURED: multi-node. The booster has four IB rails per node
+# (NCCL reports "Using [0]mlx5_0:1/IB [1]mlx5_1:1/IB [2]mlx5_2:1/IB
+# [3]mlx5_3:1/IB [RO]; OOB ib0"), and a single-node probe never exercises them
+# because the collective stays on NVLink. If node_count > 1 scales poorly,
+# inter-node NCCL tuning (rail/HCA selection, CollNet/SHARP) is the place to
+# look — but measure before setting anything.

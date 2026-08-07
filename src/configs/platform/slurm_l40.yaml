@@ -3,8 +3,13 @@ defaults:
 
 partition: alldlc2_gpu-l40s # addlc2_gpu-l40s alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmbdlc2_gpu-l40s alldlc2_gpu-l40s #  alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-1080ti, lmb_gpu-rtx2080, testdlc_gpu-rtx2080, alldlc_gpu-rtx3080, alldlc_gpu-rtx2080, lmbdlc_gpu-rtx2080
 gpu_count_per_node: 1
-cpu_count_per_gpu: 5 # wrong config on slurm
-ram_per_cpu: "24gb" # 
+cpu_count_per_gpu: 8 # of the 16/gpu the node has (128 threads / 8 gpus)
+ram_per_cpu: "16gb" # 8 cpu/gpu x 16gb = the partition's DefMemPerGPU (128gb);
+                    # was 24gb, which paired with the old cpu_count_per_gpu: 5.
+                    # Keep the product at 128gb/gpu when changing either: a
+                    # larger --mem does not get more RAM per gpu, it just
+                    # blocks the node for other jobs and lengthens the queue.
+
 
 # 1. lmb_gpu-rtx2080 : usually empty, only 3 slots
 # 2. lmbdlc_gpu-rtx2080 : often pending (but eventually it will work)

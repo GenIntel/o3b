@@ -88,11 +88,43 @@ renderer: pytorch3d
 #   ncclOsShmOpen … Error while attaching to shared memory segment /dev/shm/nccl-<junk> (size 0)
 # → DistBackendError, then an illegal memory access.  Verified on dlc2gpu17
 # (NCCL 2.30.7+cuda12.9, /dev/shm itself healthy at 851G free), and it is the
-# same "shm problem, problem for ddp" the node list below records.  Disabling
-# SHM is enough — peer-to-peer stays on, so intra-node collectives keep using
-# NVLink/PCIe directly.
+# same "shm problem, problem for ddp" the node list below records.
+#
+# Disabling SHM is NOT enough on its own, and the claim that "peer-to-peer stays
+# on" was wrong.  The l40s GPUs sit behind a PCIe host bridge, so every pair is
+# `NODE` in nvidia-smi topo -m, and NCCL's default P2P level does not cross
+# that — with SHM removed it has no local transport left and falls back to the
+# RoCE NIC (mlx5_0, 100 Gb/s) for *intra-node* collectives.  Measured on
+# dlc2gpu05 (4x L40S), all-reduce of 1.13 GiB = ViT-L/14's fp32 gradients:
+#
+#   NCCL_SHM_DISABLE=1                       NET/IB   519.6 ms   3.51 GB/s busbw
+#   NCCL_SHM_DISABLE=1 NCCL_P2P_LEVEL=SYS    P2P       83.7 ms  21.80 GB/s
+#   SHM allowed (no P2P level)               SHM       85.5 ms  21.33 GB/s
+#
+# P2P itself is available on every pair (nvidia-smi topo -p2p r is all OK), it
+# just is not selected by default.  Forcing the level therefore recovers the
+# 6.2x without re-enabling the broken SHM path — which matters because the SHM
+# breakage is node-specific (the same probe crashed on dlc2gpu31 and ran fine
+# on dlc2gpu05), so relying on SHM would reintroduce a per-node lottery.
 nccl_env:
   NCCL_SHM_DISABLE: 1
+  NCCL_P2P_LEVEL: SYS
+
+# Free-form environment exported by the job preamble before anything else runs
+# (see cli._mp_env_from_cfg), for variables that are only read at process start.
+# Nothing is set by default — an empty block leaves the node's/torch's defaults,
+# which is not the same thing as setting them explicitly:
+#
+#   OMP_NUM_THREADS  unset on a single-GPU run means torch sizes its intra-op
+#                    pool from the *node's* core count, not from the job's
+#                    cpus-per-task, so every DataLoader worker oversubscribes.
+#                    Under torchrun it is not unset at all: torchrun defaults it
+#                    to 1 (with a warning) whenever the environment lacks it, so
+#                    a 1-GPU and a 4-GPU run of the same config do not agree on
+#                    it.  Set it here to take that difference out of the
+#                    multi-GPU scaling comparison — morpheus/omp_num_threads
+#                    ablates the value.
+env: {}
 
 nodes_exclude: dlc2gpu10 # ecc cudea error
 # dlc2gpu09,dlc2gpu10,dlc2gpu11,dlc2gpu01,dlc2gpu08  # shm problem, problem for ddp
