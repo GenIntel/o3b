@@ -1,7 +1,6 @@
 import logging
 
 import matplotlib.pyplot as plt
-import open3d as o3d
 import torch
 from mpl_toolkits.mplot3d import Axes3D
 

@@ -1,7 +1,6 @@
 import logging
 import json
 import numpy as np
-import open3d as o3d
 import torch
 from pathlib import Path
 from typing import List, Union
@@ -31,6 +30,7 @@ def build_geometries_from_pts3d_and_meshes(
     Returns:
         List of geometry dicts with 'name' and 'geometry' keys
     """
+    import open3d as o3d
     geometries = []
 
     # Add point clouds
@@ -93,6 +93,7 @@ def show_scene_with_selection(
     Returns:
         List of selected object names
     """
+    import open3d as o3d
     if selection_save_path is None:
         selection_save_path = Path("selected_objects.json")
 
@@ -198,6 +199,7 @@ def show_scene_with_click_selection(
     Returns:
         List of selected object names
     """
+    import open3d as o3d
     if selection_save_path is None:
         selection_save_path = Path("selected_objects.json")
 
@@ -243,6 +245,7 @@ def show_scene_with_click_selection(
 
     def toggle_selection(vis, i):
         """Toggle selection state of a geometry"""
+        import open3d as o3d
         if i >= len(geometries):
             logger.warning(f"Index {i} out of range (max: {len(geometries)-1})")
             return False

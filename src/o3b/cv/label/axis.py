@@ -1,7 +1,6 @@
 import logging
 
 logger = logging.getLogger(__name__)
-import open3d
 import torch
 from typing import Union, List
 from o3b.cv.visual.show import get_engine_geometries_for_cams
@@ -32,6 +31,7 @@ def label_axis_in_pcl(
     Returns:
         axis (torch.Tensor): 3x2x3
     """
+    import open3d
 
     logger.info("")
     logger.info(

@@ -5,7 +5,6 @@ from pathlib import Path
 import torch
 import os
 from o3b.io import run_cmd
-import open3d
 from o3b.cv.geometry.transform import (
     tform4x4_from_transl3d,
     tform4x4_broadcast,
@@ -44,6 +43,7 @@ def run_droid_slam(
     rays_center3d_fname="rays_center3d.pt",
     cam_tform_obj_dname="cam_tform4x4_obj",
 ):
+    import open3d
     stride = "1"
     image_tag = "limpbot/droid-slam:v1"
     path_out = path_out_root.joinpath(rpath_out)

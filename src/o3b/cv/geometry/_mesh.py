@@ -29,7 +29,6 @@ from o3b.cv.geometry.transform import (
 from o3b.cv.visual.sample import sample_pxl2d_grid
 from o3b.cv.geometry.grid import get_pxl2d
 from typing import Union
-import open3d as o3d
 import numpy as np
 
 
@@ -101,7 +100,8 @@ class Mesh:
         return self.verts.shape[0]
 
     @staticmethod
-    def from_o3d(mesh_o3d: o3d.geometry.TriangleMesh, device="cpu"):
+    def from_o3d(mesh_o3d: "o3d.geometry.TriangleMesh", device="cpu"):
+        import open3d as o3d
         vertices = torch.from_numpy(np.asarray(mesh_o3d.vertices)).to(
             dtype=torch.float,
             device=device,
@@ -128,6 +128,7 @@ class Mesh:
         radius: float = 1.0,
         device="cpu",
     ):
+        import open3d as o3d
         return Mesh.from_o3d(
             o3d.geometry.TriangleMesh.create_sphere(radius=radius).translate(
                 center3d.detach().cpu().numpy(),
@@ -148,6 +149,7 @@ class Mesh:
         height: float = 1.0,
         device="cpu",
     ):
+        import open3d as o3d
         R = o3d.geometry.TriangleMesh.get_rotation_matrix_from_xyz((np.pi, 0.0, 0.0))
         # note: height becomes larger with lower resolution
         plane3d_open3d = (
@@ -330,6 +332,7 @@ class Meshes(torch.nn.Module):
 
     @staticmethod
     def load_by_name(name: str, device="cpu", faces_count=None):
+        import open3d as o3d
         if name == "bunny":
             bunny_data = o3d.data.BunnyMesh()
             bunny_mesh_open3d = o3d.io.read_triangle_mesh(bunny_data.path)

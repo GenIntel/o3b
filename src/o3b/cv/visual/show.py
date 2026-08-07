@@ -15,8 +15,13 @@ from typing import List
 import torchvision
 import PIL
 
-import open3d as o3d
 import numpy as np
+
+# open3d is an optional extra (no linux-aarch64 wheel for python 3.12+).
+# Importing it here made this module unimportable on JUPITER, and
+# meshes.render_batch imports it -- so *rendering during training* died with
+# ModuleNotFoundError even though nothing on that path visualises anything.
+# Only the show_*/get_engine_geometries_for_cams helpers below need it.
 from o3b.cv.geometry.transform import tform4x4, inv_tform4x4
 
 CAM_TFORM_OBJ = torch.Tensor(
@@ -198,7 +203,6 @@ def show_mesh():
 from typing import Union
 from o3b.cv.geometry.objects3d.meshes import Meshes
 from o3b.cv.visual.draw import get_colors
-import open3d
 
 
 def show_scene2d(
@@ -533,6 +537,8 @@ def show_scene(
     Returns:
         -
     """
+    import open3d
+    import open3d as o3d
 
     geometries = []
     meshes_x_offsets = []
@@ -1402,6 +1408,8 @@ def get_engine_geometries_for_cams(
     Returns:
         od3d_geometries (List): list with geometries as dict
     """
+    import open3d
+    import open3d as o3d
 
     geometries = []
 
@@ -1843,6 +1851,7 @@ def get_engine_geometries_for_cams(
 
 
 def show_pcl_via_open3d(pts3d, pts3d_colors=None):
+    import open3d as o3d
     vis = o3d.visualization.VisualizerWithEditing()
     vis.create_window()
     # vis.add_geometry(pcd)
@@ -1858,6 +1867,7 @@ def show_pcl_via_open3d(pts3d, pts3d_colors=None):
 
 
 def show_open3d_pcl(pcd):
+    import open3d as o3d
     vis = o3d.visualization.VisualizerWithEditing()
     vis.create_window()
     vis.add_geometry(pcd)
@@ -1877,6 +1887,7 @@ def show_pcl(
         verts: Nx3 / BxNx3 / list(torch.Tensor Nx3)
 
     """
+    import open3d as o3d
 
     if cam_tform4x4_obj is not None:
         pt3d_cameras = pt3d_camera_from_tform4x4_intr4x4_imgs_size(

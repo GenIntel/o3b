@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import List
 import cv2
 import numpy as np
-import open3d as o3d
 import torch
 import wandb
 from PIL import Image
@@ -168,16 +167,19 @@ def get_default_device():
 
 
 def read_pts3d_colors(fpath: Path):
+    import open3d as o3d
     pcd = o3d.io.read_point_cloud(str(fpath))
     return torch.from_numpy(np.asarray(pcd.colors)).to(torch.float)
 
 
 def read_pts3d(fpath: Path):
+    import open3d as o3d
     pcd = o3d.io.read_point_cloud(str(fpath))
     return torch.from_numpy(np.asarray(pcd.points)).to(torch.float)
 
 
 def read_pts3d_with_colors_and_normals(fpath: Path, device="cpu"):
+    import open3d as o3d
     pcd = o3d.io.read_point_cloud(str(fpath))
     pts3d = torch.from_numpy(np.asarray(pcd.points)).to(
         dtype=torch.float,
@@ -203,6 +205,7 @@ def write_pts3d_with_colors(
     pts3d_colors: torch.Tensor,
     fpath: Path,
 ):
+    import open3d as o3d
     pcd = o3d.geometry.PointCloud()
 
     # Set the point cloud data
@@ -218,6 +221,7 @@ def write_pts3d_with_colors_and_normals(
     pts3d_normals: torch.Tensor,
     fpath: Path,
 ):
+    import open3d as o3d
     fpath.parent.mkdir(parents=True, exist_ok=True)
 
     pcd = o3d.geometry.PointCloud()

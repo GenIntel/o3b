@@ -2,7 +2,6 @@ import copy
 import heapq
 
 import numpy as np
-import open3d
 import scipy as sp
 from sklearn.preprocessing import normalize
 from tqdm import tqdm
@@ -12,11 +11,12 @@ VALENCE_WEIGHT = 1
 
 
 def simplify_mesh(
-    mesh_o3d: open3d.geometry.TriangleMesh,
+    mesh_o3d: "open3d.geometry.TriangleMesh",
     mesh_vertices_count=500,
     isotropic=True,
     valence_aware=True,
 ):
+    import open3d
     mesh_astakape = AstakaPeMesh(
         vs=np.asarray(mesh_o3d.vertices),
         faces=np.asarray(mesh_o3d.triangles),

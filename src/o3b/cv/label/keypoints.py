@@ -2,7 +2,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 from o3b.cv.geometry.transform import transf3d_broadcast, inv_tform4x4, tform4x4
-import open3d
 import torch
 from typing import Union, List
 from o3b.cv.visual.show import get_engine_geometries_for_cams
@@ -12,6 +11,7 @@ import numpy as np
 
 def label_kpts4d(fpaths_meshs: List[Path], fpaths_kpts4d: List[Path],):
 
+    import open3d
     from o3b.cv.geometry.objects3d.meshes.meshes import Meshes
     PARALLEL_MESH_COUNT_MAX = 5
     KPOINTS3D_COUNT_MAX = 10
