@@ -1,7 +1,6 @@
 import numpy as np
 # import rospy
 # import pyrealsense2 as rs
-import pyrealsense2.pyrealsense2 as rs
 import OpenEXR
 import Imath
 import cv2
@@ -200,6 +199,7 @@ class RealSenseRobotStream(object):
 
     def _start_realsense(self, processing_preset):
         
+        import pyrealsense2 as rs
         config = rs.config()
         pipeline = rs.pipeline()
         config.enable_device(self.cam_serial_num)

@@ -9,10 +9,10 @@
 
 # pyrealsense2 is required.
 # Please see instructions in https://github.com/IntelRealSense/librealsense/tree/master/wrappers/python
-import pyrealsense2 as rs
 from ipdb import set_trace
 
 def get_profiles(serial_number=None):
+    import pyrealsense2 as rs
     ctx = rs.context()
     devices = ctx.query_devices()
 
