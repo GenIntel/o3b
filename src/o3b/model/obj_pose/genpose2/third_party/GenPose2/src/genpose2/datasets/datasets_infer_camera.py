@@ -2,7 +2,6 @@ import numpy as np
 import cv2
 import torch
 import copy
-import open3d as o3d
 import json
 
 from cutoop.data_loader import Dataset, ImageMetaData

@@ -19,7 +19,6 @@ os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import pickle
 import torch
 import time
-import open3d as o3d
 import timeit
 import argparse
 import json
@@ -160,6 +159,7 @@ def save_exr(filename, image):
 
 class RealSenseRobotStream(object):
     def __init__(self, cam_serial_num, robot_cam_num, rotation_angle = 0, mode='rgbd', use_sam=False, sam2_path=None):
+        import open3d as o3d
         self.mode = mode
         self.cam_serial_num = cam_serial_num
 
@@ -416,6 +416,7 @@ class RealSenseRobotStream(object):
             depth_image: Depth image as a NumPy array (same size as color_image).
             intrinsics: 3x3 intrinsic camera matrix.
         """
+        import open3d as o3d
         height, width = depth_image.shape
 
         # Create Open3D images
@@ -447,6 +448,7 @@ class RealSenseRobotStream(object):
         """
         color, depth => point cloud
         """
+        import open3d as o3d
         h, w = depths.shape
         fx, fy = cam_intrinsics[0, 0], cam_intrinsics[1, 1]
         cx, cy = cam_intrinsics[0, 2], cam_intrinsics[1, 2]

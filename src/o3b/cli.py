@@ -1970,6 +1970,27 @@ def _build_bench_parser(sub):
     p_run = bench_sub.add_parser("run", help="Run benchmark(s) locally")
     _add_bench_args(p_run)
 
+    def _add_fetch_only_args(q):
+        q.add_argument(
+            "-e", "--entity", default=None, metavar="ENTITY",
+            help="W&B entity (user or team). Defaults to the logged-in user's default entity.",
+        )
+        q.add_argument(
+            "-o", "--output", default=None, type=Path, metavar="FILE",
+            help="Output CSV path (default: <benchmark>.csv in CWD)",
+        )
+
+    def _add_qualit_arg(q):
+        q.add_argument(
+            "--qualit", action="store_true",
+            help="Instead of plotting metrics, look up qualitative images logged to W&B for each "
+                 "run in the ablation table and lay them out in a grid.",
+        )
+
+    def _add_fetch_args(q):
+        _add_bench_args(q)
+        _add_fetch_only_args(q)
+
     p_rrun = bench_sub.add_parser("rrun", help="Submit benchmark(s) as remote jobs via o3b platform run")
     _add_bench_args(p_rrun)
     p_rrun.add_argument(
@@ -1985,28 +2006,26 @@ def _build_bench_parser(sub):
         "--skip-fetched", action="store_true",
         help="Skip jobs whose ablation combo already has a row in the fetched tables/ CSV.",
     )
-
-    def _add_fetch_args(q):
-        _add_bench_args(q)
-        q.add_argument(
-            "-e", "--entity", default=None, metavar="ENTITY",
-            help="W&B entity (user or team). Defaults to the logged-in user's default entity.",
-        )
-        q.add_argument(
-            "-o", "--output", default=None, type=Path, metavar="FILE",
-            help="Output CSV path (default: <benchmark>.csv in CWD)",
-        )
+    # convenience: run the same invocation as `bench fetch` / `bench viz` instead of
+    # submitting, so the identical -b/-a/-p line can be reused for all three steps
+    g_rrun = p_rrun.add_mutually_exclusive_group()
+    g_rrun.add_argument(
+        "--fetch", action="store_true",
+        help="Do not submit; behave exactly like `o3b bench fetch` with the same arguments.",
+    )
+    g_rrun.add_argument(
+        "--viz", action="store_true",
+        help="Do not submit; behave exactly like `o3b bench viz` with the same arguments.",
+    )
+    _add_fetch_only_args(p_rrun)
+    _add_qualit_arg(p_rrun)
 
     p_fetch = bench_sub.add_parser("fetch", help="Fetch eval metrics from wandb and save to CSV")
     _add_fetch_args(p_fetch)
 
     p_viz = bench_sub.add_parser("viz", help="Interactively plot eval metrics from a bench CSV")
     _add_fetch_args(p_viz)
-    p_viz.add_argument(
-        "--qualit", action="store_true",
-        help="Instead of plotting metrics, look up qualitative images logged to W&B for each "
-             "run in the ablation table and lay them out in a grid.",
-    )
+    _add_qualit_arg(p_viz)
 
 
 def _run_bench_fetch(args) -> None:
@@ -2670,7 +2689,12 @@ def _run_bench(args) -> None:
     if args.bench_command == "run":
         _run_bench_run(args)
     elif args.bench_command == "rrun":
-        _run_bench_rrun(args)
+        if getattr(args, "fetch", False):
+            _run_bench_fetch(args)
+        elif getattr(args, "viz", False):
+            _run_bench_viz(args)
+        else:
+            _run_bench_rrun(args)
     elif args.bench_command == "fetch":
         _run_bench_fetch(args)
     elif args.bench_command == "viz":

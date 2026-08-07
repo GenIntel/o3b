@@ -7,7 +7,6 @@ import torch
 import random
 import gc
 import cv2
-import open3d as o3d
 import pyrealsense2 as rs
 import pyrealsense2 as rs
 import numpy as np
@@ -242,6 +241,7 @@ def create_genpose2(score_model_path:str, energy_model_path:str, scale_model_pat
 
 def visualize_pose(data:InferDataset, all_final_pose, all_final_length, visualize_pts=False, visualize_image=False):
     # color_img = cv2.cvtColor(data.color, cv2.COLOR_RGB2BGR)
+    import open3d as o3d
     color_img = data.color.copy()
     all_final_pose = all_final_pose[0].cpu().numpy()
     all_final_length = all_final_length[0].cpu().numpy()
