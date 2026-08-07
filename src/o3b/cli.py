@@ -2437,6 +2437,15 @@ def _run_bench_viz_qualit(args) -> None:
     plt.show()
 
 
+def _print_metric_table(header: list[str], rows: list[list[str]], title: str = "") -> None:
+    """Print a copy-pasteable comma-separated (CSV) table."""
+    if title:
+        print(f"\n{title}")
+    for cells in [header] + rows:
+        print(",".join(cells))
+    print()
+
+
 def _run_bench_viz(args) -> None:
     """Load (or fetch) the bench CSV and show an interactive bar-plot for a chosen metric."""
     if getattr(args, "qualit", False):
@@ -2571,6 +2580,21 @@ def _run_bench_viz(args) -> None:
         yticks = list(vals_a) + ["Avg"]
         na, nb = len(vals_a), len(vals_b)
 
+        table_title = f"{bench_stem}  —  {metric}"
+        if fixed_desc:
+            table_title += f"  (fixed: {fixed_desc})"
+        _print_metric_table(
+            header=[f"{col_a} \\ {col_b}"] + xticks,
+            rows=[
+                [yticks[ia]] + [
+                    "" if np.isnan(ext_mat[ia, ib]) else f"{ext_mat[ia, ib]:.4f}"
+                    for ib in range(nb + 1)
+                ]
+                for ia in range(na + 1)
+            ],
+            title=table_title,
+        )
+
         fig, ax = plt.subplots(figsize=(max(6, (nb + 1) * 0.9 + 1), max(3, (na + 1) * 0.7 + 1)))
         im = ax.imshow(ext_mat, aspect="auto", cmap="viridis")
         plt.colorbar(im, ax=ax, label=metric)
@@ -2617,6 +2641,15 @@ def _run_bench_viz(args) -> None:
     avg = sum(values) / len(values)
     labels.append("Average")
     values.append(avg)
+
+    table_title = f"{bench_stem}  —  {metric}"
+    if fixed_desc:
+        table_title += f"  (fixed: {fixed_desc})"
+    _print_metric_table(
+        header=[changing_cols[0] if len(changing_cols) == 1 else "job", metric],
+        rows=[[lbl, f"{val:.4f}"] for lbl, val in zip(labels, values)],
+        title=table_title,
+    )
 
     fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.7), 5))
     colors  = ["steelblue"] * (len(labels) - 1) + ["darkorange"]

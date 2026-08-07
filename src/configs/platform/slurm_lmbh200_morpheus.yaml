@@ -1,0 +1,29 @@
+defaults:
+  - slurm
+
+
+partition: lmbdlc2_gpu-h200 # addlc2_gpu-l40s alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmbdlc2_gpu-l40s alldlc2_gpu-l40s #  alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-1080ti, lmb_gpu-rtx2080, testdlc_gpu-rtx2080, alldlc_gpu-rtx3080, alldlc_gpu-rtx2080, lmbdlc_gpu-rtx2080
+gpu_count_per_node: 1
+cpu_count_per_gpu: 20 # 42 384/8=48 # somehow this is too many for lmb queue
+ram_per_cpu: "4gb" #  1500/384=4 (1500GB per GPU, 4GB per CPU)
+
+# 1. lmb_gpu-rtx2080 : usually empty, only 3 slots
+# 2. lmbdlc_gpu-rtx2080 : often pending (but eventually it will work)
+# 3. alldlc_gpu-rtx3080 : usually empty (actually not anymore), but fewer gb?
+# 4. alldlc_gpu-rtx2080 : biggest cluster
+# 5. tflmb_gpu-rtx3090: lmb gpu (debugging)
+# 6. tflmb_gpu-1080ti: lmb gpu (debugging)
+# tflmb_gpu-rtx3090
+# tflmb_gpu-1080ti
+# alldlc2_gpu-l40s
+# lmbdlc2_gpu-l40s
+
+walltime: "24:00:00" #  "24:00:00"
+
+
+deps:
+  #- diff3f
+  - morpheus
+  #- geco
+  #- mrf3dtopo
+  # creates venv_py310_cu124_torch26_densematcher and installs deps there
