@@ -73,10 +73,14 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
     # ── method (optional) ─────────────────────────────────────────────────────
     # The method runs on each batch before the task (e.g. a pose estimator that
-    # writes predicted poses). If it cannot be built (e.g. missing dependency)
-    # we warn and fall back to the task on the raw batch (GT/oracle) — except
-    # for CUDA failures (no GPU, driver error, OOM), which are environment
-    # problems the fallback would only hide: those end the run.
+    # writes predicted poses). A method that fails to build ends the run: the
+    # alternative is to evaluate the task on the raw batch (GT/oracle), which
+    # produces a full set of plausible metrics recorded under the method's name.
+    # That silently misreported four JUPITER runs as `morpheus` (missing open3d,
+    # a cold torch.hub cache, a stale nvdiffrast) before anyone noticed.
+    # Evaluating the oracle is still reachable, but only on purpose:
+    #   allow_oracle_fallback: true   in the run config, or
+    #   O3B_ALLOW_ORACLE_FALLBACK=1   in the environment.
     method = None
     method_cfg = run_raw.get("method")
     if method_cfg:
@@ -86,16 +90,22 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             method = build_method(MethodConfig.from_dict(dict(method_cfg)))
             print(f"Method:  {cls_name}")
         except Exception as exc:
-            import traceback
+            import os, traceback
             traceback.print_exc()
-            if "CUDA" in str(exc):
+            allow = bool(run_raw.get("allow_oracle_fallback", False)) or \
+                os.environ.get("O3B_ALLOW_ORACLE_FALLBACK", "").lower() in ("1", "true", "yes")
+            if not allow:
                 raise RuntimeError(
-                    f"could not build method {cls_name!r}: CUDA failure "
-                    f"({exc}) — ending the run instead of continuing with "
-                    f"partial init."
+                    f"could not build method {cls_name!r}: {exc}\n"
+                    f"Ending the run. Falling back to the task on the raw batch "
+                    f"would report GT/oracle numbers under the name {cls_name!r}. "
+                    f"To evaluate the oracle deliberately, set "
+                    f"allow_oracle_fallback: true in the run config or "
+                    f"O3B_ALLOW_ORACLE_FALLBACK=1 in the environment."
                 ) from exc
             print(f"WARNING: could not build method {cls_name!r} ({exc}); "
-                  f"running task on raw batch (GT/oracle).")
+                  f"running task on raw batch (GT/oracle) because the fallback "
+                  f"was explicitly enabled. Results are NOT {cls_name!r}.")
 
     # ── wandb init (before training so per-batch train losses are logged) ─────
     _wb = None
