@@ -82,6 +82,18 @@ ram_per_cpu: "5gb"
 walltime: "24:00:00" #  "24:00:00"
 renderer: pytorch3d
 
+# NCCL environment for multi-GPU (torchrun) jobs — exported by the job preamble
+# (see cli._srun_env_lines).  NCCL's shared-memory transport is broken on these
+# nodes: it opens a garbage segment name and every collective dies with
+#   ncclOsShmOpen … Error while attaching to shared memory segment /dev/shm/nccl-<junk> (size 0)
+# → DistBackendError, then an illegal memory access.  Verified on dlc2gpu17
+# (NCCL 2.30.7+cuda12.9, /dev/shm itself healthy at 851G free), and it is the
+# same "shm problem, problem for ddp" the node list below records.  Disabling
+# SHM is enough — peer-to-peer stays on, so intra-node collectives keep using
+# NVLink/PCIe directly.
+nccl_env:
+  NCCL_SHM_DISABLE: 1
+
 nodes_exclude: dlc2gpu10 # ecc cudea error
 # dlc2gpu09,dlc2gpu10,dlc2gpu11,dlc2gpu01,dlc2gpu08  # shm problem, problem for ddp
 # dlc2gpu01 was suddenly having no space left on device problem

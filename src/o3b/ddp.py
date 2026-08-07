@@ -53,7 +53,15 @@ def is_main_process(rank=None):
 
 
 def dist_sync_processes():
-    if is_initialized():
+    if not is_initialized():
+        return
+    # Name the device: a bare barrier() has to guess which GPU this rank owns
+    # ("devices used by this process are currently unknown … can potentially
+    # cause a hang if this rank to GPU mapping is incorrect"), and its guess is
+    # only right as long as local_rank happens to match.
+    if dist.get_backend() == "nccl" and torch.cuda.is_available():
+        dist.barrier(device_ids=[get_local_rank()])
+    else:
         dist.barrier()
 
 
