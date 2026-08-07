@@ -169,6 +169,71 @@ def get_nearest_neighbor(
 
     return argmin_pts1_from_pts2, argmin_pts2_from_pts1
 
+@torch.no_grad()
+def _batch_chamfer_argmin(
+    pts1,
+    pts2,
+    pts1_mask,
+    pts2_mask,
+    only_pts2_nn,
+    chunk_size_max_elements,
+):
+    """Nearest-neighbour indices for both directions, computed chunk-wise.
+
+    The full B x N x M distance matrix is never materialised at once, and it is
+    never kept alive for the backward pass -- only the argmin indices leave this
+    function (see ``batch_chamfer_distance``).
+
+    Returns:
+        argmin_pts1_from_pts2 (torch.LongTensor): (B, M)
+        argmin_pts2_from_pts1 (torch.LongTensor): (B, N) or None
+    """
+    B, N = pts1.shape[0], pts1.shape[1]
+    M = pts2.shape[1]
+    device = pts1.device
+
+    chunk = max(1, min(N, int(chunk_size_max_elements // max(1, B * M))))
+
+    best_val = pts1.new_full((B, M), float("inf"))
+    argmin_pts1_from_pts2 = pts1.new_zeros((B, M), dtype=torch.long)
+    argmin_pts2_from_pts1 = (
+        None if only_pts2_nn else pts1.new_zeros((B, N), dtype=torch.long)
+    )
+
+    for start in range(0, N, chunk):
+        end = min(start + chunk, N)
+        cdist_chunk = torch.cdist(pts1[:, start:end], pts2)  # B x C x M
+        cdist_chunk.masked_fill_(
+            ~(pts1_mask[:, start:end, None] & pts2_mask[:, None, :]),
+            float("inf"),
+        )
+
+        chunk_val, chunk_idx = cdist_chunk.min(dim=-2)  # B x M
+        improved = chunk_val < best_val
+        best_val = torch.where(improved, chunk_val, best_val)
+        argmin_pts1_from_pts2 = torch.where(
+            improved,
+            chunk_idx + start,
+            argmin_pts1_from_pts2,
+        )
+
+        if not only_pts2_nn:
+            argmin_pts2_from_pts1[:, start:end] = cdist_chunk.argmin(dim=-1)
+
+        del cdist_chunk
+
+    return argmin_pts1_from_pts2, argmin_pts2_from_pts1
+
+
+def _pairwise_dist(pts_a, pts_b):
+    """Euclidean distance between already-paired points: (..., K, 3) -> (..., K).
+
+    ``clamp_min`` keeps the gradient finite for coincident points (where the
+    subgradient is taken as 0), which ``torch.linalg.norm`` would return as NaN.
+    """
+    return (pts_a - pts_b).square().sum(dim=-1).clamp_min(1e-24).sqrt()
+
+
 def batch_chamfer_distance(
     pts1,
     pts2,
@@ -176,6 +241,7 @@ def batch_chamfer_distance(
     pts2_mask=None,
     uniform_weight_pts1=True,
     only_pts2_nn=False,
+    chunk_size_max_elements=2**24,
 ):
     """
     Args:
@@ -183,6 +249,9 @@ def batch_chamfer_distance(
         pts2 (torch.Tensor): (B, M, 3)
         pts1_mask (torch.Tensor): (B, N)
         pts2_mask (torch.Tensor): (B, M)
+        chunk_size_max_elements (int): upper bound on the elements of the
+            transient distance matrix; pts1 is processed in chunks of
+            ``chunk_size_max_elements // (B * M)`` points.
     Returns:
         chamfer_dist (torch.Tensor): (B,)
     """
@@ -195,85 +264,67 @@ def batch_chamfer_distance(
         pts1_mask = torch.ones_like(pts1[..., 0], dtype=torch.bool)
     if pts2_mask is None:
         pts2_mask = torch.ones_like(pts2[..., 0], dtype=torch.bool)
+    pts1_mask = pts1_mask.to(dtype=torch.bool)
+    pts2_mask = pts2_mask.to(dtype=torch.bool)
 
-    pairs_mask = pts1_mask[:, :, None] * pts2_mask[:, None, :]
-    verts_cdist_pred_gt = torch.cdist(pts1, pts2)
-    verts_cdist_pred_gt_min = (
-        verts_cdist_pred_gt.detach().clone()
-    )  # + ((~pairs_mask) * 1.) * torch.inf
-    verts_cdist_pred_gt_min[~pairs_mask] = torch.inf
+    B = pts1.shape[0]
+    N = pts1.shape[1]
+    M = pts2.shape[1]
 
-    argmin_pred_from_gt = verts_cdist_pred_gt_min.argmin(dim=-2)  # BxG
-
-    pairs_pred_from_gt = torch.stack(
-        [
-            argmin_pred_from_gt,
-            torch.arange(argmin_pred_from_gt.shape[-1])
-            .view(1, -1)
-            .expand(argmin_pred_from_gt.shape)
-            .to(
-                device=device,
-            ),
-        ],
-        dim=-1,
+    argmin_pts1_from_pts2, argmin_pts2_from_pts1 = _batch_chamfer_argmin(
+        pts1=pts1,
+        pts2=pts2,
+        pts1_mask=pts1_mask,
+        pts2_mask=pts2_mask,
+        only_pts2_nn=only_pts2_nn,
+        chunk_size_max_elements=chunk_size_max_elements,
     )
+
+    # only the matched pairs enter the autograd graph (B x M and B x N, not B x N x M)
+    dist_pts2_to_pts1 = _pairwise_dist(
+        torch.gather(pts1, 1, argmin_pts1_from_pts2[..., None].expand(B, M, 3)),
+        pts2,
+    )  # B x M
     if not only_pts2_nn:
-        argmin_gt_from_pred = verts_cdist_pred_gt_min.argmin(dim=-1)  # BxP
-
-        pairs_gt_from_pred = torch.stack(
-            [
-                torch.arange(argmin_gt_from_pred.shape[-1])
-                .view(1, -1)
-                .expand(argmin_gt_from_pred.shape)
-                .to(
-                    device=device,
-                ),
-                argmin_gt_from_pred,
-            ],
-            dim=-1,
-        )
-
-        pairs_pred_gt = torch.cat(
-            [pairs_pred_from_gt, pairs_gt_from_pred],
-            dim=1,
-        )  # B x M+N x 2
-    else:
-        pairs_pred_gt = pairs_pred_from_gt
-
-    from o3b.cv.select import batched_indexMD_select, batched_index_select
-
-    chamfer_dist_pairwise = batched_indexMD_select(
-        indexMD=pairs_pred_gt,
-        inputMD=verts_cdist_pred_gt,
-    )  # B x M+N
-
-    M = pts2_mask.shape[-1]
-    N = pts1_mask.shape[-1]
-    B = pts1_mask.shape[0]
+        dist_pts1_to_pts2 = _pairwise_dist(
+            pts1,
+            torch.gather(pts2, 1, argmin_pts2_from_pts1[..., None].expand(B, N, 3)),
+        )  # B x N
 
     if uniform_weight_pts1:
-        pairs_pred_gt_ext = pairs_pred_gt.clone()
-        pairs_pred_gt_ext[:, :M, 0][~pts2_mask] = N
-        pairs_pred_gt_ext[:, M:, 0][~pts1_mask] = N
-        pts1_counts = torch.nn.functional.one_hot(pairs_pred_gt_ext[:, :, 0]).sum(dim=1)
-        pts1_counts = pts1_counts[:, :N]
-        pts1_weights = 1.0 / pts1_counts
-        pts1_weights[~pts1_mask] = 0.
-        pts2_weights_from_pts1 = batched_index_select(
-            index=pairs_pred_gt[:, :M, 0],
-            input=pts1_weights,
+        # how often each pts1 point is used as a nearest neighbour; index N is
+        # the bin collecting the masked-out entries and is dropped afterwards
+        pts1_counts = torch.zeros((B, N + 1), dtype=torch.long, device=device)
+        counted_idx = torch.where(
+            pts2_mask,
+            argmin_pts1_from_pts2,
+            torch.full_like(argmin_pts1_from_pts2, N),
         )
-        pts2_mask = pts2_mask.clone() * pts2_weights_from_pts1
-        pts1_mask = pts1_mask.clone() * pts1_weights
+        pts1_counts.scatter_add_(1, counted_idx, torch.ones_like(counted_idx))
+        pts1_counts = pts1_counts[:, :N]
+        if not only_pts2_nn:
+            # the pts1 -> pts2 direction contributes each valid pts1 point once
+            pts1_counts = pts1_counts + pts1_mask.to(dtype=torch.long)
 
-    chamfer_dist_mean_pred_from_gt = (chamfer_dist_pairwise[:, :M] * pts2_mask).sum(
+        pts1_weights = pts1_counts.clamp_min(1).to(dtype=dtype).reciprocal()
+        pts1_weights = pts1_weights * pts1_mask
+        pts2_weights = pts2_mask * torch.gather(
+            pts1_weights,
+            1,
+            argmin_pts1_from_pts2,
+        )
+    else:
+        pts1_weights = pts1_mask.to(dtype=dtype)
+        pts2_weights = pts2_mask.to(dtype=dtype)
+
+    chamfer_dist_mean_pred_from_gt = (dist_pts2_to_pts1 * pts2_weights).sum(
         dim=-1,
-    ) / (pts2_mask.sum(dim=-1) + 1e-10)
+    ) / (pts2_weights.sum(dim=-1) + 1e-10)
 
     if not only_pts2_nn:
-        chamfer_dist_mean_gt_from_pred = (chamfer_dist_pairwise[:, M:] * pts1_mask).sum(
+        chamfer_dist_mean_gt_from_pred = (dist_pts1_to_pts2 * pts1_weights).sum(
             dim=-1,
-        ) / (pts1_mask.sum(dim=-1) + 1e-10)
+        ) / (pts1_weights.sum(dim=-1) + 1e-10)
         chamfer_dist = (
             chamfer_dist_mean_pred_from_gt + chamfer_dist_mean_gt_from_pred
         ) / 2.0

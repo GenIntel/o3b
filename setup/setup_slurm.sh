@@ -71,6 +71,20 @@ _install_pytorch3d() {
         "git+https://github.com/facebookresearch/pytorch3d.git@V0.7.8"
 }
 
+# As for nvdiffrast: a pytorch3d left over from a different torch version is
+# "already satisfied" to pip but fails to import against the current libtorch.
+_install_pytorch3d_checked() {
+    _install_pytorch3d
+    if python -c "import pytorch3d, pytorch3d.renderer" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "--- pytorch3d does not import against torch ${TORCH_VERSION}; rebuilding from source ---"
+    pip install --no-build-isolation --force-reinstall --no-cache-dir \
+        "git+https://github.com/facebookresearch/pytorch3d.git@V0.7.8"
+    python -c "import pytorch3d, pytorch3d.renderer" >/dev/null 2>&1 \
+        || echo "WARNING: pytorch3d still does not import -- morpheus/diff3f will fall back to GT/oracle."
+}
+
 # ── modules ───────────────────────────────────────────────────────────────────
 # JSC systems (juwels/jupiter) ship no usable system python, git or CUDA: those
 # come from Lmod. MODULES is a space-separated list from the platform config's
@@ -358,6 +372,30 @@ if [ -x /usr/bin/gcc-13 ] && [ -x /usr/bin/g++-13 ]; then
 fi
 python -m pip install nvdiffrast@git+https://github.com/NVlabs/nvdiffrast --no-build-isolation
 
+# Compiled extensions link against the exact libtorch they were built with, but
+# pip sees them as "already satisfied" and skips them when torch later changes
+# version. The stale .so then fails at *run* time with an undefined c10 symbol
+# (e.g. _ZN3c104cuda29c10_cuda_check_implementation...), the method fails to
+# build, and run.py silently degrades the run to GT/oracle. Import each one and
+# rebuild the ones that no longer load.
+_rebuild_if_broken() {
+    local module="$1"; shift
+    if python -c "import ${module}" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "--- ${module} does not import against torch ${TORCH_VERSION}; rebuilding ---"
+    python -m pip install --no-build-isolation --force-reinstall --no-cache-dir "$@"
+    if python -c "import ${module}" >/dev/null 2>&1; then
+        echo "    ${module} rebuilt OK"
+    else
+        echo "WARNING: ${module} still does not import -- methods needing it will"
+        echo "         fail to build and the run will fall back to GT/oracle."
+    fi
+}
+
+_rebuild_if_broken nvdiffrast.torch \
+    "nvdiffrast@git+https://github.com/NVlabs/nvdiffrast"
+
 
 #python -m pip install --no-build-isolation visdom
 #python -m pip install --no-build-isolation "nvdiffrast@git+https://github.com/NVlabs/nvdiffrast"
@@ -409,7 +447,7 @@ done
 
 if [ "${INSTALL_DIFF3F}" = "true" ] || [ "${INSTALL_DIFF3F}" = "True" ]; then
     echo "--- pip install diff3f deps ---"
-    _install_pytorch3d
+    _install_pytorch3d_checked
     pip install diffusers transformers accelerate
     pip install git+https://github.com/skoch9/meshplot.git
     pip install pythreejs
@@ -441,7 +479,7 @@ fi
 
 if [ "${INSTALL_MORPHEUS}" = "true" ] || [ "${INSTALL_MORPHEUS}" = "True" ]; then
     echo "--- pip install morpheus deps ---"
-    _install_pytorch3d
+    _install_pytorch3d_checked
     # The complete GenPose2 setup is handled by the INSTALL_GENPOSE2 block
     # below (forced on by INSTALL_MORPHEUS).
 fi
