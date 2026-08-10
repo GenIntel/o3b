@@ -368,11 +368,18 @@ def _build_platform_parser(sub):
         "-p", "--platform", default="slurm", metavar="PLATFORM",
         help="Platform name matching a config in configs/platform/ (default: slurm)",
     )
-    p_setup.add_argument(
+    g_setup = p_setup.add_mutually_exclusive_group()
+    g_setup.add_argument(
         "--pull-only", action="store_true",
         help="Only refresh the remote checkout (clone/pull/submodules/credentials) "
              "and stop, skipping the env and dependency install. Forces pull even "
              "where the platform config sets pull: False.",
+    )
+    g_setup.add_argument(
+        "--creds-only", action="store_true",
+        help="Only re-install the credentials (the staged credentials/custom/*.yaml "
+             "plus the wandb ~/.netrc entry) onto the existing checkout, without "
+             "pulling and without the env and dependency install.",
     )
 
     p_status = plat_sub.add_parser(
@@ -404,6 +411,13 @@ def _build_platform_parser(sub):
         "--forward", default=None, metavar="LOCAL:REMOTE",
         help="Tunnel localhost:LOCAL to the allocated compute node's REMOTE port "
              "(through the platform's ssh host), e.g. --forward 8080:8080",
+    )
+    p_runi.add_argument(
+        "--pull", action="store_true",
+        help="Refresh the remote checkout first (`o3b platform setup --pull-only`) so the "
+             "shell lands on the pushed HEAD. Needed on setup_on_login platforms such as "
+             "JUPITER, whose compute nodes cannot reach github and so never pull by "
+             "themselves. Aborts without allocating if the pull fails.",
     )
 
     p_setupi = plat_sub.add_parser(
@@ -657,6 +671,21 @@ def _resolve_env_layout(cfg, repo_path: str, repo_name: str = "") -> dict:
     }
 
 
+def _credential(cfg, path: str, default: str = "") -> str:
+    """Resolve ``credentials.<path>``, treating the unset placeholder as absent.
+
+    credentials/default.yaml ships every key as the literal ``"..."`` so the
+    file documents what can be set. Handing that string on to a tool as if it
+    were a secret is worse than passing nothing: it shadows the credential the
+    tool would otherwise have found (a ~/.netrc entry, an env var) and fails
+    with a confusing auth error instead of a missing-credential one.
+    """
+    from omegaconf import OmegaConf
+
+    value = str(OmegaConf.select(cfg, f"credentials.{path}", default="") or "")
+    return default if value in ("", "...", "None") else value
+
+
 def _run_platform_setup(args):
     import re
     import subprocess
@@ -667,6 +696,10 @@ def _run_platform_setup(args):
     # the remote checkout and stop, skipping the env/dependency install. The
     # whole point is that it is cheap enough to run before every submission.
     pull_only = bool(getattr(args, "pull_only", False))
+    # `--creds-only`: same early exit, but without the pull — re-ship the
+    # credentials onto the checkout that is already there.
+    creds_only = bool(getattr(args, "creds_only", False))
+    short_setup = pull_only or creds_only
 
     print(f"Loading platform config '{platform}'…")
     cfg, configs_dir = _load_platform_config(platform)
@@ -675,10 +708,10 @@ def _run_platform_setup(args):
         cfg.setup = True
 
     # The dump carries credentials.*.token in cleartext. A full setup is a rare,
-    # deliberate act where seeing the resolved config is worth it; a pull-only
-    # runs before every rrun, so it prints a one-line summary instead (below,
-    # once the ssh host has been validated).
-    if not pull_only:
+    # deliberate act where seeing the resolved config is worth it; the short
+    # forms run routinely, so they print a one-line summary instead (below, once
+    # the ssh host has been validated).
+    if not short_setup:
         print(OmegaConf.to_yaml(cfg))
 
     ssh_host = cfg.get("ssh")
@@ -687,12 +720,14 @@ def _run_platform_setup(args):
 
     # The local path deliberately never pulls (it would clobber the working tree
     # you are editing), so a pull-only local setup could only ever be a no-op.
-    if pull_only and local_setup:
+    if short_setup and local_setup:
+        what = "pull" if pull_only else "install credentials on"
         print(f"ERROR: platform '{platform}' has no ssh host — there is no remote "
-              f"checkout to pull. Drop --pull.", file=sys.stderr)
+              f"checkout to {what}.", file=sys.stderr)
         raise SystemExit(2)
-    if pull_only:
-        print(f"Pull-only setup on {ssh_host} "
+    if short_setup:
+        label = "Pull-only" if pull_only else "Credentials-only"
+        print(f"{label} setup on {ssh_host} "
               f"(branch {cfg.get('branch', 'main')}, {cfg.get('path_ws', '')})")
 
     path_ws        = cfg.get("path_ws", "")
@@ -710,6 +745,9 @@ def _run_platform_setup(args):
     # asking for a pull-only setup *is* asking to pull, whatever the config says
     if pull_only:
         pull = pull_submodules = True
+    # …and --creds-only is the opposite: leave the checkout exactly as it is
+    if creds_only:
+        pull = pull_submodules = False
     skip_submodules  = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
     # Lmod modules to load before anything else (JSC systems have no usable
     # system python/git/CUDA); empty on clusters that need none.
@@ -751,6 +789,10 @@ def _run_platform_setup(args):
     # Embedding the token here would freeze it inside the clone's .git/config,
     # where a later rotation could never reach it.
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
+    # wandb reads ~/.netrc, not the credentials yaml, so the key is handed to
+    # setup_slurm.sh to write that entry on the remote
+    wandb_api_key = _credential(cfg, "wandb.api_key")
+    wandb_host    = _credential(cfg, "wandb.host", "api.wandb.ai")
     try:
         raw_remote = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
@@ -829,6 +871,12 @@ def _run_platform_setup(args):
         "PULL":            "true" if pull else "false",
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
         "PULL_ONLY":       "true" if pull_only else "false",
+        "CREDS_ONLY":      "true" if creds_only else "false",
+        # setup_slurm.sh turns this into a ~/.netrc entry, which is what the
+        # wandb CLI/library actually read — the credentials yaml it also installs
+        # is only ever consulted by o3b itself. Empty leaves ~/.netrc alone.
+        "WANDB_API_KEY":   wandb_api_key,
+        "WANDB_HOST":      wandb_host,
         "SKIP_SUBMODULES": skip_submodules,
         "MODULES":         modules,
         **({"TORCH_CUDA_ARCH_LIST": torch_arch_list} if torch_arch_list else {}),
@@ -985,6 +1033,26 @@ def _run_platform_setup(args):
     )
     print(f"Submitting setup job on {ssh_host}…")
     subprocess.run(["ssh", ssh_host, remote_cmd], check=True)
+
+
+def _maybe_pull_platform(args, platform: str) -> None:
+    """Honour ``--pull``: refresh the remote checkout before using it.
+
+    Both `bench rrun` and `platform runi` ship the job/shell preamble from the
+    *local* tree while every line of Python comes from the remote checkout. On a
+    setup_on_login platform the preamble is forced to PULL=false (compute nodes
+    have no route to github), so that checkout only ever moves during setup —
+    which is how a job silently ends up running whatever was last pulled.
+
+    Failures propagate: better to stop than to submit against a stale tree.
+    """
+    if not getattr(args, "pull", False):
+        return
+    from types import SimpleNamespace
+
+    print(f"--pull: refreshing the {platform} checkout…")
+    _run_platform_setup(SimpleNamespace(platform=platform, pull_only=True))
+    print()
 
 
 def _fetch_jobs(ssh_host: str, username: str, hours: float = 2.0) -> list:
@@ -1674,6 +1742,10 @@ def _run_platform_runi(args):
     import subprocess
     import uuid
 
+    # before the allocation, so a failed pull costs no queue time and the shell
+    # always lands in a checkout matching what was pushed
+    _maybe_pull_platform(args, args.platform)
+
     (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
      use_conda, path_conda, mp_env, modules) = _platform_srun_context(args.platform)
 
@@ -2189,6 +2261,160 @@ def _build_bench_parser(sub):
     p_viz = bench_sub.add_parser("viz", help="Interactively plot eval metrics from a bench CSV")
     _add_fetch_args(p_viz)
     _add_qualit_arg(p_viz)
+
+    p_wbsync = bench_sub.add_parser(
+        "wbsync",
+        help="Upload a platform's offline W&B runs from its login node",
+    )
+    p_wbsync.add_argument(
+        "-p", "--platform", default="slurm", metavar="PLATFORM",
+        help="Platform name matching a config in configs/platform/ (default: slurm)",
+    )
+    p_wbsync.add_argument(
+        "-n", "--dry-run", action="store_true",
+        help="Only print the remote summary of synced/unsynced runs; upload nothing.",
+    )
+    p_wbsync.add_argument(
+        "--clean", action="store_true",
+        help="After syncing, delete the local run directories that are already synced.",
+    )
+    p_wbsync.add_argument(
+        "--clean-old-hours", type=int, default=None, metavar="N",
+        help="With --clean, only delete synced runs older than N hours.",
+    )
+    p_wbsync.add_argument(
+        "--dir", default=None, metavar="DIR",
+        help="Remote wandb directory (default: <repo>/wandb on the platform).",
+    )
+    p_wbsync.add_argument(
+        "-e", "--entity", default=None, metavar="ENTITY",
+        help="W&B entity to upload to. Defaults to whatever the offline runs recorded.",
+    )
+    p_wbsync.add_argument(
+        "--project", default=None, metavar="PROJECT",
+        help="W&B project to upload to. Defaults to whatever the offline runs recorded.",
+    )
+
+
+def _run_bench_wbsync(args) -> None:
+    """Upload offline W&B runs from a platform's login node.
+
+    Platforms whose compute nodes cannot reach the wandb servers set
+    ``wandb_mode: offline`` (JUPITER), so runs accumulate as
+    ``<repo>/wandb/offline-run-*`` and never appear in the UI. The login node
+    does have connectivity, so the sync runs there over plain ssh — never under
+    srun, which would land back on an offline compute node.
+
+    Authentication comes from ``credentials.wandb.api_key`` when the platform
+    config sets one, otherwise from whatever ``wandb login`` left in the remote
+    ``~/.netrc``.
+    """
+    import subprocess
+
+    from omegaconf import OmegaConf
+
+    platform = args.platform or "slurm"
+    cfg, _ = _load_platform_config(platform)
+    if not cfg.get("ssh") or cfg.get("ssh") is False:
+        print(f"ERROR: platform '{platform}' has no ssh host — nothing to sync from. "
+              f"Offline runs on this machine sync with a plain `wandb sync`.",
+              file=sys.stderr)
+        raise SystemExit(2)
+
+    (ssh_host, _srun, repo_path, env_path, _path_cuda, path_ws, _hf_cache,
+     use_conda, path_conda, _mp_env, modules) = _platform_srun_context(platform)
+
+    wandb_dir = args.dir or (f"{repo_path}/wandb" if repo_path else f"{path_ws}/wandb")
+    if Path(wandb_dir).name != "wandb":
+        print(f"WARNING: {wandb_dir} is not named 'wandb'; `wandb sync` only "
+              f"auto-discovers a directory with that name and will find nothing.")
+    mode = str(cfg.get("wandb_mode", "") or "")
+    if mode and mode != "offline":
+        print(f"NOTE: {platform} runs with wandb_mode={mode!r}, so there may be "
+              f"nothing offline to sync.")
+
+    # normally empty: `o3b platform setup` already wrote the key into the
+    # remote ~/.netrc, so exporting it here is only a fallback
+    api_key = _credential(cfg, "wandb.api_key")
+
+    sync_args = ["--sync-all"]
+    if args.entity:
+        sync_args += ["--entity", args.entity]
+    if args.project:
+        sync_args += ["--project", args.project]
+
+    lines = [
+        "set -eo pipefail",
+        # Lmod's shell functions are not set -e/-u clean, and a non-interactive
+        # shell often lacks the init that ~/.bashrc performs (same dance as
+        # setup_slurm.sh, which is where these platforms' modules come from).
+        *([
+            "set +e",
+            "if ! command -v module >/dev/null 2>&1 && "
+            "[ -f /usr/share/lmod/lmod/init/bash ]; then . /usr/share/lmod/lmod/init/bash; fi",
+            *[f'module load {m} || echo "WARNING: module load {m} failed"'
+              for m in modules.split()],
+            "set -e",
+        ] if modules else []),
+    ]
+    if use_conda:
+        lines += [
+            f'eval "$("{path_conda}/bin/conda" shell.bash hook)"',
+            f"conda activate {env_path}",
+        ]
+    else:
+        lines.append(f"source {env_path}/bin/activate")
+    if api_key:
+        lines.append(f"export WANDB_API_KEY={api_key}")
+    lines += [
+        # never inherit the platform's offline setting here: that is exactly what
+        # we are undoing, and `wandb sync` under WANDB_MODE=offline is a no-op
+        "unset WANDB_MODE",
+        f"if [ ! -d {wandb_dir} ]; then "
+        f'echo "no wandb directory at {wandb_dir} — nothing to sync"; exit 0; fi',
+        # a synced run is marked by a sibling <run-dir>.synced file, so count
+        # directories and markers separately -- a glob would conflate the two
+        f'_total=$(find {wandb_dir} -maxdepth 1 -type d -name "offline-run-*" | wc -l)',
+        f'_synced=$(find {wandb_dir} -maxdepth 1 -type f -name "offline-run-*.synced" | wc -l)',
+        'echo "offline runs: ${_total} total, ${_synced} synced, '
+        '$((_total - _synced)) pending"',
+    ]
+    if args.dry_run:
+        # Deliberately not `wandb sync` with no args: that lists and then asks
+        # "Sync the listed runs?", which has no terminal to read from here and
+        # dies with NotATerminalError. Listing the markers ourselves is also
+        # immune to the CLI's legacy/beta split.
+        lines += [
+            f'find {wandb_dir} -maxdepth 1 -type d -name "offline-run-*" | sort | '
+            'while read -r _d; do '
+            'if [ -e "${_d}.synced" ]; then echo "  synced   $(basename "${_d}")"; '
+            'else echo "  PENDING  $(basename "${_d}")"; fi; done',
+        ]
+    else:
+        lines += [
+            # `wandb sync` discovers runs by looking for a ./wandb directory
+            # below the cwd, so stand in the *parent*. Standing in wandb_dir
+            # itself makes it search wandb/wandb and report "No runs to sync".
+            f"cd $(dirname {wandb_dir})",
+            f"wandb sync {' '.join(sync_args)}",
+        ]
+    if args.clean and not args.dry_run:
+        clean = ["wandb", "sync", "--clean", "--clean-force"]
+        if args.clean_old_hours is not None:
+            clean += ["--clean-old-hours", str(args.clean_old_hours)]
+        lines.append(" ".join(clean))
+
+    what = "Listing" if args.dry_run else "Syncing"
+    print(f"{what} offline W&B runs on {ssh_host}:{wandb_dir}…")
+    proc = subprocess.run(["ssh", ssh_host, "bash -s"],
+                          input="\n".join(lines) + "\n", text=True)
+    if proc.returncode != 0:
+        hint = ("" if api_key else
+                "\nHint: no credentials.wandb.api_key in the platform config, so this "
+                "relies on the remote ~/.netrc — run `wandb login` on the login node once.")
+        print(f"ERROR: wandb sync failed on {ssh_host} (exit {proc.returncode}).{hint}",
+              file=sys.stderr)
+        raise SystemExit(proc.returncode)
 
 
 def _run_bench_fetch(args) -> None:
@@ -2862,6 +3088,8 @@ def _run_bench(args) -> None:
         _run_bench_fetch(args)
     elif args.bench_command == "viz":
         _run_bench_viz(args)
+    elif args.bench_command == "wbsync":
+        _run_bench_wbsync(args)
 
 
 def _run_bench_run(args) -> None:
@@ -3224,18 +3452,8 @@ def _run_bench_rrun(args) -> None:
         print("WARNING: platform has no ssh host / path_ws — remote jobs will use "
               "the repo-checkout configs on the remote, not the local ones")
 
-    # `--pull`: rrun ships the sbatch preamble and the ablation YAMLs from the
-    # local tree, but every line of Python comes from the remote checkout. On a
-    # setup_on_login platform the job preamble is forced to PULL=false (the
-    # compute nodes have no route to github), so that checkout only ever moves
-    # during setup — leaving jobs silently running whatever was last pulled.
-    # Refresh it here, before anything is submitted; a failure raises and so
-    # nothing is queued against a stale tree.
-    if getattr(args, "pull", False):
-        from types import SimpleNamespace
-        print(f"--pull: refreshing the {platform} checkout before submitting…")
-        _run_platform_setup(SimpleNamespace(platform=platform, pull_only=True))
-        print()
+    # before anything is submitted, so a failed pull queues nothing
+    _maybe_pull_platform(args, platform)
 
     if args.ablation:
         combos = _ablation_combinations(args.ablation)

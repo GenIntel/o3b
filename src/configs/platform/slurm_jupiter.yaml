@@ -155,8 +155,13 @@ renderer: pytorch3d
 
 # Compute nodes cannot reach the wandb servers, and there is no API key here
 # (LMB authenticates via ~/.netrc). Offline mode needs neither: runs are written
-# to a local wandb/ directory and can be uploaded afterwards from a login node:
-#     wandb sync /e/project1/scale3dcompnet/sommer7/HouseCorr3Dv2/wandb/offline-run-*
+# to a local wandb/ directory and uploaded afterwards from a login node, which
+# does have connectivity:
+#     o3b bench wbsync -p slurm_jupiter -n     # list what is pending
+#     o3b bench wbsync -p slurm_jupiter        # upload it
+# That needs credentials the login node does not have by default -- either run
+# `wandb login` there once, or set credentials.wandb.api_key in
+# credentials/custom/*.yaml (shipped to the cluster by `o3b platform setup`).
 wandb_mode: "offline"
 
 # torch.hub downloads on first use, which a compute node cannot do -- the method

@@ -17,6 +17,13 @@ SKIP_SUBMODULES="${SKIP_SUBMODULES:-}"
 # the checkout only advances during setup, so `o3b bench rrun --pull` uses this
 # to refresh it in seconds rather than re-running the whole dependency install.
 PULL_ONLY="${PULL_ONLY:-false}"
+# Stop after the same point, but without pulling: just re-install the staged
+# credentials (and the wandb ~/.netrc entry below) onto an existing checkout.
+CREDS_ONLY="${CREDS_ONLY:-false}"
+# Written to ~/.netrc so the wandb CLI/library authenticate without an env var.
+# Empty (the usual case) leaves any existing ~/.netrc completely untouched.
+WANDB_API_KEY="${WANDB_API_KEY:-}"
+WANDB_HOST="${WANDB_HOST:-api.wandb.ai}"
 export GITHUB_TOKEN="${GITHUB_TOKEN:-}"   # must be exported: the git credential helper reads it
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 TORCH_VERSION="${TORCH_VERSION:-2.6.0}"
@@ -292,8 +299,41 @@ if [ -n "${CREDENTIALS_SRC}" ] && [ -n "${CREDENTIALS_DEST}" ] && [ -d "${CREDEN
     done
 fi
 
-if _is_true "${PULL_ONLY}"; then
-    echo "--- PULL_ONLY: checkout refreshed, skipping env/dependency install ---"
+# ── wandb login ───────────────────────────────────────────────────────────────
+# The yaml above is only read by o3b itself; the `wandb` CLI and library
+# authenticate from ~/.netrc. Write the entry here so `o3b bench wbsync` (and any
+# online run) works on this host without exporting anything. Done in shell rather
+# than via `wandb login` because this runs before the venv exists.
+if [ -n "${WANDB_API_KEY}" ]; then
+    echo "--- wandb login (${WANDB_HOST}) ---"
+    _netrc="${HOME}/.netrc"
+    _netrc_tmp="$(mktemp "${HOME}/.netrc.XXXXXX")"
+    chmod 600 "${_netrc_tmp}"
+    # drop any existing block for this machine, keeping every other entry: the
+    # block runs from its `machine <host>` line to the next machine/default line
+    if [ -f "${_netrc}" ]; then
+        awk -v h="${WANDB_HOST}" '
+            $1 == "machine" { skip = ($2 == h) }
+            $1 == "default" { skip = 0 }
+            !skip { print }
+        ' "${_netrc}" > "${_netrc_tmp}"
+    fi
+    {
+        echo "machine ${WANDB_HOST}"
+        echo "  login user"
+        echo "  password ${WANDB_API_KEY}"
+    } >> "${_netrc_tmp}"
+    mv -f "${_netrc_tmp}" "${_netrc}"
+    chmod 600 "${_netrc}"
+    echo "      wrote ${_netrc} (machine ${WANDB_HOST})"
+fi
+
+if _is_true "${PULL_ONLY}" || _is_true "${CREDS_ONLY}"; then
+    if _is_true "${CREDS_ONLY}"; then
+        echo "--- CREDS_ONLY: credentials installed, skipping env/dependency install ---"
+    else
+        echo "--- PULL_ONLY: checkout refreshed, skipping env/dependency install ---"
+    fi
     echo "    $(git -C "${REPO_PATH}" log --oneline -1)"
     git -C "${REPO_PATH}" submodule --quiet foreach \
         'echo "    $displaypath $(git log --oneline -1)"' || true
