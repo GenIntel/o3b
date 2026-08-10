@@ -1465,6 +1465,26 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
     if repo_path:
         lines += [
             _echo("configuring github credentials"),
+            # ~/.gitconfig and <repo>/.git/config are on shared storage, so every
+            # task of a multi-node job (and any concurrent job) writes the same
+            # file. git guards a write with a .lock sibling and fails outright if
+            # it already exists -- under the job's `set -e` that killed whole
+            # tasks, and torchrun then hung forever on the missing rank. The
+            # writes are idempotent (all tasks write identical content), so a lost
+            # race only means someone else already did it: retry, then give up
+            # without failing the job. The setup_slurm.lock flock around this
+            # block does not serialise across nodes on every filesystem.
+            "_o3b_git() {",
+            "    _i=0",
+            '    while [ "${_i}" -lt 10 ]; do',
+            '        if git "$@" 2>/dev/null; then return 0; fi',
+            "        _i=$((_i + 1))",
+            "        sleep 1",
+            "    done",
+            '    echo "WARNING: git $* failed after 10 attempts '
+            '(concurrent job holding the .lock?)" >&2',
+            "    return 0",
+            "}",
             # must be exported: the credential helper runs as a git subprocess
             'export GITHUB_TOKEN="${GITHUB_TOKEN:-}"',
             "for _k in $(git config --global --name-only --get-regexp "
@@ -1472,7 +1492,7 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
             '    git config --global --remove-section "${_k%.insteadof}" 2>/dev/null || true',
             "done",
             'if [ -n "${GITHUB_TOKEN:-}" ]; then',
-            '    git config --global --replace-all credential."https://github.com".helper '
+            '    _o3b_git config --global --replace-all credential."https://github.com".helper '
             "'"'!f() { [ "$1" = get ] || exit 0; echo username=x-access-token; '
             'echo "password=${GITHUB_TOKEN}"; }; f'"'",
             "fi",
@@ -1482,7 +1502,7 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
             f'_url="$(git -C {repo_path} remote get-url origin 2>/dev/null || true)"',
             'case "${_url}" in',
             '    https://*@github.com/*)',
-            f'        git -C {repo_path} remote set-url origin '
+            f'        _o3b_git -C {repo_path} remote set-url origin '
             '"https://github.com/${_url#*@github.com/}" ;;',
             "esac",
         ]
