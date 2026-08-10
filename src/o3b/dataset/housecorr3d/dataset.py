@@ -613,30 +613,37 @@ class HouseCorr3D(ConfigurableDataset):
         from tqdm import tqdm
 
         COMMIT_EVERY = 50
-        total_rows = matched = scenes_since_commit = 0
+        rows_written = rows_loadable = scenes_since_commit = 0
         done = False
+
+        # Legend for the two counters shown on the progress bars below, so the
+        # numbers are self-explanatory in logs.
+        loadable_note = "is_valid=1" + (" and has_kpts=1" if filter_kpts else "")
+        print(f"\nrows_written  : frame-object rows inserted into {db_path.name}")
+        print(f"rows_loadable : subset of those the loader will keep ({loadable_note}) — "
+              f"this is what filter_count_max caps")
 
         def _scene_limit():
             # per-category cap when categories requested, else global remaining
             if categories is not None:
                 return limit
-            return (limit - matched) if limit else None
+            return (limit - rows_loadable) if limit else None
 
         def _all_categories_full() -> bool:
             return (categories is not None and limit is not None
                     and all(cat_counts.get(c, 0) >= limit for c in categories))
 
         def _update(n_total: int, n_match: int) -> bool:
-            nonlocal total_rows, matched, scenes_since_commit
-            total_rows += n_total
-            matched    += n_match
+            nonlocal rows_written, rows_loadable, scenes_since_commit
+            rows_written  += n_total
+            rows_loadable += n_match
             scenes_since_commit += 1
             if scenes_since_commit >= COMMIT_EVERY:
                 con.commit()
                 scenes_since_commit = 0
             if categories is not None:
                 return _all_categories_full()
-            return bool(limit and matched >= limit)
+            return bool(limit and rows_loadable >= limit)
 
         if rope_root.exists() and not done and is_real is not False and split_filter in (None, "test"):
             scene_dirs = sorted(d for d in rope_root.iterdir() if d.is_dir())
@@ -649,7 +656,7 @@ class HouseCorr3D(ConfigurableDataset):
                     kpts_preprocess=kpts_preprocess, limit=_scene_limit(), filter_kpts=filter_kpts,
                     categories=categories, cat_counts=cat_counts,
                 )
-                bar.set_postfix(rows=total_rows, matched=matched)
+                bar.set_postfix(rows_written=rows_written, rows_loadable=rows_loadable)
                 if _update(n_total, n_match):
                     done = True; bar.close(); break
 
@@ -679,13 +686,14 @@ class HouseCorr3D(ConfigurableDataset):
                     kpts_preprocess=kpts_preprocess, limit=_scene_limit(), filter_kpts=filter_kpts,
                     categories=categories, cat_counts=cat_counts,
                 )
-                bar.set_postfix(rows=total_rows, matched=matched)
+                bar.set_postfix(rows_written=rows_written, rows_loadable=rows_loadable)
                 if _update(n_total, n_match):
                     bar.close(); break
 
         con.commit()
         con.close()
-        print(f"\nDone. {total_rows} rows indexed ({matched} matching filter) → {db_path}")
+        print(f"\nDone. {rows_written} frame-object rows written, "
+              f"{rows_loadable} of them loadable ({loadable_note}) → {db_path}")
 
     @classmethod
     def visualize(

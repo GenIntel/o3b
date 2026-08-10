@@ -915,8 +915,8 @@ def _index_scene(
                 pass
             break
 
-    n       = 0  # total rows inserted
-    n_match = 0  # rows matching the filter
+    n       = 0  # rows_written  : rows inserted into frames.db
+    n_match = 0  # rows_loadable : subset the loader will keep
     for frame_id_raw in frame_ids_color:
         meta_path = scene_dir / f"{frame_id_raw}_meta.json"
         if not meta_path.exists():

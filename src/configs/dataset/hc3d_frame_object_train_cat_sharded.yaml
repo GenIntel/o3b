@@ -37,6 +37,8 @@ defaults:
 # category name is also reflected in the sharded dataset directory.
 category: hair_dryer
 
+mesh_type: "mc16"
+
 categories:
   - ${category}
 
@@ -67,7 +69,7 @@ sharded_transform:
 
 transform:
 
-sharded_name: hc3d_frame_object_train_${filter_count_max}_b${sharded_shard_size}_r${img_size}_c${category}
+sharded_name: hc3d_frame_object_train_n${filter_count_max}_b${sharded_shard_size}_r${img_size}_m${mesh_type}_c${category}
 sharded_override: false
 
 # overrides the (already-lowered) default from hc3d_frame_object_pair.yaml;
