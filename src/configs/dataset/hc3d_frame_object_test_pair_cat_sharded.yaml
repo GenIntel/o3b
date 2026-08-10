@@ -8,9 +8,12 @@
 
 # 1) index frame object
 # o3b dataset index -d hc3d_frame_object_test --remote -p slurm_lmbl40
-# 1 b) preprocess frame object?
+# 1 b) preprocess frame object? to see if it is availabl
 
-# 2) index frame object pair
+# 2) preprocess for obj_kpts3d_mask ? or obj mesh ?
+# o3b dataset preprocess -d hc3d_frame_object_test --remote -p slurm_lmbl40
+
+# 2) index frame object pair ? 
 # o3b dataset index -d hc3d_frame_object_test_pair --remote -p slurm_lmbl40
 
 # 3) shard dataset
