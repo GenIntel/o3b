@@ -26,7 +26,8 @@ split: test
 # filter_is_real: null → all data  |  false → synthetic only  |  true → real only
 filter_is_real: false
 filter_has_kpts: true
-filter_count_max: 1000 # per category if categories is applied
+filter_count_max: 2000 # per category if categories is applied
+# by having more than 1000, we ensure that we get 50 views per instance. 
 
 modalities:
   - rgb                    # GenPose2 input

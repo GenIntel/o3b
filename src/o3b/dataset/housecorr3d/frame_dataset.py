@@ -380,8 +380,38 @@ def _corners8_to_size_tform(corners: "torch.Tensor") -> "tuple":
     return torch.stack([sx, sy, sz]), tform
 
 
+def _mask_to_sidebar_img(m) -> "np.ndarray":
+    """(H, W) (or (1, H, W)) mask → grayscale uint8 rgb sidebar panel."""
+    import numpy as np
+    if m.dim() == 3:
+        m = m[0]
+    return (np.stack([m.float().cpu().numpy()] * 3, axis=-1) * 255).astype(np.uint8)
+
+
+def _mask_dt_to_sidebar_img(dt, cmap) -> "np.ndarray":
+    """(H, W) normalised mask distance transform → colormapped uint8 rgb panel.
+
+    The DT is normalised by the larger image side (0 outside the mask), so its
+    values stay in the low percent range; rescaling by the per-image maximum is
+    what keeps the interior gradient visible.  Outside the mask is forced to
+    black so it never reads as a low DT value.  *cmap* matches the one the 2-D
+    overlay viewer uses for the same modality (see FrameObject.viz).
+    """
+    import numpy as np
+    if dt.dim() == 3:
+        dt = dt[0]
+    d   = dt.float().cpu().numpy()
+    img = cmap(d / (d.max() + 1e-8))[..., :3] * (d > 0)[..., None]
+    return (img * 255).astype(np.uint8)
+
+
 def _build_frame_sidebar_imgs(fo) -> "dict":
-    """Build the dict of sidebar modality images (rgb, depth, mask, kpts overlays)."""
+    """Build the dict of sidebar modality images (rgb, depth, masks, kpts overlays).
+
+    Mask panel names match the dataset modality names (fo_mask, fo_mask_dt,
+    fo_mask_amodal, fo_mask_amodal_dt, depth_mask); each is only added when the
+    item actually carries that modality.
+    """
     import numpy as np
 
     imgs = {}
@@ -442,20 +472,18 @@ def _build_frame_sidebar_imgs(fo) -> "dict":
         if valid.any():
             d_vis[valid] = d[valid] / d[valid].max()
         imgs["depth"] = (np.stack([d_vis] * 3, axis=-1) * 255).astype(np.uint8)
-    if fo.fo_mask is not None:
-        m = fo.fo_mask
-        if m.dim() == 3:
-            m = m[0]
-        imgs["mask"] = (
-            np.stack([m.float().cpu().numpy()] * 3, axis=-1) * 255
-        ).astype(np.uint8)
-    if fo.depth_mask is not None:
-        dm = fo.depth_mask
-        if dm.dim() == 3:
-            dm = dm[0]
-        imgs["depth_mask"] = (
-            np.stack([dm.float().cpu().numpy()] * 3, axis=-1) * 255
-        ).astype(np.uint8)
+    # binary masks as grayscale, distance transforms colormapped (None = binary)
+    import matplotlib.cm as _cm
+    for _name, _tensor, _cmap in (
+        ("fo_mask",           getattr(fo, "fo_mask", None),           None),
+        ("fo_mask_dt",        getattr(fo, "fo_mask_dt", None),        _cm.viridis),
+        ("fo_mask_amodal",    getattr(fo, "fo_mask_amodal", None),    None),
+        ("fo_mask_amodal_dt", getattr(fo, "fo_mask_amodal_dt", None), _cm.magma),
+        ("depth_mask",        getattr(fo, "depth_mask", None),        None),
+    ):
+        if _tensor is not None:
+            imgs[_name] = (_mask_to_sidebar_img(_tensor) if _cmap is None
+                           else _mask_dt_to_sidebar_img(_tensor, _cmap))
     _tform_for_kpts = fo.cam_tform4x4_obj_ncds if fo.cam_tform4x4_obj_ncds is not None \
         else fo.cam_tform4x4_obj
     if (

@@ -8,6 +8,22 @@ from o3b.data.datatypes.frame import Frame, _stack_field
 from o3b.data.datatypes.object import Object
 
 
+def _mask_dt_overlay(dt: Tensor, cmap, alpha: float = 0.7):
+    """RGBA overlay for a normalised mask distance transform (0 outside the mask).
+
+    The DT is normalised by the larger image side, so its values stay in the low
+    percent range; it is rescaled by its own maximum to keep the interior
+    gradient visible, and only the mask interior (dt > 0) is painted.
+    """
+    import numpy as np
+    d = dt.float().cpu().numpy()
+    if d.ndim == 3:
+        d = d[0]
+    ov = cmap(d / (d.max() + 1e-8)).astype(np.float32)
+    ov[..., 3] = (d > 0) * alpha
+    return ov
+
+
 @dataclass(kw_only=True)
 class FrameObject(Frame, Object):
     frame_object_id:  str
@@ -36,8 +52,9 @@ class FrameObject(Frame, Object):
         """Visualise this frame-object.
 
         server=None (default): interactive 2-D overlay viewer with CheckButtons
-          to toggle modalities (rgb, fo_mask, depth, depth_mask, frame_mask,
-          cam_bbox2d/3d, keypoints); returns the composed (3, H, W) tensor.
+          to toggle modalities (rgb, fo_mask, fo_mask_dt, fo_mask_amodal,
+          fo_mask_amodal_dt, depth, depth_mask, frame_mask, cam_bbox2d/3d,
+          keypoints); returns the composed (3, H, W) tensor.
 
         server given (a viser server): add the frame-object to the 3-D scene
           (mesh, camera frustum, rgb panel, depth point cloud, camera + object
@@ -68,12 +85,23 @@ class FrameObject(Frame, Object):
             ov[..., 3] = m * 0.5
             layers["fo_mask"] = ("overlay", ov)
 
+        # The distance transforms cover the same pixels as the masks they come
+        # from, so they start toggled off (see `off_by_default` below).
+        if self.fo_mask_dt is not None:
+            import matplotlib.cm as _cm
+            layers["fo_mask_dt"] = ("overlay", _mask_dt_overlay(self.fo_mask_dt, _cm.viridis))
+
         if self.fo_mask_amodal is not None:
             am = self.fo_mask_amodal.float().cpu().numpy()
             ov = np.zeros((*am.shape, 4), dtype=np.float32)
             ov[..., 1] = 0.8; ov[..., 2] = 0.9   # cyan, vs the green visible mask
             ov[..., 3] = am * 0.4
             layers["fo_mask_amodal"] = ("overlay", ov)
+
+        if self.fo_mask_amodal_dt is not None:
+            import matplotlib.cm as _cm
+            layers["fo_mask_amodal_dt"] = ("overlay",
+                                           _mask_dt_overlay(self.fo_mask_amodal_dt, _cm.magma))
 
         if self.depth is not None:
             import matplotlib.cm as _cm
@@ -139,8 +167,9 @@ class FrameObject(Frame, Object):
         if not layers:
             return None
 
-        label_order = list(layers.keys())
-        active      = {k: True for k in label_order}
+        label_order    = list(layers.keys())
+        off_by_default = {"fo_mask_dt", "fo_mask_amodal_dt"}
+        active         = {k: k not in off_by_default for k in label_order}
 
         def _hw() -> tuple[int, int]:
             for kind, data in layers.values():
@@ -248,7 +277,8 @@ class FrameObject(Frame, Object):
             _redraw()
 
             ax_cb = fig.add_axes([0.05, 0.01, 0.9, 0.10])
-            check = CheckButtons(ax_cb, label_order, actives=[True] * len(label_order))
+            check = CheckButtons(ax_cb, label_order,
+                                 actives=[active[k] for k in label_order])
 
             def on_toggle(label: str) -> None:
                 active[label] = not active[label]
