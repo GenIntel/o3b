@@ -12,6 +12,11 @@ BRANCH="${BRANCH:-main}"
 PULL="${PULL:-true}"
 PULL_SUBMODULES="${PULL_SUBMODULES:-true}"
 SKIP_SUBMODULES="${SKIP_SUBMODULES:-}"
+# Stop after the clone/pull/submodule/credentials phase, before touching the
+# env. Where compute nodes have no route to github (setup_on_login platforms)
+# the checkout only advances during setup, so `o3b bench rrun --pull` uses this
+# to refresh it in seconds rather than re-running the whole dependency install.
+PULL_ONLY="${PULL_ONLY:-false}"
 export GITHUB_TOKEN="${GITHUB_TOKEN:-}"   # must be exported: the git credential helper reads it
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 TORCH_VERSION="${TORCH_VERSION:-2.6.0}"
@@ -285,6 +290,14 @@ if [ -n "${CREDENTIALS_SRC}" ] && [ -n "${CREDENTIALS_DEST}" ] && [ -d "${CREDEN
         echo "      $(basename "${_cred}")"
         install -m 600 "${_cred}" "${REPO_PATH}/${CREDENTIALS_DEST}/$(basename "${_cred}")"
     done
+fi
+
+if _is_true "${PULL_ONLY}"; then
+    echo "--- PULL_ONLY: checkout refreshed, skipping env/dependency install ---"
+    echo "    $(git -C "${REPO_PATH}" log --oneline -1)"
+    git -C "${REPO_PATH}" submodule --quiet foreach \
+        'echo "    $displaypath $(git log --oneline -1)"' || true
+    exit 0
 fi
 
 if _is_true "${USE_CONDA}"; then

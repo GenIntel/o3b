@@ -368,6 +368,12 @@ def _build_platform_parser(sub):
         "-p", "--platform", default="slurm", metavar="PLATFORM",
         help="Platform name matching a config in configs/platform/ (default: slurm)",
     )
+    p_setup.add_argument(
+        "--pull-only", action="store_true",
+        help="Only refresh the remote checkout (clone/pull/submodules/credentials) "
+             "and stop, skipping the env and dependency install. Forces pull even "
+             "where the platform config sets pull: False.",
+    )
 
     p_status = plat_sub.add_parser(
         "status",
@@ -657,6 +663,10 @@ def _run_platform_setup(args):
     from omegaconf import OmegaConf, open_dict
 
     platform = args.platform
+    # `--pull-only` (and `o3b bench rrun --pull`, which calls in here): refresh
+    # the remote checkout and stop, skipping the env/dependency install. The
+    # whole point is that it is cheap enough to run before every submission.
+    pull_only = bool(getattr(args, "pull_only", False))
 
     print(f"Loading platform config '{platform}'…")
     cfg, configs_dir = _load_platform_config(platform)
@@ -664,11 +674,26 @@ def _run_platform_setup(args):
     with open_dict(cfg):
         cfg.setup = True
 
-    print(OmegaConf.to_yaml(cfg))
+    # The dump carries credentials.*.token in cleartext. A full setup is a rare,
+    # deliberate act where seeing the resolved config is worth it; a pull-only
+    # runs before every rrun, so it prints a one-line summary instead (below,
+    # once the ssh host has been validated).
+    if not pull_only:
+        print(OmegaConf.to_yaml(cfg))
 
     ssh_host = cfg.get("ssh")
     # ssh: False (or unset) → run the setup script locally instead of over SSH/SLURM.
     local_setup = (not ssh_host) or ssh_host is False
+
+    # The local path deliberately never pulls (it would clobber the working tree
+    # you are editing), so a pull-only local setup could only ever be a no-op.
+    if pull_only and local_setup:
+        print(f"ERROR: platform '{platform}' has no ssh host — there is no remote "
+              f"checkout to pull. Drop --pull.", file=sys.stderr)
+        raise SystemExit(2)
+    if pull_only:
+        print(f"Pull-only setup on {ssh_host} "
+              f"(branch {cfg.get('branch', 'main')}, {cfg.get('path_ws', '')})")
 
     path_ws        = cfg.get("path_ws", "")
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
@@ -682,6 +707,9 @@ def _run_platform_setup(args):
     branch         = cfg.get("branch", "main")
     pull           = cfg.get("pull", True)
     pull_submodules  = cfg.get("pull_submodules", True)
+    # asking for a pull-only setup *is* asking to pull, whatever the config says
+    if pull_only:
+        pull = pull_submodules = True
     skip_submodules  = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
     # Lmod modules to load before anything else (JSC systems have no usable
     # system python/git/CUDA); empty on clusters that need none.
@@ -800,6 +828,7 @@ def _run_platform_setup(args):
         "BRANCH":          branch,
         "PULL":            "true" if pull else "false",
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
+        "PULL_ONLY":       "true" if pull_only else "false",
         "SKIP_SUBMODULES": skip_submodules,
         "MODULES":         modules,
         **({"TORCH_CUDA_ARCH_LIST": torch_arch_list} if torch_arch_list else {}),
@@ -2130,6 +2159,13 @@ def _build_bench_parser(sub):
         help="Submit jobs even if they are already running, pending, or recently completed.",
     )
     p_rrun.add_argument(
+        "--pull", action="store_true",
+        help="Refresh the remote checkout first (`o3b platform setup --pull-only`) so the "
+             "jobs run the pushed HEAD. Needed on setup_on_login platforms such as JUPITER, "
+             "whose compute nodes cannot reach github and so never pull by themselves. "
+             "Aborts without submitting if the pull fails.",
+    )
+    p_rrun.add_argument(
         "--skip-fetched", action="store_true",
         help="Skip jobs whose ablation combo already has a row in the fetched tables/ CSV.",
     )
@@ -3187,6 +3223,19 @@ def _run_bench_rrun(args) -> None:
     if not upload_configs:
         print("WARNING: platform has no ssh host / path_ws — remote jobs will use "
               "the repo-checkout configs on the remote, not the local ones")
+
+    # `--pull`: rrun ships the sbatch preamble and the ablation YAMLs from the
+    # local tree, but every line of Python comes from the remote checkout. On a
+    # setup_on_login platform the job preamble is forced to PULL=false (the
+    # compute nodes have no route to github), so that checkout only ever moves
+    # during setup — leaving jobs silently running whatever was last pulled.
+    # Refresh it here, before anything is submitted; a failure raises and so
+    # nothing is queued against a stale tree.
+    if getattr(args, "pull", False):
+        from types import SimpleNamespace
+        print(f"--pull: refreshing the {platform} checkout before submitting…")
+        _run_platform_setup(SimpleNamespace(platform=platform, pull_only=True))
+        print()
 
     if args.ablation:
         combos = _ablation_combinations(args.ablation)
