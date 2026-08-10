@@ -101,6 +101,49 @@ def _build_dataset_parser(sub):
              "sequentially in this process",
     )
 
+    p_sync = ds_sub.add_parser(
+        "sync-shard",
+        help="Copy a built sharded cache from one platform to another "
+             "(streamed through this machine — see o3b/dataset/sync.py)",
+    )
+    from o3b.dataset.cli import _resolve_dataset_config as _resolve_cfg
+    p_sync.add_argument(
+        "-d", "--config", required=True, type=_resolve_cfg, metavar="DATASET",
+        help="Dataset config name (resolved from configs/dataset/) or path to a YAML file; "
+             "must define sharded_name",
+    )
+    p_sync.add_argument(
+        "-s", "--source-platform", required=True, metavar="PLATFORM",
+        help="Platform to copy the shards from (e.g. slurm)",
+    )
+    p_sync.add_argument(
+        "-t", "--target-platform", required=True, metavar="PLATFORM",
+        help="Platform to copy the shards to (e.g. slurm_jupiter)",
+    )
+    p_sync.add_argument(
+        "-c", "--categories", default=None, metavar="CATEGORIES",
+        help="Comma-separated categories selecting the shard directory via ${category} "
+             "in sharded_name. Use -c '*' to sync every per-category directory",
+    )
+    p_sync.add_argument(
+        "-n", "--dry-run", action="store_true",
+        help="List what would be transferred (and the pipeline used) without copying",
+    )
+    p_sync.add_argument(
+        "--override", action="store_true",
+        help="Replace a target directory that already exists but differs from the source",
+    )
+    p_sync.add_argument(
+        "--compress", action="store_true",
+        help="zstd the stream between the two hosts. Rarely worth it — the shard "
+             "payload is already compressed (measured: no speed-up)",
+    )
+    p_sync.add_argument(
+        "-a", "--ablation", default=None, metavar="ABLATIONS",
+        help="Comma-separated ablations, each a fragment of extra arguments "
+             '(e.g. -a "-c backpack,-c book"); one sync runs per ablation',
+    )
+
     p_vis = ds_sub.add_parser("viz", help="Summarize and optionally render dataset objects")
     _add_config(p_vis)
     p_vis.add_argument("--db", type=Path, default=None, metavar="FILE")
@@ -383,6 +426,18 @@ def _run_dataset(args, parser=None, argv=None):
         return
     if args.dataset_command in ("index", "init") and getattr(args, "remote", False):
         _run_dataset_remote(args)
+        return
+    if args.dataset_command == "sync-shard":
+        from o3b.dataset.sync import sync_sharded
+        sync_sharded(
+            args.config,
+            source_platform=args.source_platform,
+            target_platform=args.target_platform,
+            categories=args.categories,
+            override=args.override,
+            dry_run=args.dry_run,
+            compress=args.compress,
+        )
         return
     if args.dataset_command == "viz" and getattr(args, "remote", False):
         _run_dataset_viz_remote(args)
