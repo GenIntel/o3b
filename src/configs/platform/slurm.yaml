@@ -108,7 +108,7 @@ renderer: pytorch3d
 # on dlc2gpu05), so relying on SHM would reintroduce a per-node lottery.
 nccl_env:
   NCCL_SHM_DISABLE: 1
-  NCCL_P2P_LEVEL: SYS
+  #NCCL_P2P_LEVEL: SYS  # in practice this does not work on tf slurm
 
 # Free-form environment exported by the job preamble before anything else runs
 # (see cli._mp_env_from_cfg), for variables that are only read at process start.

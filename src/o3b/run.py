@@ -35,13 +35,15 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
     # ── distributed (torchrun) ────────────────────────────────────────────────
     # No-op unless WORLD_SIZE > 1, i.e. unless the job preamble launched this
-    # through torchrun (platform.gpu_count_per_node / node_count > 1).  Only
-    # *training* is data-parallel: every rank builds the method and runs
-    # train_method, then the non-zero ranks leave and rank 0 evaluates alone —
-    # eval numbers are then identical to a single-GPU run, and no rank sits in
-    # a collective long enough to trip the NCCL timeout.
+    # through torchrun (platform.gpu_count_per_node / node_count > 1).  Both
+    # halves of a run are data-parallel the same way (o3b.ddp): every rank
+    # builds the method and runs train_method, then every rank evaluates its
+    # own slice of the eval set and the metrics are reduced once at the end.
+    # Eval needs no collective while it runs — there are no gradients — so the
+    # ranks only meet again in that final reduction.
     rank, world_size, _ = ddp.init_distributed()
-    is_main = rank == 0
+    is_main = ddp.is_main_process(rank)
+    distributed = ddp.is_initialized()
     if world_size > 1:
         print(f"DDP:     rank {rank}/{world_size} (local_rank {ddp.get_local_rank()})")
 
@@ -64,29 +66,44 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     batch_size  = eval_cfg.get("batch_size", 4)
     num_workers = int(eval_cfg.get("num_workers", 4))
 
-    # The eval dataset, its loader and the task belong to rank 0 alone — the
-    # other ranks would only pay for the (potentially cold) cache build and
-    # race each other writing it.
-    dataset = loader = task = None
+    # Every rank builds the eval dataset, its loader and the task — each one
+    # evaluates a slice of the dataset (`sampler` below).  rank 0 goes first:
+    # a cold sharded cache is *built* by the first process that opens it, and
+    # several ranks writing the same Arrow shards would corrupt them. The
+    # others wait here and then find it warm.
+    if distributed and not is_main:
+        ddp.dist_sync_processes()
+    dataset_cfg = DatasetConfig.from_dict(run_raw["dataset"])
+    dataset     = build_dataset(dataset_cfg)
+    if distributed and is_main:
+        ddp.dist_sync_processes()
     if is_main:
-        dataset_cfg = DatasetConfig.from_dict(run_raw["dataset"])
-        dataset     = build_dataset(dataset_cfg)
         print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
 
-        collate_fn = (collate_frame_object_pairs
-                      if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
-                      else collate_object_pairs)
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            collate_fn=collate_fn,
-            shuffle=False,
-            num_workers=num_workers,
-            persistent_workers=num_workers > 0,
-        )
+    collate_fn = (collate_frame_object_pairs
+                  if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
+                  else collate_object_pairs)
+    # rank r evaluates items r, r + W, r + 2W, …  Unlike DistributedSampler
+    # this pads nothing, so the union over the ranks is exactly the dataset and
+    # no item is scored twice — the shard sizes then differ by at most one,
+    # which is fine because nothing inside the loop is collective.
+    sampler = (list(range(rank, len(dataset), world_size)) if distributed
+               else None)
+    loader = DataLoader(
+        dataset,
+        # per-rank, like the training batch size: the number of items in flight
+        # grows with the number of GPUs
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        sampler=sampler,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
+    )
 
-        task_cfg = OmegaConf.create(run_raw["task"])
-        task     = build_task(task_cfg)
+    task_cfg = OmegaConf.create(run_raw["task"])
+    task     = build_task(task_cfg)
+    if is_main:
         print(f"Task:    {run_raw['task']['class_name']}")
 
     # ── method (optional) ─────────────────────────────────────────────────────
@@ -106,7 +123,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         try:
             from housecorr3dv2.method.method import build_method, MethodConfig
             method = build_method(MethodConfig.from_dict(dict(method_cfg)))
-            print(f"Method:  {cls_name}")
+            if is_main:
+                print(f"Method:  {cls_name}")
         except Exception as exc:
             import os, traceback
             traceback.print_exc()
@@ -127,7 +145,9 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
     # ── wandb init (before training so per-batch train losses are logged) ─────
     # Rank 0 owns the run: every rank logging into the same project would
-    # produce world_size runs whose train/* curves interleave at random.
+    # produce world_size runs whose train/* curves interleave at random.  The
+    # per-batch train/* and batch/* curves are therefore rank 0's alone; the
+    # eval/* summary at the end is reduced over every rank.
     _wb = None
     wandb_cfg = run_raw.get("wandb") or {}
     if wandb_cfg is not False and is_main:
@@ -154,23 +174,20 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     if method is not None and hasattr(method, "train_method"):
         needs_training = getattr(method, "needs_training", None)
         if callable(needs_training) and needs_training():
-            print("Train:   running method training")
+            if is_main:
+                print("Train:   running method training")
             method.train_method()
-        else:
+        elif is_main:
             print("Train:   skipped (no train dataset or checkpoint fully trained)")
 
-    # ── the non-zero ranks are done ───────────────────────────────────────────
-    # One barrier while every rank is still here (so no NCCL work is left in
-    # flight when the group goes down), then they leave: eval takes longer than
-    # any collective timeout and rank 0 issues no further collectives anyway.
+    # Training left the ranks at different points in time (rank 0 also wrote a
+    # checkpoint); meet once before they go their own way through eval.
     ddp.dist_sync_processes()
-    if not is_main:
-        print(f"Eval:    skipped on rank {rank} (rank 0 evaluates)")
-        ddp.cleanup_process_group()
-        return
-    ddp.cleanup_process_group()
 
-    print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
+    if is_main:
+        print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}"
+              + (f"  (per rank, {world_size} ranks)" if distributed else "")
+              + "\n")
 
     accum: dict[str, list] = {}
     n_samples = 0
@@ -219,7 +236,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     t_eval_start = time.perf_counter()
 
     from tqdm import tqdm
-    bar = tqdm(loader, total=len(loader), unit="batch", desc="eval")
+    bar = tqdm(loader, total=len(loader), unit="batch", desc="eval",
+               disable=not is_main)
     for batch_idx, batch in enumerate(bar):
         return_qualit = (_wb is not None) and (batch_idx < qualit_log_batches)
 
@@ -264,24 +282,70 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         bar.set_postfix({"samples": n_samples,
                          **{k: round(sum(v) / len(v), 4) for k, v in accum.items()}})
 
-    cost_metrics = {"time_total_s": time.perf_counter() - t_eval_start}
+    t_eval_total   = time.perf_counter() - t_eval_start
+    _peak_alloc    = _cuda_mem(_torch.cuda.max_memory_allocated)
+    _peak_resv     = _cuda_mem(_torch.cuda.max_memory_reserved)
+
+    # ── reduce over the ranks ─────────────────────────────────────────────────
+    # This is the only collective of the eval pass, so an imbalanced shard only
+    # costs the others a wait here, never a timeout mid-loop.
+    #
+    # A metric is reported as the mean of its per-batch means, so summing the
+    # values and their counts per key and dividing afterwards gives exactly
+    # what one process over the same batches would report. The keys are unioned
+    # rather than assumed equal: `quant.mean()` drops a metric whose batch held
+    # no finite value, and a whole rank can miss one that way.
+    # (Batches are cut differently for a different rank count, so a metric
+    # still moves in the last decimals between 1 and N GPUs — the same effect a
+    # changed eval.batch_size already has.)
+    if distributed:
+        local_sums = {k: (float(sum(v)), len(v)) for k, v in accum.items()}
+        accum_reduced: dict[str, tuple[float, int]] = {}
+        for rank_sums in ddp.all_gather_object(local_sums):
+            for k, (s, n) in rank_sums.items():
+                s0, n0 = accum_reduced.get(k, (0.0, 0))
+                accum_reduced[k] = (s0 + s, n0 + n)
+        metrics = {k: s / n for k, (s, n) in accum_reduced.items() if n}
+        n_samples      = int(ddp.all_reduce_sum(n_samples))
+        t_method_total = ddp.all_reduce_sum(t_method_total)
+        # the pass lasts as long as its slowest rank, and has to fit in the
+        # memory of its hungriest one — a mean would hide both
+        t_eval_total   = ddp.all_reduce_max(t_eval_total)
+        # whether there is a memory number at all is decided jointly: a rank
+        # that skipped the reduction because its device never got a CUDA
+        # context would leave the others waiting in it
+        if ddp.all_reduce_max(0.0 if _peak_alloc is None else 1.0) > 0:
+            _peak_alloc = ddp.all_reduce_max(float(_peak_alloc or 0.0))
+            _peak_resv  = ddp.all_reduce_max(float(_peak_resv or 0.0))
+        else:
+            _peak_alloc = _peak_resv = None
+    else:
+        metrics = {k: sum(v) / len(v) for k, v in accum.items()}
+
+    # nothing collective happens after this point
+    ddp.cleanup_process_group()
+    if not is_main:
+        return
+
+    cost_metrics = {"time_total_s": t_eval_total}
     if method is not None:
         cost_metrics["time_method_s_per_sample"] = t_method_total / max(n_samples, 1)
-    _peak_alloc = _cuda_mem(_torch.cuda.max_memory_allocated)
-    _peak_resv  = _cuda_mem(_torch.cuda.max_memory_reserved)
     if _peak_alloc is not None:
         cost_metrics["gpu_mem_peak_gb"] = _peak_alloc / 2 ** 30
         cost_metrics["gpu_mem_peak_reserved_gb"] = _peak_resv / 2 ** 30
+    if distributed:
+        cost_metrics["world_size"] = float(world_size)
+        cost_metrics["batch_size_global"] = float(batch_size * world_size)
 
     print(f"\n{'─'*50}")
     print(f"Results  ({n_samples} samples)")
-    for k, vals in accum.items():
-        print(f"  {k:<25} {sum(vals)/len(vals):.4f}")
+    for k, v in metrics.items():
+        print(f"  {k:<25} {v:.4f}")
     for k, v in cost_metrics.items():
         print(f"  {k:<25} {v:.4f}")
 
     if _wb is not None:
-        final_metrics = {f"eval/{k}": sum(v) / len(v) for k, v in accum.items()}
+        final_metrics = {f"eval/{k}": v for k, v in metrics.items()}
         final_metrics["eval/n_samples"] = n_samples
         final_metrics.update({f"eval/{k}": v for k, v in cost_metrics.items()})
         _wb.log(final_metrics)

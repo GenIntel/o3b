@@ -16,6 +16,12 @@ gradients changes with the epoch (the NeMo two-stage schedule). DDP would need
 one wrapper per object plus ``find_unused_parameters`` on each; an explicit
 all-reduce over the optimizer's parameter list is equivalent (same average, one
 collective per step) and indifferent to which loss ran.
+
+Evaluation (``o3b.run``) is data-parallel the same way and for every method:
+each rank runs the method over its own slice of the eval set — no gradients, so
+nothing has to be synchronised while the loop runs — and the per-batch metrics
+are reduced once at the end with `all_gather_object` / `all_reduce_sum` /
+`all_reduce_max`.
 """
 
 import os
@@ -208,8 +214,7 @@ def all_reduce_any(flag: bool) -> bool:
     return bool(tensor.item())
 
 
-def all_reduce_mean(value: float) -> float:
-    """Mean of a python scalar across ranks (returned unchanged if alone)."""
+def _scalar_all_reduce(value: float, op) -> float:
     if not is_initialized():
         return value
     tensor = torch.tensor(
@@ -217,8 +222,44 @@ def all_reduce_mean(value: float) -> float:
         dtype=torch.float64,
         device=f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu",
     )
-    dist.all_reduce(tensor)
-    return float(tensor.item() / get_world_size())
+    dist.all_reduce(tensor, op=op)
+    return float(tensor.item())
+
+
+def all_reduce_mean(value: float) -> float:
+    """Mean of a python scalar across ranks (returned unchanged if alone)."""
+    if not is_initialized():
+        return value
+    return _scalar_all_reduce(value, dist.ReduceOp.SUM) / get_world_size()
+
+
+def all_reduce_sum(value: float) -> float:
+    """Sum of a python scalar across ranks — sample counts, accumulated times."""
+    return _scalar_all_reduce(value, dist.ReduceOp.SUM)
+
+
+def all_reduce_max(value: float) -> float:
+    """Max of a python scalar across ranks.
+
+    The right reduction for wall-clock and peak-memory numbers: the job lasts
+    as long as its slowest rank and needs as much memory as its hungriest one,
+    while a mean would hide both.
+    """
+    return _scalar_all_reduce(value, dist.ReduceOp.MAX)
+
+
+def all_gather_object(obj) -> list:
+    """Collect *obj* from every rank (rank order); ``[obj]`` when alone.
+
+    For the small python structures the eval reduction needs — a dict of
+    per-metric (sum, count) pairs whose keys can differ per rank, so a plain
+    tensor all-reduce would not line up.
+    """
+    if not is_initialized():
+        return [obj]
+    gathered = [None] * get_world_size()
+    dist.all_gather_object(gathered, obj)
+    return gathered
 
 
 def setup_process_group(rank, world_size, master_addr="127.0.0.1", master_port="29500"):
