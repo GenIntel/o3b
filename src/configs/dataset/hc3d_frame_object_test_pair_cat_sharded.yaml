@@ -1,19 +1,39 @@
-# Sharded variant of hc3d_frame_object.
+# Sharded variant of hc3d_frame_object_test_pair.
 #
 # On first use the items are materialised once into
 #   <path_preprocess>/sharded/<sharded_name>
 # and loaded from there on subsequent runs (HuggingFace save_to_disk / load_from_disk).
 # Set sharded_override: true to rebuild the shards even if they already exist.
-## o3b dataset init -d hc3d_frame_object_pair_cat_sharded --remote -p slurm_lmbl40 --override
 
-# o3b dataset viz -d hc3d_frame_object_pair_cat_sharded
+
+# 1) index frame object
+# o3b dataset index -d hc3d_frame_object_test --remote -p slurm_lmbl40
+# 1 b) preprocess frame object?
+
+# 2) index frame object pair
+# o3b dataset index -d hc3d_frame_object_test_pair --remote -p slurm_lmbl40
+
+# 3) shard dataset
+# o3b dataset init -d hc3d_frame_object_test_pair_cat_sharded --remote -p slurm_lmbl40 --override
+# o3b dataset init -d hc3d_frame_object_test_pair_cat_sharded -p slurm_lmbl40 --remote -a "-c backpack,-c book,-c bottle,-c box,-c bread,-c coconut,-c conch,-c corn,-c dinosaur,-c dish,-c doll,-c egg,-c eraser,-c facial_cream,-c flower_pot,-c glasses_case,-c hair_dryer,-c hamburger,-c handbag,-c hand_cream,-c knife,-c lemon,-c light,-c lotus_root,-c mango,-c mangosteen,-c medicine_bottle,-c mouse,-c mug,-c orange,-c pillow,-c pomegranate,-c power_strip,-c remote_control,-c sausage,-c shampoo,-c shoe,-c shrimp,-c teapot,-c tooth_brush,-c tooth_paste,-c toy_animals,-c toy_boat,-c toy_bus,-c toy_car,-c toy_motorcycle,-c toy_plane,-c toy_train,-c toy_truck,-c wallet"
+
+# 4) viz
+# o3b dataset viz -d hc3d_frame_object_test_pair_cat_sharded -p slurm_lmbl40 --remote
+
+# 5) copy the built shards to another platform (runs on this machine, which is the
+#    only host that can reach both clusters; -c '*' takes every category at once,
+#    -n previews). Re-runs resume; an existing identical target is skipped.
+# o3b dataset sync-shard -d hc3d_frame_object_test_pair_cat_sharded -s slurm -t slurm_jupiter -c '*'
+
 
 defaults:
-  - hc3d_frame_object_pair
+  - hc3d_frame_object_test_pair
   - _self_
 
 
 category: "hair_dryer"
+
+mesh_type: "mc16"
 
 categories:
   - ${category}
@@ -32,7 +52,9 @@ img_size: 512
 sharded_shard_size: 100  # items per Arrow shard; lower = less peak memory during build
 
 
-sharded_name: hc3d_frame_object_pair_${filter_count_max}_b${sharded_shard_size}_r${img_size}_c${category}
+sharded_name: hc3d_frame_object_test_n${filter_count_max}_b${sharded_shard_size}_r${img_size}_m${mesh_type}_c${category}
+
+#sharded_name: hc3d_frame_object_pair_${filter_count_max}_b${sharded_shard_size}_r${img_size}_c${category}
 sharded_override: false
 
 
@@ -48,7 +70,7 @@ sharded_num_workers: 4
 
 #sharded_name: hc3d_frame_object_pair_${category}
 #sharded_override: true #  true
-# overrides the (already-lowered) default from hc3d_frame_object_pair.yaml;
+# overrides the (already-lowered) default from hc3d_frame_object_test_pair.yaml;
 # kept explicit here since this is the config that actually triggers the build
 
 

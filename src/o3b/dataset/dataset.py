@@ -365,7 +365,10 @@ class ConfigurableDataset(_TorchDataset):
                     continue
                 yield strip_mesh_from_record(record, meshes)
 
-        hf = build_sharded_dataset_from_generator(_gen, writer_batch_size=self.cfg.sharded_shard_size)
+        hf = build_sharded_dataset_from_generator(
+            _gen, writer_batch_size=self.cfg.sharded_shard_size,
+            item_cls=self._item_type_cls(), probe=self._sharded_schema_probe(n),
+        )
         pbar.close()
         if drops:
             print(f"Skipped {sum(drops.values())}/{n} items:")
@@ -377,6 +380,29 @@ class ConfigurableDataset(_TorchDataset):
         self._sharded = read_sharded_dataset(path)
         self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
         print(f"Done. Wrote {len(self._sharded)} items → {path}")
+
+    def _sharded_schema_probe(self, n: int, max_tries: int = 32):
+        """One encoded record, used to type the shards' scalar columns.
+
+        Taken from the first index that yields an item, outside the build stream
+        so the progress bar and the drop tally stay honest.  Returns None when
+        nothing loads, which leaves the schema to be inferred.
+
+        It goes through ``iter_records`` rather than loading in-process because
+        loading an item renders fo_mask_amodal: on a machine with a DISPLAY that
+        binds pyrender to the pyglet/Xlib backend, and DataLoader workers forked
+        afterwards then die with ``pyglet.gl.ContextException``.  A worker keeps
+        the first GL context out of the parent (with sharded_num_workers: 0 the
+        build renders in-process anyway, so there is nothing to protect).
+        """
+        from o3b.dataset.sharding import drop_reason, iter_records, strip_mesh_from_record
+
+        for record in iter_records(self._load_sharded_item, min(n, max_tries),
+                                   num_workers=min(1, self.cfg.sharded_num_workers)):
+            if drop_reason(record) is None:
+                # a throwaway mesh store: only the record's shape matters here
+                return strip_mesh_from_record(record, {})
+        return None
 
     # ── item loading dispatch ─────────────────────────────────────────────────
 

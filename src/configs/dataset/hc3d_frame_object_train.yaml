@@ -9,7 +9,7 @@
 # o3b dataset viz   -d hc3d_frame_object
 
 defaults:
-  - hc3d_frame_object
+  - hc3d_frame_object_test
   - _self_
 
 # split: "train" | "test" | "all"

@@ -1,0 +1,20 @@
+# Real (ROPE) subset of the test split.
+#
+# o3b dataset viz   -d hc3d_frame_object_test_real
+# (the frame index is shared with hc3d_frame_object_test:
+#   o3b dataset index -d hc3d_frame_object_test --remove)
+
+defaults:
+  - hc3d_frame_object_test
+  - _self_
+
+# filter_is_real: null → all data  |  false → synthetic only  |  true → real only
+filter_is_real: true
+
+# Only these categories are annotated in the real (ROPE) data.
+categories:
+  - bread
+  - facial_cream
+  - hair_dryer
+  - handbag
+  - tooth_brush

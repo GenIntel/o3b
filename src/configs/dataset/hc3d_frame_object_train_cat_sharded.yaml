@@ -29,6 +29,10 @@
 # o3b dataset sync-shard -d hc3d_frame_object_train_cat_sharded -s slurm -t slurm_jupiter -c '*'
 
 
+# ? is it useful to do preprocessing for the meshes before sharding ?
+# o3b dataset preprocess -d hc3d_frame_object_train_cat_sharded --remote -p slurm_lmbl40
+
+
 defaults:
   - hc3d_frame_object_train
   - _self_

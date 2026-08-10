@@ -86,6 +86,19 @@ def _zstd():
     return _zstd_codec
 
 
+def _drop_zstd_cache() -> None:
+    """Forget the cached codec.
+
+    ``Dataset.from_generator`` fingerprints the generator by deep-pickling the
+    functions it reaches and *their* module globals, which lands on this one —
+    and ``pyarrow.lib.Codec`` cannot be pickled ("self.wrapped cannot be
+    converted to a Python object").  It is only a cache, so anything that
+    encodes before handing a generator to ``datasets`` clears it again.
+    """
+    global _zstd_codec
+    _zstd_codec = None
+
+
 def _encode_tensor(value: torch.Tensor, field: str | None) -> dict:
     t   = value.detach().cpu().contiguous()
     arr = t.numpy()
@@ -195,6 +208,115 @@ def item_to_record(item) -> dict:
     return {f.name: _encode(getattr(item, f.name), f.name) for f in fields(item)}
 
 
+# ── explicit Arrow schema ─────────────────────────────────────────────────────
+#
+# Without one, ``Dataset.from_generator`` infers the schema from the first
+# writer batch: a modality that is None throughout those records freezes its
+# column to Arrow ``null``, and the first later record that does carry a value
+# kills the build with "Couldn't cast array of type struct<__t__: …> to null".
+# (Seen on the toy_train shard build, whose first keypoint-annotated frame sits
+# at row 166 with a writer batch of 100.)  Declaring the composite columns up
+# front removes the dependency on what the first batch happens to contain.
+
+def _tensor_feature():
+    from datasets import Value
+    return {
+        "__t__":  Value("int64"),
+        "shape":  [Value("int64")],
+        "dtype":  Value("string"),
+        "data":   Value("binary"),
+        "q":      Value("string"),
+        "scale":  Value("float64"),
+        "pack":   Value("string"),
+        "z":      Value("string"),
+        "nbytes": Value("int64"),
+    }
+
+
+_SCALAR_ARROW_TYPE = {str: "string", bool: "bool", int: "int64", float: "float64", bytes: "binary"}
+
+
+def _strip_optional(tp):
+    """``Optional[X]`` / ``X | None`` → ``X``; other unions → None (untypable)."""
+    import types
+    import typing
+    if typing.get_origin(tp) in (typing.Union, getattr(types, "UnionType", None)):
+        args = [a for a in typing.get_args(tp) if a is not type(None)]
+        return args[0] if len(args) == 1 else None
+    return tp
+
+
+def _hints(cls) -> dict:
+    import typing
+    return typing.get_type_hints(cls)
+
+
+class _Untypable(Exception):
+    """A record holds something the schema deriver cannot name a type for."""
+
+
+def _scalar_feature(probe):
+    """Type a leaf from a sample value — None gives Arrow ``null``, as inference would."""
+    from datasets import Value
+    if probe is None:
+        return Value("null")
+    if type(probe) in _SCALAR_ARROW_TYPE:
+        return Value(_SCALAR_ARROW_TYPE[type(probe)])
+    raise _Untypable(f"no Arrow type for {type(probe).__name__}")
+
+
+def _feature(tp, probe, seen: tuple = ()):
+    """Feature for one encoded field.
+
+    The struct shape comes from the annotation *tp* (that is the point: it holds
+    even where *probe* has None), the leaves from the sample value *probe* —
+    annotations are not reliable down there, e.g. ``Object.category`` is declared
+    ``int`` while the HouseCorr3D loaders store the category name as a string.
+    """
+    import typing
+    from datasets import Value
+
+    tp = _strip_optional(tp)
+    if isinstance(tp, type) and issubclass(tp, torch.Tensor):
+        return _tensor_feature()
+    if typing.get_origin(tp) in (list, tuple):
+        args   = typing.get_args(tp)
+        items  = probe.get("__l__") if isinstance(probe, dict) else None
+        return {"__l__": [_feature(args[0] if args else None,
+                                   items[0] if items else None, seen)]}
+    if is_dataclass(tp) and isinstance(tp, type) and tp not in seen:
+        try:
+            hints = _hints(tp)
+        except Exception:
+            hints = {}
+        sub = probe.get("fields") if isinstance(probe, dict) else None
+        return {
+            "__dc__": Value("string"),
+            "fields": {f.name: _feature(hints.get(f.name), (sub or {}).get(f.name), seen + (tp,))
+                       for f in fields(tp)},
+        }
+    return _scalar_feature(probe)
+
+
+def record_features(item_cls, probe: dict):
+    """Arrow schema for the records of ``item_cls``, or None if underivable.
+
+    *probe* is one real record, used for the leaf types (see ``_feature``).  A
+    field that is None in *probe* and carries no composite annotation stays
+    Arrow ``null``, exactly as inference would have typed it.
+    """
+    from datasets import Features
+
+    try:
+        hints = _hints(item_cls)
+        return Features({f.name: _feature(hints.get(f.name), probe.get(f.name))
+                         for f in fields(item_cls)})
+    except Exception as e:
+        print(f"WARNING: could not derive an Arrow schema for {item_cls.__name__} "
+              f"({type(e).__name__}: {e}); falling back to inference from the first batch.")
+        return None
+
+
 def record_to_item(record: dict, item_cls):
     """Reconstruct a dataclass item of type ``item_cls`` from a stored record."""
     kwargs = {k: _decode(v) for k, v in record.items()}
@@ -290,15 +412,39 @@ def build_sharded_dataset(records: list[dict]):
     return HFDataset.from_list(records)
 
 
-def build_sharded_dataset_from_generator(gen_fn, writer_batch_size: int = 1000):
+def build_sharded_dataset_from_generator(gen_fn, writer_batch_size: int = 1000,
+                                         item_cls=None, probe: dict | None = None):
     """Build a HuggingFace Dataset by streaming records from a generator.
 
     Processes ``writer_batch_size`` records at a time so peak memory is
     bounded to that many items rather than the full dataset.  ``gen_fn``
     is a zero-argument callable that returns an iterator of record dicts.
+
+    Given ``item_cls`` (the dataclass the records were built from) and ``probe``
+    (one sample record), the Arrow schema is declared up front via
+    ``record_features`` rather than inferred from the first batch — see the note
+    there.  A schema that a real record does not fit is discarded in favour of
+    inference, so a stale annotation degrades the cache instead of failing the
+    build after hours of work.
     """
     from datasets import Dataset as HFDataset
-    return HFDataset.from_generator(gen_fn, num_proc=1, writer_batch_size=writer_batch_size)
+
+    features = None
+    if item_cls is not None and probe is not None:
+        features = record_features(item_cls, probe)
+        if features is not None:
+            try:
+                HFDataset.from_list([probe], features=features)
+            except Exception as e:
+                print(f"WARNING: derived Arrow schema rejects a real {item_cls.__name__} "
+                      f"record ({type(e).__name__}: {e}); falling back to inference.")
+                features = None
+
+    # building the probe record encoded tensors, so the codec is live by now
+    _drop_zstd_cache()
+    return HFDataset.from_generator(
+        gen_fn, num_proc=1, writer_batch_size=writer_batch_size, features=features,
+    )
 
 
 def _remove_dir(path: Path) -> None:

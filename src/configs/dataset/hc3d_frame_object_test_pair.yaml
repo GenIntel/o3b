@@ -1,21 +1,21 @@
 # Frame-object *pairs*: each item is an ObjectPair of two FrameObjects
 # (query=src, target=trgt) of the same category, built on-the-fly from frames.db.
 #
-# Build the frame index first (shared with hc3d_frame_object):
-#   o3b dataset index -d hc3d_frame_object
+# Build the frame index first (shared with hc3d_frame_object_test):
+#   o3b dataset index -d hc3d_frame_object_test
 #
 # Browse pairs in viser:
-#   o3b dataset viz   -d hc3d_frame_object_pair
-#   o3b dataset viz   -d hc3d_frame_object_pair --object-centric
+#   o3b dataset viz   -d hc3d_frame_object_test_pair
+#   o3b dataset viz   -d hc3d_frame_object_test_pair --object-centric
 
 defaults:
-  - hc3d_frame_object
+  - hc3d_frame_object_test
   - _self_
 
 item_type: frame_object_pair
 
 # Modalities needed by CamCrsp3DNNTask + GenPose2Method + the crop transform.
-# (overrides the hc3d_frame_object list, which lacks cam_tform4x4_obj_ncds).
+# (overrides the hc3d_frame_object_test list, which lacks cam_tform4x4_obj_ncds).
 modalities:
   - rgb                    # GenPose2 input
   - depth                  # GenPose2 input

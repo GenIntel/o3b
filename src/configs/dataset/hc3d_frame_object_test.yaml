@@ -1,12 +1,12 @@
-# o3b dataset fetch -d hc3d_frame_object
-# o3b dataset index -d hc3d_frame_object --remove
-# o3b dataset index -d hc3d_frame_object --remote -p slurm_lmbl40
+# o3b dataset fetch -d hc3d_frame_object_test
+# o3b dataset index -d hc3d_frame_object_test --remove
+# o3b dataset index -d hc3d_frame_object_test --remote -p slurm_lmbl40
 # (filter_count_max stops indexing after this many filter-matching rows; also limits viz)
 
 
-# o3b dataset preprocess -d hc3d_frame_object --remote -p slurm_lmbl40
+# o3b dataset preprocess -d hc3d_frame_object_test --remote -p slurm_lmbl40
 
-# o3b dataset viz   -d hc3d_frame_object
+# o3b dataset viz   -d hc3d_frame_object_test
 
 defaults:
   - hc3d

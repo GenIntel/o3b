@@ -1,0 +1,29 @@
+# Sharded variant of hc3d_frame_object_test_real_pair (real / ROPE test data),
+# filtered to a single category via ${category}.
+#
+# Only these categories are annotated in the real (ROPE) data:
+#   bread, facial_cream, hair_dryer, handbag, tooth_brush
+
+# 1) index frame object
+# o3b dataset index -d hc3d_frame_object_test --remote -p slurm_lmbl40
+
+# 2) shard dataset
+# o3b dataset init -d hc3d_frame_object_test_real_pair_cat_sharded --remote -p slurm_lmbl40 --override
+# o3b dataset init -d hc3d_frame_object_test_real_pair_cat_sharded -p slurm_lmbl40 --remote -a "-c bread,-c facial_cream,-c hair_dryer,-c handbag,-c tooth_brush"
+
+# 3) viz
+# o3b dataset viz -d hc3d_frame_object_test_real_pair_cat_sharded -p slurm_lmbl40 --remote
+
+# 4) copy the built shards to another platform
+# o3b dataset sync-shard -d hc3d_frame_object_test_real_pair_cat_sharded -s slurm -t slurm_jupiter -c '*'
+
+
+defaults:
+  - hc3d_frame_object_test_pair_cat_sharded
+  - _self_
+
+# filter_is_real: null → all data  |  false → synthetic only  |  true → real only
+filter_is_real: true
+
+# distinct from the synthetic sharded cache (same fields, different source data)
+sharded_name: hc3d_frame_object_test_real_n${filter_count_max}_b${sharded_shard_size}_r${img_size}_m${mesh_type}_c${category}

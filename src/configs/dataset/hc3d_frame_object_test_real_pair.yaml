@@ -1,0 +1,23 @@
+# Frame-object *pairs* over the real (ROPE) subset of the test split.
+#
+# Build the frame index first (shared with hc3d_frame_object_test):
+#   o3b dataset index -d hc3d_frame_object_test
+#
+# Browse pairs in viser:
+#   o3b dataset viz   -d hc3d_frame_object_test_real_pair
+#   o3b dataset viz   -d hc3d_frame_object_test_real_pair --object-centric
+
+defaults:
+  - hc3d_frame_object_test_pair
+  - _self_
+
+# filter_is_real: null → all data  |  false → synthetic only  |  true → real only
+filter_is_real: true
+
+# Only these categories are annotated in the real (ROPE) data.
+categories:
+  - bread
+  - facial_cream
+  - hair_dryer
+  - handbag
+  - tooth_brush
