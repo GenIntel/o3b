@@ -5,6 +5,11 @@ Usage:
   o3b dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
   o3b dataset index  -d hc3d_object        [--db FILE] [--platform PLATFORM] [--remote]
   o3b dataset init   -d hc3d_object        [--limit N] [--override] [--platform PLATFORM] [--remote]
+                                         [-c CATEGORIES] [-a ABLATIONS]
+  # -c overrides the config's categories (and ${category}), e.g. -c backpack
+  # -a starts one run per comma-separated ablation, each a fragment of extra
+  #    init arguments — with --remote one sbatch job per ablation:
+  #    o3b dataset init -d <ds> -p <platform> --remote -a "-c backpack,-c book"
   o3b dataset viz    -d hc3d_object_pair   [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
@@ -42,6 +47,12 @@ def _build_dataset_parser(sub):
             "-p", "--platform", default="default", metavar="PLATFORM",
             help="Platform name whose path_datasets_raw / path_datasets_preprocess "
                  "override the dataset config paths (default: default)",
+        )
+        q.add_argument(
+            "-c", "--categories", default=None, metavar="CATEGORIES",
+            help="Comma-separated categories overriding the config's 'categories' field "
+                 "(e.g. -c backpack or -c backpack,book). Also sets 'category' (joined by "
+                 "'_' for several), so ${category} interpolations such as sharded_name follow",
         )
 
     p_fetch = ds_sub.add_parser("fetch", help="Download / prepare the dataset")
@@ -81,6 +92,13 @@ def _build_dataset_parser(sub):
         "--remote", action="store_true",
         help="Run this command on the --platform's compute node via `o3b platform run` "
              "instead of initialising locally",
+    )
+    p_init.add_argument(
+        "-a", "--ablation", default=None, metavar="ABLATIONS",
+        help="Comma-separated ablations, each a fragment of extra `o3b dataset init` "
+             'arguments (e.g. -a "-c backpack,-c book"). One run is started per '
+             "ablation — a separate sbatch job each with --remote, otherwise "
+             "sequentially in this process",
     )
 
     p_vis = ds_sub.add_parser("viz", help="Summarize and optionally render dataset objects")
@@ -166,12 +184,74 @@ def _build_dataset_parser(sub):
     )
 
 
+def _parse_categories(categories: str | None) -> list[str] | None:
+    """Split a comma-separated -c value into a list of category names."""
+    if not categories:
+        return None
+    cats = [c.strip() for c in categories.split(",") if c.strip()]
+    return cats or None
+
+
+def _categories_to_dataset_overrides(categories: str | None) -> list[str]:
+    """Return Hydra override strings for the -c / --categories flag.
+
+    ``category`` is set alongside ``categories`` (joined by '_' when several are
+    given) so configs interpolating ``${category}`` — e.g. ``sharded_name`` —
+    stay in sync with the filtered categories.
+    """
+    cats = _parse_categories(categories)
+    if not cats:
+        return []
+    return [f"category={'_'.join(cats)}", f"categories=[{', '.join(cats)}]"]
+
+
+def _dataset_overrides(args) -> list[str]:
+    """Platform path overrides plus any -c / --categories override."""
+    from o3b.dataset.cli import _platform_to_dataset_overrides
+    return (_platform_to_dataset_overrides(args.platform)
+            + _categories_to_dataset_overrides(getattr(args, "categories", None)))
+
+
+def _run_dataset_ablations(args, parser, argv: list[str]) -> None:
+    """Start one `o3b dataset <cmd>` run per comma-separated ablation.
+
+    Each ablation is a fragment of extra CLI arguments (e.g. ``-c backpack``);
+    it is appended to the original argv and re-parsed, so the ablation's flags
+    win over the ones given on the base command line.  With ``--remote`` every
+    run is submitted as its own sbatch job, otherwise they run sequentially here.
+    """
+    import shlex
+
+    ablations = [a.strip() for a in args.ablation.split(",") if a.strip()]
+    if not ablations:
+        print(f"WARNING: no ablations parsed from {args.ablation!r}", file=sys.stderr)
+        return
+
+    print(f"Running {len(ablations)} ablation(s): {ablations}")
+    failed: list[str] = []
+    for i, ablation in enumerate(ablations, 1):
+        print(f"\n── ablation {i}/{len(ablations)}: {ablation} ──")
+        sub_args = parser.parse_args(argv + shlex.split(ablation))
+        sub_args.ablation = None  # the re-parse carries -a over; drop it to avoid recursion
+        try:
+            _run_dataset(sub_args)
+        except Exception as exc:
+            print(f"ERROR: ablation {ablation!r} failed: {exc}", file=sys.stderr)
+            failed.append(ablation)
+
+    if failed:
+        print(f"\n{len(failed)}/{len(ablations)} ablation(s) failed: {failed}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _run_dataset_remote(args) -> None:
     """Re-invoke `o3b dataset <cmd>` (minus --remote) on the platform's compute node."""
     import shlex
 
     command = args.dataset_command
     parts = ["o3b", "dataset", command, "-d", args.config.stem, "-p", args.platform]
+    if getattr(args, "categories", None):
+        parts += ["-c", args.categories]
     if getattr(args, "db", None):
         parts += ["--db", str(args.db)]
     if getattr(args, "remove", False):
@@ -184,7 +264,10 @@ def _run_dataset_remote(args) -> None:
         parts.append("--override")
     remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
-    _run_platform_run_cmd(args.platform, remote_cmd, job_name=f"{command}_{args.config.stem}")
+    job_name = f"{command}_{args.config.stem}"
+    if cats := _parse_categories(getattr(args, "categories", None)):
+        job_name += f"_c{'_'.join(cats)}"  # keep per-ablation jobs distinguishable
+    _run_platform_run_cmd(args.platform, remote_cmd, job_name=job_name)
 
 
 def _viz_remote_command(args, remote_port: int) -> str:
@@ -198,6 +281,8 @@ def _viz_remote_command(args, remote_port: int) -> str:
         "--port", str(remote_port),
         "--limit", str(args.limit),
     ]
+    if args.categories:
+        parts += ["-c", args.categories]
     if args.db:
         parts += ["--db", str(args.db)]
     if args.object_id:
@@ -292,7 +377,10 @@ def _run_dataset_viz_remote(args) -> None:
         subprocess.run(["ssh", ssh_host, f"rm -f {remote_init}"], check=False)
 
 
-def _run_dataset(args):
+def _run_dataset(args, parser=None, argv=None):
+    if getattr(args, "ablation", None):
+        _run_dataset_ablations(args, parser, argv)
+        return
     if args.dataset_command in ("index", "init") and getattr(args, "remote", False):
         _run_dataset_remote(args)
         return
@@ -303,9 +391,9 @@ def _run_dataset(args):
         import os
         os.environ["O3B_VISER_PORT"] = str(args.port)
 
-    from o3b.dataset.cli import _load_class_from_config, _platform_to_dataset_overrides
+    from o3b.dataset.cli import _load_class_from_config
 
-    overrides = _platform_to_dataset_overrides(args.platform)
+    overrides = _dataset_overrides(args)
     cls, cfg = _load_class_from_config(args.config, overrides=overrides)
 
     if args.dataset_command == "fetch":
@@ -2276,17 +2364,20 @@ def _build_bench_parser(sub):
     )
     p_wbsync.add_argument(
         "--clean", action=argparse.BooleanOptionalAction, default=True,
-        help="After syncing, delete the local directories of runs that are already "
-             "synced (default). Never touches an unsynced run, and deletes nothing "
-             "on the server. Spares runs newer than --clean-old-hours, which wandb "
-             "defaults to 24, so the last day survives either way. --no-clean keeps "
+        help="After syncing, delete the local directories of runs that are over — "
+             "uploaded, and produced by a SLURM job that is no longer queued "
+             "(default). A run whose job is still queued is never deleted, nor is "
+             "one that has not been uploaded, nor one whose state cannot be "
+             "established; nothing on the server is affected. --no-clean keeps "
              "everything on disk.",
     )
     p_wbsync.add_argument(
         "--clean-old-hours", type=int, default=None, metavar="N",
-        help="Age threshold for --clean, measured from the run's start time (the "
-             "timestamp in its directory name). Defaults to wandb's own 24; pass 0 "
-             "to delete every synced run.",
+        help="Extra guard for --clean: additionally spare anything that started "
+             "less than N hours ago. Off by default — whether the job is still "
+             "queued is the criterion, and it needs no age heuristic. Setting it "
+             "also lets non-SLURM runs, whose state cannot otherwise be checked, "
+             "become eligible once they are older than N.",
     )
     p_wbsync.add_argument(
         "--dir", default=None, metavar="DIR",
@@ -2300,6 +2391,117 @@ def _build_bench_parser(sub):
         "--project", default=None, metavar="PROJECT",
         help="W&B project to upload to. Defaults to whatever the offline runs recorded.",
     )
+
+
+# Classifies (and optionally deletes) the offline run directories on the remote.
+# Shipped base64-encoded and run there, so it is always this version rather than
+# whatever the cluster checkout happens to hold.
+#
+# argv: <wandb_dir> <active_job_ids csv> <have_squeue 0|1> <min_age_hours|""> <delete 0|1>
+def _b64(text: str) -> str:
+    """Shell-quoted base64 of *text*, for shipping a script through ssh intact.
+
+    The alternative -- a heredoc or a `python3 -c` string -- puts the payload
+    through bash quoting on a script that is itself arriving on stdin, where a
+    stray quote or backslash silently corrupts it.
+    """
+    import base64
+    import shlex
+
+    return shlex.quote(base64.b64encode(text.encode()).decode())
+
+
+_WBCLEAN_PY = r'''
+import datetime, json, os, shutil, sys
+
+wandb_dir, active_csv, have_squeue, min_age, do_delete = sys.argv[1:6]
+active = {t for t in active_csv.split(",") if t}
+have_squeue = have_squeue == "1"
+min_age_h = float(min_age) if min_age else None
+do_delete = do_delete == "1"
+now = datetime.datetime.now()
+
+
+def job_id_of(path):
+    """The SLURM job that produced this run, or None for a non-SLURM run."""
+    try:
+        with open(os.path.join(path, "files", "wandb-metadata.json")) as fh:
+            jid = (json.load(fh).get("slurm") or {}).get("job_id")
+    except Exception:
+        return None
+    return str(jid) if jid is not None else None
+
+
+def age_hours(name):
+    # offline-run-20260807_171912-gq51znil -> the run's start time
+    try:
+        stamp = name.split("run-")[1].split("-")[0]
+        started = datetime.datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+    except Exception:
+        return None
+    return (now - started).total_seconds() / 3600.0
+
+
+rows = []
+for name in sorted(os.listdir(wandb_dir)):
+    path = os.path.join(wandb_dir, name)
+    if not name.startswith("offline-run-") or not os.path.isdir(path):
+        continue
+    synced = os.path.exists(path + ".synced")
+    jid = job_id_of(path)
+    age = age_hours(name)
+    young = min_age_h is not None and age is not None and age < min_age_h
+
+    # Order matters: every branch that cannot *prove* the run is over keeps it.
+    if not synced:
+        state, keep, why = "pending", True, "not uploaded yet"
+    elif jid is not None and jid in active:
+        state, keep, why = "running", True, "slurm job %s still queued" % jid
+    elif jid is None:
+        # No SLURM metadata (a login-node or local run): there is no way to tell
+        # whether it is still going, so it only goes on an explicit age rule.
+        if min_age_h is not None and not young:
+            state, keep, why = "done", False, "no slurm job, older than cutoff"
+        else:
+            state, keep, why = "unknown", True, "no slurm job id to check"
+    elif not have_squeue:
+        state, keep, why = "unknown", True, "squeue unavailable, cannot verify"
+    elif young:
+        state, keep, why = "done", True, "newer than cutoff"
+    else:
+        state, keep, why = "done", False, "slurm job %s finished" % jid
+    rows.append((name, state, keep, why, path))
+
+counts = {}
+for _, state, keep, _, _ in rows:
+    counts[state] = counts.get(state, 0) + 1
+order = ["running", "pending", "done", "unknown"]
+print("  " + ", ".join("%s %s" % (counts.get(s, 0), s) for s in order if counts.get(s)))
+
+removable = [r for r in rows if not r[2]]
+for name, _state, keep, why, _ in rows:
+    if keep:
+        print("    KEEP    %-46s %s" % (name, why))
+for name, _, _, why, _ in removable:
+    print("    %s %-46s %s" % ("DELETE " if do_delete else "would rm", name, why))
+
+if not do_delete:
+    sys.exit(0)
+
+freed = 0
+for name, _, _, _, path in removable:
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                freed += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    shutil.rmtree(path, ignore_errors=True)
+    marker = path + ".synced"
+    if os.path.exists(marker):
+        os.remove(marker)
+print("  removed %d run(s), freed %.1f MiB" % (len(removable), freed / 1048576.0))
+'''
 
 
 def _run_bench_wbsync(args) -> None:
@@ -2378,25 +2580,8 @@ def _run_bench_wbsync(args) -> None:
         "unset WANDB_MODE",
         f"if [ ! -d {wandb_dir} ]; then "
         f'echo "no wandb directory at {wandb_dir} — nothing to sync"; exit 0; fi',
-        # a synced run is marked by a sibling <run-dir>.synced file, so count
-        # directories and markers separately -- a glob would conflate the two
-        f'_total=$(find {wandb_dir} -maxdepth 1 -type d -name "offline-run-*" | wc -l)',
-        f'_synced=$(find {wandb_dir} -maxdepth 1 -type f -name "offline-run-*.synced" | wc -l)',
-        'echo "offline runs: ${_total} total, ${_synced} synced, '
-        '$((_total - _synced)) pending"',
     ]
-    if args.dry_run:
-        # Deliberately not `wandb sync` with no args: that lists and then asks
-        # "Sync the listed runs?", which has no terminal to read from here and
-        # dies with NotATerminalError. Listing the markers ourselves is also
-        # immune to the CLI's legacy/beta split.
-        lines += [
-            f'find {wandb_dir} -maxdepth 1 -type d -name "offline-run-*" | sort | '
-            'while read -r _d; do '
-            'if [ -e "${_d}.synced" ]; then echo "  synced   $(basename "${_d}")"; '
-            'else echo "  PENDING  $(basename "${_d}")"; fi; done',
-        ]
-    else:
+    if not args.dry_run:
         lines += [
             # `wandb sync` discovers runs by looking for a ./wandb directory
             # below the cwd, so stand in the *parent*. Standing in wandb_dir
@@ -2404,22 +2589,40 @@ def _run_bench_wbsync(args) -> None:
             f"cd $(dirname {wandb_dir})",
             f"wandb sync {' '.join(sync_args)}",
         ]
-    if args.clean and not args.dry_run:
-        # --clean-force because the script arrives on stdin over ssh: wandb's
-        # "Are you sure you want to remove N runs?" has no terminal to read from
-        # and would abort the whole command with NotATerminalError
-        clean = ["wandb", "sync", "--clean", "--clean-force"]
-        if args.clean_old_hours is not None:
-            clean += ["--clean-old-hours", str(args.clean_old_hours)]
-        lines.append(" ".join(clean))
+
+    # ── which runs are over? ──────────────────────────────────────────────────
+    # An offline run records the SLURM job that produced it, so "still running"
+    # is answered exactly by asking whether that job is still queued -- no age
+    # heuristic. squeue must be seen to *succeed*: if it is missing or errors we
+    # would read an empty job list as "everything finished" and delete live runs,
+    # so the failure is passed through and the classifier keeps everything.
+    if args.clean or args.dry_run:
+        squeue_user = f" -u {cfg.get('username')}" if cfg.get("username") else ""
+        lines += [
+            "_active=''; _have_squeue=0",
+            "if command -v squeue >/dev/null 2>&1 && "
+            f"_sq=$(squeue -h{squeue_user} -o '%i %F' 2>/dev/null); then",
+            "    _have_squeue=1",
+            "    _active=$(printf '%s' \"${_sq}\" | tr ' ' '\\n' | sed '/^$/d' | "
+            "sort -u | paste -sd, -)",
+            "fi",
+            f"_wbclean=$(mktemp {path_ws or '/tmp'}/.wbclean.XXXXXX.py)",
+            f"printf '%s' {_b64(_WBCLEAN_PY)} | base64 -d > \"${{_wbclean}}\"",
+            f'python3 "${{_wbclean}}" {wandb_dir} "${{_active}}" "${{_have_squeue}}" '
+            f'"{"" if args.clean_old_hours is None else args.clean_old_hours}" '
+            f'"{1 if args.clean and not args.dry_run else 0}"',
+            'rm -f "${_wbclean}"',
+        ]
 
     if args.dry_run:
         print(f"Listing offline W&B runs on {ssh_host}:{wandb_dir}…")
     else:
         # cleaning is on by default and deletes without prompting, so say so
-        hours = 24 if args.clean_old_hours is None else args.clean_old_hours
-        after = (f"then deleting synced runs older than {hours}h (--no-clean to keep)"
-                 if args.clean else "keeping every local run directory")
+        cutoff = ("" if args.clean_old_hours is None
+                  else f" and older than {args.clean_old_hours}h")
+        after = (f"then deleting synced runs whose slurm job has finished{cutoff} "
+                 f"(--no-clean to keep)" if args.clean
+                 else "keeping every local run directory")
         print(f"Syncing offline W&B runs on {ssh_host}:{wandb_dir}, {after}…")
     proc = subprocess.run(["ssh", ssh_host, "bash -s"],
                           input="\n".join(lines) + "\n", text=True)
@@ -3591,6 +3794,31 @@ def _run_bench_rrun(args) -> None:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+def _normalise_ablation_argv(argv) -> list[str]:
+    """Rewrite ``-a <value>`` / ``-a=<value>`` into ``--ablation=<value>``.
+
+    Dataset ablations are fragments of CLI arguments (``-c backpack``), and
+    argparse refuses an option value that starts with '-' unless it is attached
+    with '='.
+    """
+    argv = list(argv)
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-a", "--ablation") and i + 1 < len(argv):
+            out.append(f"--ablation={argv[i + 1]}")
+            i += 2
+            continue
+        if tok.startswith("-a=") or tok.startswith("--ablation="):
+            out.append(f"--ablation={tok.partition('=')[2]}")
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
         prog="o3b",
@@ -3601,10 +3829,11 @@ def main(argv=None) -> None:
     _build_bench_parser(sub)
     _build_platform_parser(sub)
 
+    argv = _normalise_ablation_argv(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
 
     if args.command == "dataset":
-        _run_dataset(args)
+        _run_dataset(args, parser=parser, argv=argv)
     elif args.command == "bench":
         _run_bench(args)
     elif args.command == "platform":

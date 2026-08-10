@@ -4,22 +4,25 @@
 #   <path_preprocess>/sharded/<sharded_name>
 # and loaded from there on subsequent runs. The category name is part of the
 # sharded_name so per-category shards live side by side.
-#
+
+# 1) fetch
 # o3b dataset fetch -d hc3d_frame_object_train_cat_sharded
-# o3b dataset index -d hc3d_frame_object_train_cat_sharded
-# o3b dataset viz -d hc3d_frame_object_train_cat_sharded
 
-# 
+# 2) index either many cats or single cat: 
+# o3b dataset index -d hc3d_frame_object_train -p slurm_lmbl40 --remote
 # o3b dataset index -d hc3d_frame_object_train_cat_sharded -p slurm_lmbl40 --remote
-# o3b dataset index -d hc3d_frame_object_train_cat_sharded -p slurm_lmbl40 --remote
-# problem: ??
 
-
+# 3) init
 # o3b dataset init -d hc3d_frame_object_train_cat_sharded -p slurm_lmbl40 --remote
+#
+# 3b) init all 50 categories — -a starts one run per comma-separated ablation
+#     (each ablation is a fragment of extra `o3b dataset init` args, here `-c <category>`);
+#     with --remote every category is submitted as its own sbatch job.
+# o3b dataset init -d hc3d_frame_object_train_cat_sharded -p slurm_lmbl40 --remote -a "-c backpack,-c book,-c bottle,-c box,-c bread,-c coconut,-c conch,-c corn,-c dinosaur,-c dish,-c doll,-c egg,-c eraser,-c facial_cream,-c flower_pot,-c glasses_case,-c hair_dryer,-c hamburger,-c handbag,-c hand_cream,-c knife,-c lemon,-c light,-c lotus_root,-c mango,-c mangosteen,-c medicine_bottle,-c mouse,-c mug,-c orange,-c pillow,-c pomegranate,-c power_strip,-c remote_control,-c sausage,-c shampoo,-c shoe,-c shrimp,-c teapot,-c tooth_brush,-c tooth_paste,-c toy_animals,-c toy_boat,-c toy_bus,-c toy_car,-c toy_motorcycle,-c toy_plane,-c toy_train,-c toy_truck,-c wallet"
+
+# 4) viz
 # o3b dataset viz -d hc3d_frame_object_train_cat_sharded -p slurm_lmbl40 --remote
 
-
-# o3b dataset viz -d hc3d_frame_object_train_cat_sharded
 
 defaults:
   - hc3d_frame_object_train
@@ -32,6 +35,7 @@ category: hair_dryer
 categories:
   - ${category}
 
+filter_count_max: 50000 # 50000 # per category if categories is applied
 
 img_size: 512
 sharded_shard_size: 100 # cache batch size and final shard size
@@ -47,7 +51,6 @@ sharded_num_workers: 4
 # perhaps this should be ram_in_gb / sharded_worker_gb = 20 / 5 = 4
 # sharded_worker_gb: see that each worker usually creates their own dataset copy
 
-filter_count_max: 50000 # 50000 # per category if categories is applied
 
 sharded_transform:
   class_name: CropCamBBox2D

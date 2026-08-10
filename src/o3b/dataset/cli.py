@@ -95,6 +95,11 @@ def main(argv=None) -> None:
             help="Platform name whose path_datasets_raw / path_datasets_preprocess "
                  "override the dataset config paths (default: default)",
         )
+        p.add_argument(
+            "-c", "--categories", default=None, metavar="CATEGORIES",
+            help="Comma-separated categories overriding the config's 'categories' field "
+                 "(e.g. -c backpack or -c backpack,book)",
+        )
 
     p_fetch = sub.add_parser("fetch", help="Download / prepare the dataset")
     _add_config(p_fetch)
@@ -155,7 +160,9 @@ def main(argv=None) -> None:
                        help="Object-centric view: place object at world origin, camera in object space")
 
     args = parser.parse_args(argv)
-    overrides = _platform_to_dataset_overrides(args.platform)
+    from o3b.cli import _categories_to_dataset_overrides
+    overrides = (_platform_to_dataset_overrides(args.platform)
+                 + _categories_to_dataset_overrides(args.categories))
     cls, cfg = _load_class_from_config(args.config, overrides=overrides)
 
     if args.command == "tform":

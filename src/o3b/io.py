@@ -247,11 +247,21 @@ def _load_yaml_with_defaults(path: Path, overrides=None, resolve: bool = True) -
     cfg = _merge(Path(path).resolve())
 
     if overrides:
+        import yaml as _yaml
+
         for ov in overrides:
-            key, _, val = ov.partition("=")
+            key, sep, val = ov.partition("=")
+            if not sep:
+                continue
             key = key.lstrip("+~")
+            # parse the value as YAML so lists / numbers / booleans survive
+            # (e.g. 'categories=[backpack, book]'); plain paths stay strings
             try:
-                OmegaConf.update(cfg, key, val)
+                parsed = _yaml.safe_load(val)
+            except Exception:
+                parsed = val
+            try:
+                OmegaConf.update(cfg, key, parsed)
             except Exception:
                 pass
 
