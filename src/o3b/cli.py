@@ -2275,12 +2275,18 @@ def _build_bench_parser(sub):
         help="Only print the remote summary of synced/unsynced runs; upload nothing.",
     )
     p_wbsync.add_argument(
-        "--clean", action="store_true",
-        help="After syncing, delete the local run directories that are already synced.",
+        "--clean", action=argparse.BooleanOptionalAction, default=True,
+        help="After syncing, delete the local directories of runs that are already "
+             "synced (default). Never touches an unsynced run, and deletes nothing "
+             "on the server. Spares runs newer than --clean-old-hours, which wandb "
+             "defaults to 24, so the last day survives either way. --no-clean keeps "
+             "everything on disk.",
     )
     p_wbsync.add_argument(
         "--clean-old-hours", type=int, default=None, metavar="N",
-        help="With --clean, only delete synced runs older than N hours.",
+        help="Age threshold for --clean, measured from the run's start time (the "
+             "timestamp in its directory name). Defaults to wandb's own 24; pass 0 "
+             "to delete every synced run.",
     )
     p_wbsync.add_argument(
         "--dir", default=None, metavar="DIR",
@@ -2399,13 +2405,22 @@ def _run_bench_wbsync(args) -> None:
             f"wandb sync {' '.join(sync_args)}",
         ]
     if args.clean and not args.dry_run:
+        # --clean-force because the script arrives on stdin over ssh: wandb's
+        # "Are you sure you want to remove N runs?" has no terminal to read from
+        # and would abort the whole command with NotATerminalError
         clean = ["wandb", "sync", "--clean", "--clean-force"]
         if args.clean_old_hours is not None:
             clean += ["--clean-old-hours", str(args.clean_old_hours)]
         lines.append(" ".join(clean))
 
-    what = "Listing" if args.dry_run else "Syncing"
-    print(f"{what} offline W&B runs on {ssh_host}:{wandb_dir}…")
+    if args.dry_run:
+        print(f"Listing offline W&B runs on {ssh_host}:{wandb_dir}…")
+    else:
+        # cleaning is on by default and deletes without prompting, so say so
+        hours = 24 if args.clean_old_hours is None else args.clean_old_hours
+        after = (f"then deleting synced runs older than {hours}h (--no-clean to keep)"
+                 if args.clean else "keeping every local run directory")
+        print(f"Syncing offline W&B runs on {ssh_host}:{wandb_dir}, {after}…")
     proc = subprocess.run(["ssh", ssh_host, "bash -s"],
                           input="\n".join(lines) + "\n", text=True)
     if proc.returncode != 0:
