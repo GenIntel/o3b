@@ -18,7 +18,7 @@
 
 # 3) shard dataset
 # o3b dataset init -d hc3d_frame_object_test_pair_cat_sharded --remote -p slurm_lmbl40 --override
-# o3b dataset init -d hc3d_frame_object_test_pair_cat_sharded -p slurm_lmbl40 --remote -a "-c backpack,-c book,-c bottle,-c box,-c bread,-c coconut,-c conch,-c corn,-c dinosaur,-c dish,-c doll,-c egg,-c eraser,-c facial_cream,-c flower_pot,-c glasses_case,-c hair_dryer,-c hamburger,-c handbag,-c hand_cream,-c knife,-c lemon,-c light,-c lotus_root,-c mango,-c mangosteen,-c medicine_bottle,-c mouse,-c mug,-c orange,-c pillow,-c pomegranate,-c power_strip,-c remote_control,-c sausage,-c shampoo,-c shoe,-c shrimp,-c teapot,-c tooth_brush,-c tooth_paste,-c toy_animals,-c toy_boat,-c toy_bus,-c toy_car,-c toy_motorcycle,-c toy_plane,-c toy_train,-c toy_truck,-c wallet"
+# o3b dataset init -d hc3d_frame_object_test_pair_cat_sharded --override -p slurm_lmbl40 --remote -a "-c backpack,-c book,-c bottle,-c box,-c bread,-c coconut,-c conch,-c corn,-c dinosaur,-c dish,-c doll,-c egg,-c eraser,-c facial_cream,-c flower_pot,-c glasses_case,-c hair_dryer,-c hamburger,-c handbag,-c hand_cream,-c knife,-c lemon,-c light,-c lotus_root,-c mango,-c mangosteen,-c medicine_bottle,-c mouse,-c mug,-c orange,-c pillow,-c pomegranate,-c power_strip,-c remote_control,-c sausage,-c shampoo,-c shoe,-c shrimp,-c teapot,-c tooth_brush,-c tooth_paste,-c toy_animals,-c toy_boat,-c toy_bus,-c toy_car,-c toy_motorcycle,-c toy_plane,-c toy_train,-c toy_truck,-c wallet"
 
 # 4) viz
 # o3b dataset viz -d hc3d_frame_object_test_pair_cat_sharded -p slurm_lmbl40 --remote
