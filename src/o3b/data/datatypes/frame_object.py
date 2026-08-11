@@ -62,7 +62,7 @@ class FrameObject(Frame, Object):
           along world X; returns the list of viser handles.
         """
         if server is not None:
-            from o3b.dataset.housecorr3d.frame_dataset import _add_frame_object_to_scene
+            from o3b.data.viz_viser import _add_frame_object_to_scene
             return _add_frame_object_to_scene(
                 server, self, prefix=node_prefix, offset_x=offset_x,
                 obj_centric=obj_centric, kpt_colors=kpt_colors,
@@ -735,7 +735,7 @@ def collate_frame_objects(
             and any(s.mesh is not None for s in samples)
             else None
         ),
-        # category may be an int id or a name string (HouseCorr3DFrame stores names)
+        # category may be an int id or a name string (some loaders store names)
         category = (
             [s.category for s in samples]
             if any(isinstance(s.category, str) for s in samples)

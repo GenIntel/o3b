@@ -386,7 +386,7 @@ def visualize_dataset(
                     _img_handle[0].image = strips[mod]
 
                 # add a camera frustum + rendered RGB panel per viewpoint
-                from o3b.dataset.housecorr3d.frame_dataset import (
+                from o3b.data.viz_viser import (
                     _add_frustum_to_scene, _add_rgb_image_to_scene, _rot3x3_to_wxyz,
                 )
                 N_views = cam_tforms.shape[0]

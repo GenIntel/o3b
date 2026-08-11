@@ -104,7 +104,7 @@ class DenseMatcher(ConfigurableDataset):
 
     def _load_object_from_row(self, row: dict) -> Object:
         from o3b.io import _load_mesh
-        from o3b.dataset.housecorr3d.dataset import _want, _load_kpts3d_by_id
+        from o3b.dataset.utils import want as _want, load_kpts3d_by_id as _load_kpts3d_by_id
 
         oid  = row["object_id"]
         mods = self.cfg.object_modalities
@@ -215,7 +215,7 @@ class DenseMatcher(ConfigurableDataset):
     @classmethod
     def fetch(cls, cfg, *, url: Optional[str] = None) -> None:
         import tempfile, urllib.request, zipfile
-        from o3b.dataset.housecorr3d.dataset import _download_progress
+        from o3b.dataset.utils import download_progress as _download_progress
 
         path_raw = cls._path_raw(cfg)
         path_raw.mkdir(parents=True, exist_ok=True)

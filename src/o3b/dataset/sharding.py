@@ -271,7 +271,7 @@ def _feature(tp, probe, seen: tuple = ()):
     The struct shape comes from the annotation *tp* (that is the point: it holds
     even where *probe* has None), the leaves from the sample value *probe* —
     annotations are not reliable down there, e.g. ``Object.category`` is declared
-    ``int`` while the HouseCorr3D loaders store the category name as a string.
+    ``int`` while several loaders store the category name as a string.
     """
     import typing
     from datasets import Value

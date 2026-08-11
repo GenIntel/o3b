@@ -56,8 +56,8 @@ class CamApp2D3D(OD3D_Task):
         self.smooth_labels = "smooth" in type
         self.coarse_labels = "coarse" in type
         # use_mask_rgb mirrors NeMo's DTD-background-composite mask
-        # (``batch.rgb_mask``); HouseCorr3D has no such modality, so this is a
-        # no-op unless the batch happens to carry one.
+        # (``batch.rgb_mask``); the frame-object datasets carry no such modality,
+        # so this is a no-op unless the batch happens to carry one.
         self.use_mask_rgb = bool(use_mask_rgb)
         self.use_mask_object = bool(use_mask_object)
         self.add_clutter = bool(add_clutter)

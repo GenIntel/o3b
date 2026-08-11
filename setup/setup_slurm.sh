@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Setup script for the housecorr3d repository on a SLURM cluster.
+# Setup script for an o3b superproject repository on a SLURM cluster.
 # Invoked by `o3b platform setup -p slurm`; environment variables are injected
 # by that command from the resolved platform config.
 set -euo pipefail
 
 PATH_WS="${PATH_WS:-/work/dlclarge1/sommerl-od3d}"
 PATH_CUDA="${PATH_CUDA:-/usr/local/cuda-12.4}"
-REPO_URL="${REPO_URL:-}"                                    # housecorr3d SSH URL
+REPO_URL="${REPO_URL:-}"                                    # superproject SSH URL
 REPO_NAME="${REPO_NAME:-$(basename "${REPO_URL}" .git)}"   # e.g. HouseCorr3Dv2
 BRANCH="${BRANCH:-main}"
 PULL="${PULL:-true}"
@@ -231,7 +231,7 @@ exec 200>"${LOCK_FILE}"
 echo "--- acquiring setup lock (${LOCK_FILE}) ---"
 flock -x 200   # blocks until no other setup_slurm.sh holds the lock
 
-echo "=== housecorr3d slurm setup ==="
+echo "=== ${REPO_NAME} slurm setup ==="
 echo "  repo  : ${REPO_PATH}"
 echo "  branch: ${BRANCH}"
 if _is_true "${USE_CONDA}"; then
@@ -457,7 +457,9 @@ _rebuild_if_broken nvdiffrast.torch \
 echo "--- pip install o3b ---"
 pip install -e third_party/o3b --no-build-isolation
 
-echo "--- pip install housecorr3d ---"
+echo "--- pip install ${REPO_NAME} (superproject) ---"
+# Re-installs the superproject, which is also what refreshes its entry-point
+# metadata (o3b.methods) so o3b can discover newly added methods.
 pip install -e .
 
 # ── torch.hub cache warm-up ───────────────────────────────────────────────────

@@ -121,7 +121,7 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     if method_cfg:
         cls_name = method_cfg.get("class_name")
         try:
-            from housecorr3dv2.method.method import build_method, MethodConfig
+            from o3b.method.method import build_method, MethodConfig
             method = build_method(MethodConfig.from_dict(dict(method_cfg)))
             if is_main:
                 print(f"Method:  {cls_name}")

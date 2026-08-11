@@ -110,8 +110,8 @@ class DenseMatcherModel(OD3D_Model):
     mesh_weld: textured mc* meshes carry xatlas UV-seam vertex duplicates that
     cut the surface into charts, which the DiffusionNet Laplacian sees as
     boundary cuts. If true, the mesh is welded back to watertight
-    connectivity (housecorr3dv2.method.mesh_match_utils.weld_mesh, mirroring
-    FunctionalMapsMethod) before feature extraction: per-vertex colour is
+    connectivity (the same weld the spectral/functional-map methods apply)
+    before feature extraction: per-vertex colour is
     resolved (sampled from the texture atlas if needed) and averaged over
     welded duplicates (mean_by_index), the whole pipeline then runs on the
     welded mesh, and the output features are broadcast back to full

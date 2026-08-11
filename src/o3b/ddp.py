@@ -8,8 +8,9 @@ MASTER_ADDR / MASTER_PORT; the job preamble written by ``o3b.cli``
 (`_srun_env_lines`) is what sets the master address/port up on slurm, so a
 process only has to read the environment here.
 
-The training loop in ``housecorr3dv2.method.morpheus`` averages gradients with
-`average_gradients` instead of wrapping the model in ``DistributedDataParallel``:
+A method's own training loop (see ``o3b.method``) can average gradients with
+`average_gradients` instead of wrapping the model in ``DistributedDataParallel``.
+That is what the downstream Morpheus method does, and why:
 its trainable parameters are spread over three unrelated objects (the feature
 model, the DMTet objects3d, the instance-deform head), and which of them receive
 gradients changes with the epoch (the NeMo two-stage schedule). DDP would need

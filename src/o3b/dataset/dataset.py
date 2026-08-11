@@ -37,7 +37,7 @@ class BatchType(str, Enum):
 @dataclass
 class DatasetConfig:
     # what and where
-    class_name:      str                   # e.g. "HouseCorr3D"
+    class_name:      str                   # registered dataset name, e.g. "DenseMatcher"
     root:            Path                  = Path("data")
     path_raw:        Optional[Path]        = None   # raw (downloaded) data root
     path_preprocess: Optional[Path]        = None   # preprocessed data root
@@ -197,7 +197,7 @@ def _ensure_dataset_imported(name: str) -> None:
 
 
 def register_dataset(name: str):
-    """Class decorator: @register_dataset("HouseCorr3D")"""
+    """Class decorator: @register_dataset("DenseMatcher")"""
     def decorator(cls):
         _REGISTRY_DATASETS[name] = cls
         return cls
@@ -415,7 +415,7 @@ class ConfigurableDataset(_TorchDataset):
 
         Called only for items that were dropped, so it may re-do work.  The
         generic answer is uninformative; subclasses override it to name the
-        missing input (see ``HouseCorr3D._sharded_drop_reason``).
+        missing input (each loader overrides ``_sharded_drop_reason``).
         """
         if self._load_item(idx) is None:
             return "item could not be loaded"

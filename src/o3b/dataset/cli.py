@@ -2,17 +2,17 @@
 o3b dataset CLI.
 
 Usage:
-  od3d_dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
-  od3d_dataset index  -d hc3d_object        [--db index.db] [--platform PLATFORM]
-  od3d_dataset init   -d hc3d_object        [--limit N] [--override] [--platform PLATFORM]
-  od3d_dataset viz    -d hc3d_object_pair   [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
+  od3d_dataset fetch  -d dm_object          [--url URL] [--platform PLATFORM]
+  od3d_dataset index  -d dm_object          [--db index.db] [--platform PLATFORM]
+  od3d_dataset init   -d dm_object          [--limit N] [--override] [--platform PLATFORM]
+  od3d_dataset viz    -d dm_object_pair     [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
 
-Pair datasets (hc3d_object_pair, hc3d_frame_object_pair) need no separate index
+Pair datasets (*_object_pair, *_frame_object_pair) need no separate index
 step — pairs are derived at load time from the base index (index.db / frames.db).
 
--d / --config accepts either a short name (e.g. housecorr3d_object_pair, resolved from
+-d / --config accepts either a short name (e.g. dm_object_pair, resolved from
 configs/dataset/) or a full path to a YAML file.  The YAML must contain a 'class_name'
-field that matches a registered dataset (e.g. 'HouseCorr3D').
+field that matches a registered dataset (e.g. 'DenseMatcher').
 When --platform is given the platform's path_datasets_raw / path_datasets_preprocess
 values override the corresponding variables in the dataset config before Hydra
 resolves any ${} interpolations.
@@ -30,7 +30,7 @@ def _resolve_dataset_config(name_or_path: str) -> Path:
     """Resolve a dataset config name or path to an absolute Path.
 
     Accepts either a full path (used as-is if it exists) or a short name like
-    'housecorr3d_object_pair' which is looked up in configs/dataset/.
+    'dm_object_pair' which is looked up in configs/dataset/.
     """
     p = Path(name_or_path)
     if p.exists():
@@ -87,7 +87,7 @@ def main(argv=None) -> None:
     def _add_config(p):
         p.add_argument(
             "-d", "--config", required=True, type=_resolve_dataset_config, metavar="DATASET",
-            help="Dataset config name (e.g. housecorr3d_object_pair, resolved from "
+            help="Dataset config name (e.g. dm_object_pair, resolved from "
                  "configs/dataset/) or full path to a YAML file",
         )
         p.add_argument(

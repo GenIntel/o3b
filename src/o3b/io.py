@@ -181,7 +181,7 @@ def _load_yaml_with_defaults(path: Path, overrides=None, resolve: bool = True) -
     """Load a YAML config, resolving the 'defaults:' list via OmegaConf merge.
 
     Supports:
-    - Plain string parents in the same directory: ``hc3d`` → loads ``hc3d.yaml``
+    - Plain string parents in the same directory: ``dm`` → loads ``dm.yaml``
     - ``_self_``: inserts the current file at this merge position
     - ``optional`` prefix: silently skips missing files
     - Dict-form group@package entries: ``credentials@credentials: default``

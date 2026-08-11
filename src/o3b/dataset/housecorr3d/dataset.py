@@ -13,6 +13,13 @@ from o3b.data.modalities import (
 )
 
 from o3b.dataset.housecorr3d.enum import OMNI6DPOSE_CATEGORIES
+# dataset-agnostic helpers, shared with the other loaders (aliased to their
+# original private names to keep the call sites in this module unchanged)
+from o3b.dataset.utils import (
+    download_progress as _download_progress,
+    load_kpts3d_by_id as _load_kpts3d_by_id,
+    want as _want,
+)
 
 _MESH_EXTS = {".obj", ".ply", ".glb", ".gltf", ".stl", ".fbx"}
 
@@ -1237,15 +1244,6 @@ class HouseCorr3D(ConfigurableDataset):
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _download_progress(block_num: int, block_size: int, total_size: int) -> None:
-    downloaded = block_num * block_size
-    if total_size > 0:
-        pct = min(downloaded / total_size * 100, 100)
-        bar = "#" * int(pct // 2)
-        sys.stdout.write(f"\r  [{bar:<50}] {pct:5.1f}%")
-        sys.stdout.flush()
-
-
 def _load_meta_file(path: Path, store: dict, fmt: str = "json") -> None:
     try:
         if fmt == "json":
@@ -1276,10 +1274,6 @@ def _to_text(value) -> Optional[str]:
     if isinstance(value, (dict, list)):
         return json.dumps(value)
     return str(value)
-
-
-def _want(name: str, mods: Optional[set]) -> bool:
-    return mods is None or name in mods
 
 
 def _n_frames(entry: Path) -> int:
@@ -1371,24 +1365,3 @@ def _compute_obj_sym_geometry(
         axis6d_sym = axis6d[mask][0].clone()                              # (6,)
 
     return kpts3d_syms, axis6d_sym
-
-
-def _load_kpts3d_by_id(
-    obj_id: str,
-    path_preprocess: Path,
-    tform: Optional[torch.Tensor],
-):
-    kpts_file = path_preprocess / "obj_kpts3d" / obj_id / "kpts3d.pt"
-    if not kpts_file.exists():
-        return None, None
-    try:
-        t = torch.load(kpts_file, map_location="cpu")  # (K, 4)
-        kpts3d = t[:, :3].float()
-        mask   = t[:, 3].bool()
-        if tform is not None:
-            scale  = tform[0, 0]
-            center = tform[:3, 3]
-            kpts3d = (kpts3d - center) / scale
-        return kpts3d, mask
-    except Exception:
-        return None, None

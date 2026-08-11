@@ -2,15 +2,15 @@
 o3b — o3b command-line interface.
 
 Usage:
-  o3b dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
-  o3b dataset index  -d hc3d_object        [--db FILE] [--platform PLATFORM] [--remote]
-  o3b dataset init   -d hc3d_object        [--limit N] [--override] [--platform PLATFORM] [--remote]
+  o3b dataset fetch  -d dm_object          [--url URL] [--platform PLATFORM]
+  o3b dataset index  -d dm_object          [--db FILE] [--platform PLATFORM] [--remote]
+  o3b dataset init   -d dm_object          [--limit N] [--override] [--platform PLATFORM] [--remote]
                                          [-c CATEGORIES] [-a ABLATIONS]
   # -c overrides the config's categories (and ${category}), e.g. -c backpack
   # -a starts one run per comma-separated ablation, each a fragment of extra
   #    init arguments — with --remote one sbatch job per ablation:
   #    o3b dataset init -d <ds> -p <platform> --remote -a "-c backpack,-c book"
-  o3b dataset viz    -d hc3d_object_pair   [--db FILE] [--limit N] [--object-id ID]
+  o3b dataset viz    -d dm_object_pair     [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
                                          [--debug] [--platform PLATFORM]
@@ -40,7 +40,7 @@ def _build_dataset_parser(sub):
         from o3b.dataset.cli import _resolve_dataset_config
         q.add_argument(
             "-d", "--config", required=True, type=_resolve_dataset_config, metavar="DATASET",
-            help="Dataset config name (e.g. housecorr3d_object_pair, resolved from "
+            help="Dataset config name (e.g. dm_object_pair, resolved from "
                  "configs/dataset/) or full path to a YAML file",
         )
         q.add_argument(
@@ -740,7 +740,7 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
 def _find_setup_script(local_repo_root: str = "") -> Path:
     """Locate setup_slurm.sh, which ships with o3b (<o3b>/setup/setup_slurm.sh).
 
-    It used to live in the superproject (housecorr3d/setup/), so that location is
+    It used to live in the superproject (<superproject>/setup/), so that location is
     still accepted as a fallback for checkouts whose o3b submodule predates the
     move. The script itself is repo-agnostic — it installs whatever REPO_URL /
     REPO_NAME it is handed.
@@ -924,8 +924,8 @@ def _run_platform_setup(args):
         local_repo_root = superproject if superproject else submodule_root
         repo_name = Path(local_repo_root).name
     except subprocess.CalledProcessError:
-        repo_name = "housecorr3d"
         local_repo_root = str(Path.cwd())
+        repo_name = Path(local_repo_root).name
 
     # The remote URL stays token-free: authentication on the cluster goes through
     # the GITHUB_TOKEN-backed credential helper installed by the setup script.
@@ -1007,7 +1007,7 @@ def _run_platform_setup(args):
         **install_flags,
         **env_layout["env_vars"],
         "DEPS_TAG":              deps_tag,
-        "REPO_URL":        repo_url,   # housecorr3d HTTPS URL, token-free
+        "REPO_URL":        repo_url,   # superproject HTTPS URL, token-free
         "REPO_NAME":       repo_name,  # derived from remote URL, e.g. HouseCorr3Dv2
         "GITHUB_TOKEN":    token,
         "BRANCH":          branch,
@@ -2849,6 +2849,11 @@ def _run_bench_fetch(args) -> None:
         writer.writerows(rows)
     print(f"\nSaved {len(rows)} row(s) → {output}")
 
+    # bare run names, one per line, so they can be copy-pasted from the console
+    print("\nFetched runs:")
+    for row in rows:
+        print(row["wandb_run"])
+
 
 def _run_bench_viz_qualit(args) -> None:
     """Load the bench table, look up qualitative images logged to W&B, and grid them.
@@ -3420,9 +3425,20 @@ def _run_bench_run(args) -> None:
     platform = args.platform if args.platform is not None else (default_platform or "default")
 
     # ── load base dataset config once (shared across all ablations) ───────────
+    # Loaded *unresolved* (resolve=False): the ablation's dataset keys are
+    # merged on top below and only then are the ${...} resolved, so overriding a
+    # key that the dataset config itself interpolates propagates — a
+    # `category: bread` from the ablation also updates the config's own
+    # `categories: [${category}]` and `sharded_name: ..._c${category}`.
+    # Resolving here instead would freeze those to the dataset config's own
+    # default category, and the run would silently evaluate that category's
+    # sharded cache.  Same contract as build_dataset_from_config_or_name(),
+    # which is what the method's train.dataset_train already goes through.
     overrides = _platform_to_dataset_overrides(platform)
     if default_dataset:
-        ds_base = _load_yaml_with_defaults(_resolve_dataset_config(default_dataset), overrides=overrides)
+        ds_base = _load_yaml_with_defaults(
+            _resolve_dataset_config(default_dataset), overrides=overrides, resolve=False
+        )
     else:
         ds_base = {}
 
@@ -3487,7 +3503,22 @@ def _run_bench_run(args) -> None:
         ds_merged = OmegaConf.to_container(
             OmegaConf.merge(OmegaConf.create(ds_base), OmegaConf.create(run_ds)),
             resolve=True,
-        ) if run_ds else dict(ds_base)
+        ) if run_ds else OmegaConf.to_container(OmegaConf.create(ds_base), resolve=True)
+
+        # A dataset config that carries its own `category` (the *_cat_sharded
+        # ones do, and derive `sharded_name` from it) must end up agreeing with
+        # the categories actually being evaluated — otherwise the run loads, or
+        # worse *builds*, another category's sharded cache under that category's
+        # name while reporting the metrics under this one.
+        _cat, _cats = ds_merged.get("category"), ds_merged.get("categories")
+        if _cat and isinstance(_cats, list) and len(_cats) == 1 and _cats[0] != _cat:
+            raise ValueError(
+                f"dataset config disagrees with itself: category={_cat!r} but "
+                f"categories={_cats!r} (sharded_name={ds_merged.get('sharded_name')!r}). "
+                f"Set `category` in the benchmark's dataset block (e.g. "
+                f"`dataset: {{category: ${{category}}}}`) so an ablation's category "
+                f"reaches the keys the dataset config interpolates from it."
+            )
 
         # ── optional training dataset (method.train.dataset_train) ────────────
         # The method creates this dataset lazily by dataset_name (mirroring its
