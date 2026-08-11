@@ -2452,7 +2452,8 @@ def _build_bench_parser(sub):
 # Shipped base64-encoded and run there, so it is always this version rather than
 # whatever the cluster checkout happens to hold.
 #
-# argv: <wandb_dir> <active_job_ids csv> <have_squeue 0|1> <min_age_hours|""> <delete 0|1>
+# argv: <wandb_dir> <active_job_ids csv> <have_squeue 0|1> <min_age_hours|"">
+#       <delete 0|1> <synced_just_ran 0|1>
 def _b64(text: str) -> str:
     """Shell-quoted base64 of *text*, for shipping a script through ssh intact.
 
@@ -2467,14 +2468,26 @@ def _b64(text: str) -> str:
 
 
 _WBCLEAN_PY = r'''
-import datetime, json, os, shutil, sys
+import datetime, glob, json, os, shutil, sys
 
-wandb_dir, active_csv, have_squeue, min_age, do_delete = sys.argv[1:6]
+wandb_dir, active_csv, have_squeue, min_age, do_delete, did_sync = sys.argv[1:7]
 active = {t for t in active_csv.split(",") if t}
 have_squeue = have_squeue == "1"
 min_age_h = float(min_age) if min_age else None
 do_delete = do_delete == "1"
+did_sync = did_sync == "1"
 now = datetime.datetime.now()
+
+
+def is_synced(path):
+    """Whether *path* has been uploaded, under either marker convention.
+
+    `wandb sync` writes its marker next to the datastore *inside* the run
+    directory (``<run>/run-<id>.wandb.synced``); older versions -- and the
+    adoption below -- put a sibling ``<run>.synced`` beside it.
+    """
+    return (os.path.exists(path + ".synced")
+            or bool(glob.glob(os.path.join(path, "*.wandb.synced"))))
 
 
 def job_id_of(path):
@@ -2502,10 +2515,26 @@ for name in sorted(os.listdir(wandb_dir)):
     path = os.path.join(wandb_dir, name)
     if not name.startswith("offline-run-") or not os.path.isdir(path):
         continue
-    synced = os.path.exists(path + ".synced")
+    synced = is_synced(path)
     jid = job_id_of(path)
     age = age_hours(name)
     young = min_age_h is not None and age is not None and age < min_age_h
+    adopted = False
+
+    if (not synced and did_sync and have_squeue
+            and jid is not None and jid not in active):
+        # `wandb sync` only marks a run synced once it reads an exit record, and
+        # a job that was killed (walltime, OOM, scancel) never writes one -- so
+        # such a run is re-uploaded in full on every single sync and can never
+        # be cleaned. The sync pass above ran to completion (a failure would
+        # have aborted this script) and the producing job is gone, so nothing
+        # more will ever be appended: record the upload ourselves.
+        try:
+            with open(path + ".synced", "w"):
+                pass
+            synced, adopted = True, True
+        except OSError:
+            pass
 
     # Order matters: every branch that cannot *prove* the run is over keeps it.
     if not synced:
@@ -2525,6 +2554,8 @@ for name in sorted(os.listdir(wandb_dir)):
         state, keep, why = "done", True, "newer than cutoff"
     else:
         state, keep, why = "done", False, "slurm job %s finished" % jid
+    if adopted:
+        why += " (killed without exit record, marked synced here)"
     rows.append((name, state, keep, why, path))
 
 counts = {}
@@ -2665,7 +2696,8 @@ def _run_bench_wbsync(args) -> None:
             f"printf '%s' {_b64(_WBCLEAN_PY)} | base64 -d > \"${{_wbclean}}\"",
             f'python3 "${{_wbclean}}" {wandb_dir} "${{_active}}" "${{_have_squeue}}" '
             f'"{"" if args.clean_old_hours is None else args.clean_old_hours}" '
-            f'"{1 if args.clean and not args.dry_run else 0}"',
+            f'"{1 if args.clean and not args.dry_run else 0}" '
+            f'"{0 if args.dry_run else 1}"',
             'rm -f "${_wbclean}"',
         ]
 
