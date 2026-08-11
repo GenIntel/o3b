@@ -50,7 +50,7 @@ filter_count_max: 1000
 # how the two instances' viewpoints combine:
 #   aligned → view i of A with view i of B   (~n_views pairs per instance pair)
 #   cross   → every view of A with every view of B  (~n_views^2)
-frame_pair_view_mode: aligned
+frame_pair_view_mode: cross # aligned
 img_size: 512
 sharded_shard_size: 100  # items per Arrow shard; lower = less peak memory during build
 

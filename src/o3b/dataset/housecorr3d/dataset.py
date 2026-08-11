@@ -184,9 +184,11 @@ class HouseCorr3D(ConfigurableDataset):
     def _build_frame_pairs(self) -> list[tuple[int, int]]:
         """Build cross-instance frame pairs within each category.
 
-        Frames are grouped by category, then by object instance (object_id).  Up
-        to ``frame_pair_views_per_instance`` evenly-spaced viewpoints are sampled
-        per instance (-1 = all available frames), and each instance is paired with
+        Frames are grouped by category, then by object instance (object_id).
+        Exactly ``frame_pair_views_per_instance`` evenly-spaced viewpoints are
+        sampled per instance (-1 = all available frames; instances with fewer
+        frames than that repeat frames so every instance spans the same view
+        index range), and each instance is paired with
         every *other* distinct instance of the same category as ordered (query,
         target) pairs.  This is independent of row ordering — unlike adjacent
         pairing it does not collapse when a category has long same-instance runs
@@ -198,7 +200,10 @@ class HouseCorr3D(ConfigurableDataset):
 
         Viewpoint-index combinations are emitted broad-coverage-first so that under
         the filter_count_max cap every instance pair gets its earliest combinations
-        before any gets a later one.
+        before any gets a later one (the cap therefore keeps per-instance-pair item
+        counts uniform to within one item), and the view indices themselves are
+        walked in recursive-bisection order so the kept prefix spans each
+        instance's full trajectory rather than its first few frames.
         """
         from itertools import permutations
 
@@ -208,20 +213,41 @@ class HouseCorr3D(ConfigurableDataset):
         cross     = self.cfg.frame_pair_view_mode == "cross"
 
         def _sample_views(rids: list[int]) -> list[int]:
-            """Up to n_views evenly-spaced viewpoints (all of them when use_all)."""
-            if use_all or len(rids) <= n_views:
+            """Exactly n_views evenly-spaced viewpoints (all of them when use_all).
+
+            Instances with fewer than n_views frames repeat frames rather than
+            returning a short list, so every instance spans the same view-index
+            range.  Without this, a short instance drops out of the later view
+            combinations (see the length guard below) and its instance pairs end
+            up with fewer items than the rest.
+            """
+            if use_all:
                 return rids
             step = len(rids) / n_views
-            return [rids[int(i * step)] for i in range(n_views)]
+            return [rids[min(int(i * step), len(rids) - 1)] for i in range(n_views)]
+
+        def _spread(n: int) -> list[int]:
+            """range(n) in recursive-bisection (bit-reversal) order: 0, n/2, n/4, …
+
+            Any prefix of this order spans the whole viewpoint range, so the
+            filter_count_max cut keeps views spread over each instance's
+            trajectory instead of clustering them at its start (in "cross" mode
+            the cap is reached after only ~8 of the sampled view indices).
+            """
+            bits = max(1, (n - 1).bit_length())
+            return sorted(range(n), key=lambda i: (int(f"{i:0{bits}b}"[::-1], 2), i))
 
         def _view_combos(max_v: int) -> list[tuple[int, int]]:
             """Viewpoint-index combinations, broad-coverage first."""
+            order = _spread(max_v)
             if cross:
-                return sorted(
+                base = sorted(
                     ((i, j) for i in range(max_v) for j in range(max_v)),
                     key=lambda ij: (max(ij), ij[0], ij[1]),
                 )
-            return [(i, i) for i in range(max_v)]
+            else:
+                base = [(i, i) for i in range(max_v)]
+            return [(order[i], order[j]) for i, j in base]
 
         # category -> { object_id -> [all frame row indices for that instance] }
         by_cat: dict = {}

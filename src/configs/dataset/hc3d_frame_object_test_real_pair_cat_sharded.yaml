@@ -5,7 +5,7 @@
 #   bread, facial_cream, hair_dryer, handbag, tooth_brush
 
 # 1) index frame object
-# o3b dataset index -d hc3d_frame_object_test --remote -p slurm_lmbl40
+# o3b dataset index -d hc3d_frame_object_test_real --remote -p slurm_lmbl40
 
 # 2) shard dataset
 # o3b dataset init -d hc3d_frame_object_test_real_pair_cat_sharded --remote -p slurm_lmbl40 --override
