@@ -52,6 +52,12 @@ class DatasetConfig:
     # marching-cubes remesh at path_preprocess/mesh/<mesh_type>/<obj_id>.glb
     mesh_type:     str                     = "default"
 
+    # object-frame variant: "raw" keeps the dataset's own object frame; any other
+    # value names a per-object rigid/similarity transform stored under
+    # path_preprocess/tform_obj/<tform_obj_type>/… that maps it into a canonical
+    # frame (UCO3D's canonical-pose labels are the case this exists for).
+    tform_obj_type: str                    = "raw"
+
     # which modalities to load (None = all available)
     modalities:        Optional[set[str]]  = None
     object_modalities: Optional[set[str]]  = None
@@ -110,6 +116,7 @@ class DatasetConfig:
             "batch_type":      self.batch_type.value,
             "scene_length":    self.scene_length,
             "mesh_type":       self.mesh_type,
+            "tform_obj_type":  self.tform_obj_type,
             "modalities":        sorted(self.modalities)        if self.modalities        else None,
             "object_modalities": sorted(self.object_modalities) if self.object_modalities else None,
             "categories":        self.categories,
@@ -144,6 +151,7 @@ class DatasetConfig:
             batch_type      = BatchType(d.get("batch_type", "frame_object")),
             scene_length    = d.get("scene_length", 8),
             mesh_type       = d.get("mesh_type", "default"),
+            tform_obj_type  = d.get("tform_obj_type", "raw"),
             modalities        = set(d["modalities"])        if d.get("modalities")        else None,
             object_modalities = set(d["object_modalities"]) if d.get("object_modalities") else None,
             categories       = d.get("categories"),
@@ -187,6 +195,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HouseCorr3D":  "o3b.dataset.housecorr3d.dataset",
     "DenseMatcher": "o3b.dataset.densematcher.dataset",
     "OpenTT":       "o3b.dataset.opentt.dataset",
+    "UCO3D":        "o3b.dataset.uco3d.dataset",
 }
 
 

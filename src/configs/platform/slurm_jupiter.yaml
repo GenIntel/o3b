@@ -83,6 +83,7 @@ path_ws: /e/project1/${.project}/sommer7
 path_home: /e/project1/${.project}/sommer7
 path_datasets_raw: /e/project1/${.project}/sommer7/datasets
 path_datasets_preprocess: /e/project1/${.project}/sommer7/datasets
+path_datasets_sshfs: ${.path_datasets_raw}
 path_exps: /e/project1/${.project}/sommer7/exps
 # Stage 2025: nvcc 12.6 and Python 3.12.3. Stage 2026 is the current default but
 # ships CUDA 13 / Python 3.13, which torch 2.6 has no wheels for.

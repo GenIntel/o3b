@@ -4,7 +4,6 @@ logger = logging.getLogger(__name__)
 import os
 import torch
 from tqdm import tqdm
-from sqlalchemy import create_engine
 from torch.utils.data import get_worker_info
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -45,6 +44,10 @@ class SQLTableDataset(torch.utils.data.IterableDataset):
         self.row_fn = row_fn
         if read_total_row_count:
             logger.info("creating sql engine...")
+            # imported here, not at module scope: sqlalchemy is only needed by
+            # SQLTableDataset, and a top-level import made o3b.cv.io — which
+            # every video-backed loader goes through — unimportable without it.
+            from sqlalchemy import create_engine
             engine = create_engine(self.db_url)
             logger.info("read total rows...")
             from sqlalchemy import text
@@ -62,6 +65,8 @@ class SQLTableDataset(torch.utils.data.IterableDataset):
         # total_rows = df.iloc[0, 0]
 
     def __iter__(self):
+        from sqlalchemy import create_engine
+
         worker_info = get_worker_info()
         engine = create_engine(self.db_url)
 

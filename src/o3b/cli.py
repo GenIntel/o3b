@@ -226,6 +226,75 @@ def _build_dataset_parser(sub):
         help="Delete all rows from the scoreboards table and exit.",
     )
 
+    p_sshfs = ds_sub.add_parser(
+        "sshfs",
+        help="Mount this dataset's directories from a remote platform over sshfs "
+             "(for data that only exists there, e.g. o3b dataset sshfs -d uco3d -p slurm)",
+    )
+    _add_config(p_sshfs)
+    p_sshfs.add_argument("-u", "--unmount", action="store_true",
+                         help="Unmount instead of mounting")
+    p_sshfs.add_argument("-n", "--dry-run", action="store_true",
+                         help="Print the sshfs / fusermount commands without running them")
+    p_sshfs.add_argument("--read-only", action="store_true",
+                         help="Mount read-only — blocks `o3b dataset index` / `init` from "
+                              "writing their caches under the remote path_preprocess")
+
+    p_cptf = ds_sub.add_parser(
+        "cp-tform-obj-type",
+        help="Copy this dataset's tform_obj_type directory to a new one under "
+             "<path_preprocess>/tform_obj/ (e.g. to start a labelling round from an "
+             "existing set of canonical poses)",
+    )
+    _add_config(p_cptf)
+    p_cptf.add_argument(
+        "-t", "--target", required=True, metavar="NAME",
+        help="Name of the new tform_obj_type subdirectory, e.g. can_pose_v5",
+    )
+    p_cptf.add_argument("-n", "--dry-run", action="store_true",
+                        help="Print the rsync that would run, without copying")
+    p_cptf.add_argument("--override", action="store_true",
+                        help="Copy into an existing target instead of refusing, and "
+                             "rewrite its dataset config")
+    p_cptf.add_argument("--no-config", action="store_true",
+                        help="Only copy the directory; do not write "
+                             "configs/dataset/<target>.yaml")
+
+    p_todb = ds_sub.add_parser(
+        "tform-obj-to-db",
+        help="Convert this dataset's per-sequence tform_obj/<type>/ directory into a "
+             "single tform_obj/<type>.db (10 MB and one inode instead of 454 MB and "
+             "230k; the loader prefers the .db when it exists)",
+    )
+    _add_config(p_todb)
+    p_todb.add_argument("--override", action="store_true",
+                        help="Rebuild the .db even if it already exists")
+    p_todb.add_argument("-j", "--workers", type=int, default=32, metavar="N",
+                        help="Threads reading the per-sequence files (default: 32)")
+    p_todb.add_argument("--remote", action="store_true",
+                        help="Run on the --platform's compute node instead of here — "
+                             "much faster than reading 114k files over an sshfs mount")
+
+    p_axes = ds_sub.add_parser(
+        "axes-tform-obj-type",
+        help="Per-category axis editor: view a category's objects in their canonical "
+             "frame, swap/flip the axes for the whole category, and write the result "
+             "back to its tform_obj store",
+    )
+    _add_config(p_axes)
+    p_axes.add_argument(
+        "-r", "--reference", default=None, metavar="DATASET",
+        help="Second dataset config shown alongside for comparison (read-only), "
+             "e.g. -r every9d_v3",
+    )
+    p_axes.add_argument("--objects", type=int, default=5, metavar="N",
+                        help="Objects shown per category (default: 5)")
+    p_axes.add_argument("--views", type=int, default=3, metavar="N",
+                        help="Frames shown per object (default: 3)")
+    p_axes.add_argument("--category", default=None, metavar="NAME",
+                        help="Start on this category")
+
+
 
 def _parse_categories(categories: str | None) -> list[str] | None:
     """Split a comma-separated -c value into a list of category names."""
@@ -424,7 +493,8 @@ def _run_dataset(args, parser=None, argv=None):
     if getattr(args, "ablation", None):
         _run_dataset_ablations(args, parser, argv)
         return
-    if args.dataset_command in ("index", "init") and getattr(args, "remote", False):
+    if (args.dataset_command in ("index", "init", "tform-obj-to-db")
+            and getattr(args, "remote", False)):
         _run_dataset_remote(args)
         return
     if args.dataset_command == "sync-shard":
@@ -438,6 +508,21 @@ def _run_dataset(args, parser=None, argv=None):
             dry_run=args.dry_run,
             compress=args.compress,
         )
+        return
+    if args.dataset_command == "sshfs":
+        from o3b.dataset.cli import _run_sshfs
+        _run_sshfs(args)
+        return
+    if args.dataset_command == "tform-obj-to-db":
+        from o3b.dataset.copy_tform_obj import run_tform_obj_to_db
+        run_tform_obj_to_db(args.config, platform=args.platform,
+                            override=args.override, workers=args.workers)
+        return
+    if args.dataset_command == "cp-tform-obj-type":
+        from o3b.dataset.copy_tform_obj import copy_tform_obj_type
+        copy_tform_obj_type(args.config, args.target, platform=args.platform,
+                            dry_run=args.dry_run, override=args.override,
+                            write_config=not args.no_config)
         return
     if args.dataset_command == "viz" and getattr(args, "remote", False):
         _run_dataset_viz_remote(args)
@@ -473,6 +558,17 @@ def _run_dataset(args, parser=None, argv=None):
             debug=args.debug,
             obj_centric=args.object_centric,
         )
+    elif args.dataset_command == "axes-tform-obj-type":
+        from o3b.dataset.axes_tform_obj import run_axes_editor
+        from o3b.dataset.cli import _load_class_from_config, _resolve_dataset_config
+        ref_cls = ref_cfg = None
+        if args.reference:
+            ref_cls, ref_cfg = _load_class_from_config(
+                _resolve_dataset_config(args.reference), overrides=overrides)
+        run_axes_editor(cls, cfg, reference=ref_cfg, ref_cls=ref_cls,
+                        n_objects=args.objects, n_views=args.views,
+                        category=args.category)
+        return
     elif args.dataset_command == "tform":
         from o3b.dataset.tform import run_tform_viewer
         run_tform_viewer(cls, cfg, limit=args.limit)

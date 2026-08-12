@@ -1,0 +1,17 @@
+# Every9D v3 — UCO3D under the *filtered* canonical-pose labels.
+#
+#   o3b dataset sshfs -d every9d_v3 -p slurm
+#   o3b dataset viz   -d every9d_v3
+#
+# Same tree as uco3d.yaml, so the mount from any of these configs serves them all.
+#
+# "filtered" drops the sequences whose canonical pose did not survive the
+# labelling review, which is why it covers fewer sequences than every9d_v4
+# (~114k vs ~123k) — the trade is coverage for label quality. every9d_v4 is the
+# same data with the unfiltered labels.
+
+defaults:
+  - uco3d
+  - _self_
+
+tform_obj_type: "all_canonical_poses_filtered_center3d_auto"

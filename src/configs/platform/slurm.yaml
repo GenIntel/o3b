@@ -32,6 +32,8 @@ path_ws: /work/dlclarge1/sommerl-od3d
 path_cuda: /usr/local/cuda-12.4
 path_datasets_raw: /work/dlclarge1/sommerl-od3d/datasets # sshfs maythux@192.168.xx.xx:/home/maythuxServ/Mounted ~/remoteDir
 path_datasets_preprocess: /work/dlclarge1/sommerl-od3d/datasets # for student: /misc/student/srinivap/datasets_preprocess
+# the data is already here — nothing to sshfs-mount when running on the cluster
+path_datasets_sshfs: ${.path_datasets_raw}
 
 # HF datasets writes its Arrow build cache to ~/.cache by default, which
 # exceeds the home quota on the cluster — use node-local /tmp instead

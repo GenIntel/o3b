@@ -1,0 +1,32 @@
+defaults:
+  - slurm_jupiter
+  - _self_
+
+# slurm_jupiter plus the trinity dependency group. Everything Grace-Hopper
+# specific (aarch64 wheels, cu126, torch_cuda_arch_list, setup_on_login, the
+# offline wandb mode) is inherited — see slurm_jupiter.yaml.
+#
+#   o3b platform setup -p slurm_jupiter_trinity
+#   o3b bench rrun -p slurm_jupiter_trinity -b hc3d_crsp3d_frame_object_pair_nn \
+#     -a method/frame_object/trinity.yaml,trinity/backbone/dinov2_vitl.yaml --pull
+#
+# `deps` names the env, so this installs into venv_py312_cu126_torch26_trinity
+# next to the plain venv_py312_cu126_torch26 slurm_jupiter builds.
+#
+# **LitePT does not work on this platform**, and that is an aarch64 limitation
+# rather than anything about trinity: it needs spconv, which publishes
+# manylinux_x86_64 / win_amd64 wheels only (spconv-cu126, spconv-cu124 and the
+# CPU-only spconv alike) and ships no sdist to build from. setup_slurm.sh warns
+# and carries on, then reports "LitePT will be an unknown model" at the end of
+# the trinity block. So on JUPITER run the other encoder:
+#
+#   -a method/frame_object/trinity.yaml,trinity/pcl_encoder/pointnet.yaml
+#
+# PointNet2 builds its pointnet2_cuda extension from source and is unaffected.
+# torch-scatter has no sbsa wheel either and is likewise compiled from source —
+# slow, but correct, since the login node shares the compute nodes' arch.
+deps:
+  #- diff3f
+  #- morpheus
+  #- genpose2
+  - trinity

@@ -35,6 +35,7 @@ INSTALL_MRF3DTOPO="${INSTALL_MRF3DTOPO:-false}"
 INSTALL_MORPHEUS="${INSTALL_MORPHEUS:-false}"
 INSTALL_MAGICPONY="${INSTALL_MAGICPONY:-false}"
 INSTALL_PARTFIELD="${INSTALL_PARTFIELD:-false}"
+INSTALL_TRINITY="${INSTALL_TRINITY:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
 GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
 GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
@@ -167,8 +168,13 @@ _git_setup_credentials() {
         git config --global --remove-section "${_k%.insteadof}" 2>/dev/null || true
     done
     if [ -n "${GITHUB_TOKEN}" ]; then
+        # The `[ -n "${GITHUB_TOKEN}" ] || exit 0` inside the helper matters in
+        # any *later* shell that does not export the token (an interactive login,
+        # and every shell on a workstation set up by setup_local.sh): answering
+        # with an empty password would fail the fetch outright, where declining
+        # lets git fall through to its other credential sources.
         git config --global --replace-all credential."https://github.com".helper \
-            '!f() { [ "$1" = get ] || exit 0; echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; }; f'
+            '!f() { [ "$1" = get ] || exit 0; [ -n "${GITHUB_TOKEN}" ] || exit 0; echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; }; f'
     else
         echo "WARNING: GITHUB_TOKEN is empty -- private github fetches will fail"
     fi
@@ -226,7 +232,10 @@ ENV_TAG="${PY_TAG}_${CUDA_TAG}_${TORCH_TAG}${DEPS_TAG:+_${DEPS_TAG}}"
 VENV_PATH="${VENV_PATH:-${REPO_PATH}/venv_${ENV_TAG}}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-${PATH_CONDA}/envs/${REPO_NAME}_${ENV_TAG}}"
 
-LOCK_FILE="${PATH_WS}/setup_slurm.lock"
+# Overridable because PATH_WS is the *parent* of the checkout for a local setup
+# (setup_local.sh), which points this at /tmp rather than dropping a lock file
+# next to the repo.
+LOCK_FILE="${LOCK_FILE:-${PATH_WS}/setup_slurm.lock}"
 exec 200>"${LOCK_FILE}"
 echo "--- acquiring setup lock (${LOCK_FILE}) ---"
 flock -x 200   # blocks until no other setup_slurm.sh holds the lock
@@ -383,9 +392,32 @@ if _is_true "${USE_CONDA}"; then
     fi
     echo "--- CUDA_HOME=${CUDA_HOME} ---"
 else
-    if [ ! -d "${VENV_PATH}" ]; then
-        echo "--- python${PYTHON_VERSION} -m venv ${VENV_PATH} ---"
-        "python${PYTHON_VERSION}" -m venv "${VENV_PATH}"
+    # bin/activate, not the directory: `python -m venv` writes the activate
+    # scripts *after* ensurepip, so an interpreter without the ensurepip module
+    # (debian/ubuntu split it into pythonX.Y-venv) leaves a directory that looks
+    # like a venv -- bin/python symlinks, pyvenv.cfg -- but has no activate and
+    # no pip. Testing for the directory then skips the retry and dies one line
+    # later on `source .../bin/activate: No such file or directory`.
+    if [ ! -f "${VENV_PATH}/bin/activate" ]; then
+        # --clear when a tree is already there: it can only be the wreckage of a
+        # failed creation (ensurepip never ran, so nothing is installed in it),
+        # and `venv` does not replace the bin/python symlinks it finds. Creating
+        # over 3.11 wreckage with 3.12 therefore yields a *hybrid* -- bin/python
+        # still 3.11, pyvenv.cfg and site-packages 3.12 -- which activates
+        # happily and installs everything where the interpreter cannot see it.
+        _venv_clear=""
+        if [ -d "${VENV_PATH}" ]; then
+            echo "--- ${VENV_PATH} has no bin/activate (earlier run failed); recreating ---"
+            _venv_clear="--clear"
+        fi
+        echo "--- python${PYTHON_VERSION} -m venv ${_venv_clear} ${VENV_PATH} ---"
+        if ! "python${PYTHON_VERSION}" -m venv ${_venv_clear} "${VENV_PATH}" || [ ! -f "${VENV_PATH}/bin/activate" ]; then
+            echo "ERROR: python${PYTHON_VERSION} could not create a venv at ${VENV_PATH}." >&2
+            echo "       Most likely the ensurepip module is missing:" >&2
+            echo "         sudo apt install python${PYTHON_VERSION}-venv" >&2
+            echo "       or point PYTHON_VERSION at an interpreter that has it." >&2
+            exit 1
+        fi
     fi
     echo "--- activate ${VENV_PATH} ---"
     # shellcheck source=/dev/null
@@ -577,6 +609,73 @@ if [ "${INSTALL_PARTFIELD}" = "true" ] || [ "${INSTALL_PARTFIELD}" = "True" ]; t
     pip install einops
     # pre-built wheel matching the torch+cuda combo, e.g. torch-2.6.0+cu124
     pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html"
+fi
+
+
+if [ "${INSTALL_TRINITY}" = "true" ] || [ "${INSTALL_TRINITY}" = "True" ]; then
+    # The two point-cloud encoders TrinityMethod can be configured with:
+    # LitePT (default) and PointNet2. Both need compiled CUDA extensions, so
+    # this group needs nvcc and is worth installing once per env rather than
+    # per run.
+    echo "--- pip install trinity deps ---"
+
+    # ── PointNet2 (o3b.model.pointnet2) ──────────────────────────────────────
+    # `from pointnet2.pointnet2_modules import Pointnet2ClsMSGFus` — the same
+    # CUDA-ops package the GenPose2 block builds, vendored under the obj_pose
+    # model. Non-editable so the compiled pointnet2_cuda extension lands in
+    # site-packages. Skipped when INSTALL_GENPOSE2 already built it.
+    if [ "${INSTALL_GENPOSE2}" = "true" ] || [ "${INSTALL_GENPOSE2}" = "True" ]; then
+        echo "--- pointnet2 already built by the genpose2 block ---"
+    else
+        echo "--- pip install pointnet2 (CUDA ops for o3b.model.pointnet2) ---"
+        pip install --no-build-isolation \
+            "third_party/o3b/src/o3b/model/obj_pose/genpose2/third_party/pointnet2"
+    fi
+
+    # ── LitePT (o3b.model.litept) ────────────────────────────────────────────
+    # litept.py imports spconv.pytorch, torch_scatter, addict, timm and (via
+    # serialization/) colorhash; the model registers itself as unavailable and
+    # logs a warning if any of them is missing, so a partial install here turns
+    # into "Unknown model 'LitePT'" at run time rather than an error now.
+    echo "--- pip install litept deps ---"
+    pip install addict timm colorhash
+
+    # spconv publishes one wheel per CUDA minor (spconv-cu124, -cu118, …); the
+    # generic `spconv` package is CPU-only. Both are published for
+    # manylinux_x86_64 and win_amd64 only, and there is no sdist to fall back
+    # on, so on aarch64 (JUPITER) neither install can succeed -- hence the
+    # second one is best-effort too, rather than killing the whole setup.
+    # LitePT then stays unavailable there; use trinity/pcl_encoder/pointnet.yaml.
+    if ! pip install "spconv-${CUDA_TAG}"; then
+        echo "WARNING: no spconv-${CUDA_TAG} wheel for $(uname -m); trying CPU-only spconv."
+        pip install spconv || echo "WARNING: no spconv at all for $(uname -m) -- LitePT will be unavailable."
+    fi
+
+    # pre-built wheel matching the torch+cuda combo, e.g. torch-2.6.0+cu124
+    pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html"
+
+    # LitePT's attention blocks (enc_attn) call flash_attn at forward time, on
+    # an import inside the function — so a missing flash-attn is a crash mid
+    # training, not a registration warning. It builds from source against this
+    # torch and is slow (tens of minutes); best-effort, since the conv-only
+    # stages run without it.
+    if ! MAX_JOBS="${MAX_JOBS:-4}" pip install --no-build-isolation flash-attn; then
+        echo "WARNING: flash-attn failed to build -- LitePT stages with enc_attn=True"
+        echo "         will fail at forward time. Configure enc_attn all-False, or"
+        echo "         install a wheel matching this torch/CUDA by hand."
+    fi
+
+    # PointROPE: LitePT's rotary-position-embedding CUDA kernels, vendored
+    # under the model. Built here so `from .pointrope import PointROPE` finds
+    # the compiled extension instead of falling back to a build_ext --inplace
+    # that never ran.
+    echo "--- pip install pointrope (CUDA kernels for LitePT) ---"
+    pip install --no-build-isolation \
+        "third_party/o3b/src/o3b/model/litept/pointrope"
+
+    python -c "from o3b.model.litept.litept import LitePT" >/dev/null 2>&1 \
+        && echo "--- LitePT imports OK ---" \
+        || echo "WARNING: LitePT still does not import -- 'LitePT' will be an unknown model."
 fi
 
 

@@ -21,6 +21,7 @@ dependencies = [
     "viser>=0.2",
     "trimesh>=4.0",
     "rtree",  # trimesh.nearest.on_surface (mesh-barycentric correspondence) needs it
+    "h5py",   # o3b.cv.io.read_depth_from_video — UCO3D stores depth as depth_maps.h5
 
     "wandb",
     "torch_geometric",

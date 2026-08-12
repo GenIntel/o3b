@@ -6,6 +6,8 @@ Usage:
   od3d_dataset index  -d dm_object          [--db index.db] [--platform PLATFORM]
   od3d_dataset init   -d dm_object          [--limit N] [--override] [--platform PLATFORM]
   od3d_dataset viz    -d dm_object_pair     [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
+  od3d_dataset sshfs  -d uco3d -p slurm     [--unmount] [--dry-run]
+  od3d_dataset cp-tform-obj-type -d every9d_v3 -t can_pose_v5 [-p slurm] [--dry-run]
 
 Pair datasets (*_object_pair, *_frame_object_pair) need no separate index
 step — pairs are derived at load time from the base index (index.db / frames.db).
@@ -56,6 +58,10 @@ def _platform_to_dataset_overrides(platform: str) -> list[str]:
         overrides.append(f"path_datasets_raw={raw}")
     if pre := plat_cfg.get("path_datasets_preprocess"):
         overrides.append(f"path_datasets_preprocess={pre}")
+    # Where datasets that live on another machine are reachable from *this*
+    # platform: the real directory on the cluster, an sshfs mount point locally.
+    if sshfs := plat_cfg.get("path_datasets_sshfs"):
+        overrides.append(f"path_datasets_sshfs={sshfs}")
     return overrides
 
 
@@ -75,6 +81,36 @@ def _load_class_from_config(config_path: Path, overrides: list[str] | None = Non
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+def _run_sshfs(args) -> None:
+    """`o3b dataset sshfs -d <dataset> -p <platform>`.
+
+    Sources come from the dataset config resolved *with* the platform's paths
+    (where the data really is), targets from the same config resolved without
+    them (where this machine expects to find it).  A platform with no ssh host
+    is a local one and there is nothing to mount.
+    """
+    from o3b.cli import _load_platform_config
+    from o3b.dataset.sshfs import mount
+
+    if args.platform == "default":
+        print("sshfs needs a remote platform, e.g. -p slurm.", file=sys.stderr)
+        sys.exit(1)
+
+    plat_cfg, _ = _load_platform_config(args.platform)
+    host = plat_cfg.get("ssh")
+    if not host or host is True:
+        print(f"Platform '{args.platform}' defines no ssh host to mount from.", file=sys.stderr)
+        sys.exit(1)
+
+    cfg_local  = DatasetConfig.from_yaml(args.config, overrides=_platform_to_dataset_overrides("default"))
+    cfg_remote = DatasetConfig.from_yaml(args.config, overrides=_platform_to_dataset_overrides(args.platform))
+
+    verb = "Unmounting" if args.unmount else "Mounting"
+    print(f"{verb} {args.config.stem} from {host} ({args.platform}):")
+    mount(cfg_local, cfg_remote, host, unmount=args.unmount, dry_run=args.dry_run,
+          read_only=getattr(args, "read_only", False))
 
 
 def main(argv=None) -> None:
@@ -136,6 +172,64 @@ def main(argv=None) -> None:
         help="Max objects to browse (default: 20)",
     )
 
+    p_sshfs = sub.add_parser(
+        "sshfs",
+        help="Mount the dataset's directories from a remote platform over sshfs",
+    )
+    _add_config(p_sshfs)
+    p_sshfs.add_argument("--unmount", "-u", action="store_true",
+                         help="Unmount instead of mounting")
+    p_sshfs.add_argument("--dry-run", action="store_true",
+                         help="Print the sshfs/fusermount commands without running them")
+    p_sshfs.add_argument("--read-only", action="store_true",
+                         help="Mount read-only (blocks 'index'/'init' writing their caches remotely)")
+
+    p_cptf = sub.add_parser(
+        "cp-tform-obj-type",
+        help="Copy this dataset's tform_obj_type directory to a new one under "
+             "<path_preprocess>/tform_obj/",
+    )
+    _add_config(p_cptf)
+    p_cptf.add_argument("-t", "--target", required=True, metavar="NAME",
+                        help="Name of the new tform_obj_type subdirectory, e.g. can_pose_v5")
+    p_cptf.add_argument("-n", "--dry-run", action="store_true",
+                        help="Print the rsync that would run, without copying")
+    p_cptf.add_argument("--override", action="store_true",
+                        help="Copy into an existing target instead of refusing, and "
+                             "rewrite its dataset config")
+    p_cptf.add_argument("--no-config", action="store_true",
+                        help="Only copy the directory; do not write configs/dataset/<target>.yaml")
+
+    p_todb = sub.add_parser(
+        "tform-obj-to-db",
+        help="Convert tform_obj/<type>/ into a single tform_obj/<type>.db",
+    )
+    _add_config(p_todb)
+    p_todb.add_argument("--override", action="store_true",
+                        help="Rebuild the .db even if it already exists")
+    p_todb.add_argument("-j", "--workers", type=int, default=32, metavar="N",
+                        help="Threads reading the per-sequence files (default: 32)")
+
+    p_axes = sub.add_parser(
+        "axes-tform-obj-type",
+        help="Per-category axis editor: view a category's objects in their canonical "
+             "frame, swap/flip the axes for the whole category, and write the result "
+             "back to its tform_obj store",
+    )
+    _add_config(p_axes)
+    p_axes.add_argument(
+        "-r", "--reference", default=None, metavar="DATASET",
+        help="Second dataset config shown alongside for comparison (read-only), "
+             "e.g. -r every9d_v3",
+    )
+    p_axes.add_argument("--objects", type=int, default=5, metavar="N",
+                        help="Objects shown per category (default: 5)")
+    p_axes.add_argument("--views", type=int, default=3, metavar="N",
+                        help="Frames shown per object (default: 3)")
+    p_axes.add_argument("--category", default=None, metavar="NAME",
+                        help="Start on this category")
+
+
     p_vis = sub.add_parser("viz", help="Show dataset summary and optionally render meshes")
     _add_config(p_vis)
     p_vis.add_argument(
@@ -161,11 +255,38 @@ def main(argv=None) -> None:
 
     args = parser.parse_args(argv)
     from o3b.cli import _categories_to_dataset_overrides
+
+    if args.command == "sshfs":
+        _run_sshfs(args)
+        return
+
+    if args.command == "tform-obj-to-db":
+        from o3b.dataset.copy_tform_obj import run_tform_obj_to_db
+        run_tform_obj_to_db(args.config, platform=args.platform,
+                            override=args.override, workers=args.workers)
+        return
+
+    if args.command == "cp-tform-obj-type":
+        from o3b.dataset.copy_tform_obj import copy_tform_obj_type
+        copy_tform_obj_type(args.config, args.target, platform=args.platform,
+                            dry_run=args.dry_run, override=args.override,
+                            write_config=not args.no_config)
+        return
+
     overrides = (_platform_to_dataset_overrides(args.platform)
                  + _categories_to_dataset_overrides(args.categories))
     cls, cfg = _load_class_from_config(args.config, overrides=overrides)
 
-    if args.command == "tform":
+    if args.command == "axes-tform-obj-type":
+        from o3b.dataset.axes_tform_obj import run_axes_editor
+        ref_cls = ref_cfg = None
+        if args.reference:
+            ref_cls, ref_cfg = _load_class_from_config(
+                _resolve_dataset_config(args.reference), overrides=overrides)
+        run_axes_editor(cls, cfg, reference=ref_cfg, ref_cls=ref_cls,
+                        n_objects=args.objects, n_views=args.views,
+                        category=args.category)
+    elif args.command == "tform":
         from o3b.dataset.tform import run_tform_viewer
         run_tform_viewer(cls, cfg, limit=args.limit)
     elif args.command == "fetch":

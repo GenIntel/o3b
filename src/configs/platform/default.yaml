@@ -8,6 +8,13 @@ ssh: False
 path_datasets_raw: /data/lmbraid19/sommerl/datasets # sshfs maythux@192.168.xx.xx:/home/maythuxServ/Mounted ~/remoteDir
 path_datasets_preprocess: /data/lmbraid19/sommerl/datasets # for student: /misc/student/srinivap/datasets_preprocess
 
+# Where datasets that are only stored on another machine become reachable from
+# this one. Locally that is an sshfs mount point (`o3b dataset sshfs -d <ds> -p
+# <platform>` mounts into it); on a platform that already holds the data it is
+# just that platform's dataset root. Deliberately *not* path_datasets_raw, so a
+# mount can never land on top of a partial local copy of the same dataset.
+path_datasets_sshfs: ${oc.env:HOME}/.o3b/sshfs/datasets
+
 path_ws: /data/lmbraid19/sommerl/workspace
 path_exps: ${.path_ws}/exps
 path_models: ${.path_ws}/models

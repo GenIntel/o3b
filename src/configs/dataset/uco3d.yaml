@@ -1,0 +1,115 @@
+# uCO3D — frame-object items from the od3d-preprocessed UCO3D tree.
+#
+# The data lives on the cluster and is far too large to copy; mount it first,
+# then everything below works locally:
+#
+#   o3b dataset sshfs -d uco3d -p slurm        # mount  (--unmount to release)
+#   o3b dataset viz   -d uco3d -c apple,mug    # browse in viser
+#
+# On the cluster the mount is a no-op — pass the platform instead:
+#
+#   o3b dataset viz   -d uco3d -p slurm
+#
+# Always pass -c over the mount: the index is a directory walk, ~1 s per
+# sequence over sshfs but milliseconds on the cluster's own filesystem. Cache it
+# there rather than here, and the mounted result is read back instantly:
+#
+#   o3b dataset index -d uco3d -p slurm_lmbl40 --remote   # → <path_preprocess>/frames.db
+#
+# uco3d.yaml keeps the raw sequence object frame. every9d_v3 / every9d_v4 build
+# on it with the two canonical-pose labellings.
+
+class_name: UCO3D
+
+# ~/.o3b/sshfs/datasets locally, /work/dlclarge1/sommerl-od3d/datasets on slurm
+# — the value below is the local default and `-p <platform>` overrides it, same
+# as path_datasets_raw does for the other datasets (see path_datasets_sshfs in
+# configs/platform/default.yaml). Deliberately *not* path_datasets_raw: that one
+# holds a partial local UCO3D download which an sshfs mount must not cover up.
+path_datasets_sshfs: ${oc.env:HOME}/.o3b/sshfs/datasets
+
+path_raw:        ${path_datasets_sshfs}/UCO3D
+path_preprocess: ${path_datasets_sshfs}/UCO3D_Preprocess
+
+item_type: frame_object
+split: train
+
+# Alpha-shape remesh of the segmented point cloud, at
+# <path_preprocess>/mesh/alpha500/meta_mask/meta/<category>/<sequence>/mesh.ply.
+# It is the only mesh_type built for UCO3D, and the only object geometry the
+# dataset has — there is no artist mesh.
+mesh_type: "alpha500"
+
+# Which object frame the poses and the mesh are expressed in:
+#   raw                                        the sequence's own SfM frame
+#   all_canonical_poses_filtered_center3d_auto category-canonical, filtered  (every9d_v3)
+#   all_canonical_poses_center3d_auto          category-canonical, unfiltered (every9d_v4)
+# Anything but "raw" is loaded from
+# <path_preprocess>/tform_obj/<tform_obj_type>/meta_mask/meta/<category>/<sequence>/tform_obj.pt
+# and sequences without that file are skipped.
+tform_obj_type: "raw"
+
+# od3d stores cam←obj in an OpenCV-style camera frame (+Y down, +Z forward);
+# o3b is OpenGL (+Y up, -Z forward).
+cam_tform4x4_cam_raw:
+  - [ 1.00000,  0.00000,  0.00000,  0.00000]
+  - [ 0.00000, -1.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000, -1.00000,  0.00000]
+  - [ 0.00000,  0.00000,  0.00000,  1.00000]
+
+
+# Permutation from the pose labelling's object axes into o3b's canonical
+# right/top/back → X/Y/Z. Only meaningful for the canonical tform_obj_types
+# (every9d_v3 / every9d_v4, which inherit this) — under tform_obj_type: raw each
+# sequence's SfM frame is arbitrary, so no fixed permutation applies.
+# `o3b dataset tform -d every9d_v3` is the interactive way to re-derive it.
+#
+# rows: right, top, back → X, Y, Z (canonical)
+#   right = -X_raw   (points the other way)
+#   top   =  Z_raw   } the labelling's top and back
+#   back  =  Y_raw   } are swapped relative to o3b's
+# det = +1, so this stays a proper rotation.
+obj_gl_tform4x4_obj_raw:
+  - [-1.00000,  0.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000,  1.00000,  0.00000]
+  - [ 0.00000,  1.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000,  0.00000,  1.00000]
+
+
+modalities:
+  - rgb                    # decoded from rgb_video.mp4 at the frame's timestamp
+  - depth                  # depth_maps.h5, metres
+  - depth_mask
+  - fo_mask                # mask_video.mkv (the object; UCO3D is one object per sequence)
+  - fo_mask_amodal         # mesh_type mesh rendered under the GT pose (a reconstruction,
+  - fo_mask_amodal_dt      #   not an artist mesh — it fills occlusions at that fidelity)
+  - cam_intr4x4
+  - cam_tform4x4_obj       # metric rigid cam←obj
+  - cam_tform4x4_obj_ncds  # task target: maps normalised object points → camera space
+  - cam_bbox2d             # required by the CropCamBBox2D transform
+  - cam_bbox3d
+  - obj_syms               # per-axis symmetry, derived from the category's orientation tree
+  - category
+  - mesh
+
+# UCO3D has no keypoint annotations.
+
+transform:
+  class_name: CropCamBBox2D
+  H: 512
+  W: 512
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+# Frames per sequence, sequences per category, and frames per category. Left
+# generous here and tightened by the every9d_* configs; without them a full
+# walk is 1076 categories x ~100k sequences x ~200 frames.
+extra:
+  frames_count_max_per_sequence: 16
+  sequences_count_max_per_category:
+
+filter_count_max: 2000   # per category when `categories` is set
+
+# All 1076 categories by default. `-c apple,mug` (or a list here) restricts it,
+# and is what makes a local run over the sshfs mount responsive.
+categories:

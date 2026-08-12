@@ -1,0 +1,24 @@
+defaults:
+  - slurm_lmbl40
+  - _self_
+
+# slurm_lmbl40 plus the trinity dependency group — nothing else differs, so the
+# partition/cpu/ram reasoning stays in slurm_lmbl40.yaml rather than being
+# copied here.
+#
+#   o3b platform setup -p slurm_lmbl40_trinity
+#   o3b bench rrun -p slurm_lmbl40_trinity -b hc3d_crsp3d_frame_object_pair_nn \
+#     -a method/frame_object/trinity.yaml,category/housecorr3d_5
+#
+# `deps` names the env: this installs into <repo>_py310_cu124_torch26_trinity
+# rather than the plain <repo>_py310_cu124_torch26 that slurm_lmbl40 uses, so
+# the CUDA extensions below cannot collide with another platform's env.
+deps:
+  #- diff3f
+  #- densematcher
+  #- genpose2
+  # TrinityMethod's two point-cloud encoders and their compiled CUDA extensions:
+  # LitePT (spconv-cu124, torch-scatter) and PointNet2 (pointnet2_cuda). Without
+  # them the model registers as unavailable and the run fails at build time —
+  # see setup_slurm.sh's INSTALL_TRINITY block.
+  - trinity
