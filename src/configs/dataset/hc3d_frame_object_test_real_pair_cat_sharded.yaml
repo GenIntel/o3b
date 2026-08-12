@@ -9,7 +9,7 @@
 
 # 2) shard dataset
 # o3b dataset init -d hc3d_frame_object_test_real_pair_cat_sharded --remote -p slurm_lmbl40 --override
-# o3b dataset init -d hc3d_frame_object_test_real_pair_cat_sharded -p slurm_lmbl40 --remote -a "-c bread,-c facial_cream,-c hair_dryer,-c handbag,-c tooth_brush"
+# o3b dataset init -d hc3d_frame_object_test_real_pair_cat_sharded --override -p slurm_lmbl40 --remote -a "-c bread,-c facial_cream,-c hair_dryer,-c handbag,-c tooth_brush"
 
 # 3) viz
 # o3b dataset viz -d hc3d_frame_object_test_real_pair_cat_sharded -p slurm_lmbl40 --remote
