@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -300,6 +301,32 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
 
 # ── indexing helpers ──────────────────────────────────────────────────────────
 
+def _align_frame_ctx(
+    cam_intr4x4_list,
+    cam_tform4x4_obj_list,
+    mask_path: Optional[Path],
+    mask_id: Optional[int],
+) -> Optional[tuple]:
+    """(cam_intr4x4, cam_tform4x4_obj, mask) for ObjMeshAligner, or None.
+
+    Called only for objects whose mesh extent contradicts their annotated box,
+    so the mask EXR read here stays off the normal indexing path (which reads
+    meta.json and nothing else).
+    """
+    if (cam_intr4x4_list is None or cam_tform4x4_obj_list is None
+            or mask_path is None or mask_id is None):
+        return None
+    mask = _load_mask_tensor(mask_path, int(mask_id))
+    if mask is None:
+        return None
+    import numpy as np
+    return (
+        np.asarray(cam_intr4x4_list, dtype=np.float64),
+        np.asarray(cam_tform4x4_obj_list, dtype=np.float64),
+        mask.numpy(),
+    )
+
+
 def _index_scene(
     cur,
     scene_dir: Path,
@@ -312,6 +339,7 @@ def _index_scene(
     filter_kpts: bool = False,
     categories: Optional[set] = None,
     cat_counts: Optional[dict] = None,
+    aligner: "Optional[object]" = None,
 ) -> tuple[int, int]:
     """Insert frame-object rows for one scene. Returns (n_total, n_matching).
 
@@ -324,6 +352,10 @@ def _index_scene(
     applied **per category** (tracked across scenes via the shared *cat_counts*
     dict); the scene stops once every requested category has reached its quota.
     Otherwise *limit* is a global cap and the scene stops once it is hit.
+
+    *aligner* is a shared :class:`ObjMeshAligner` resolving the per-object
+    mesh→annotation rotation stored in ``obj_tform4x4_obj_mesh``; it only reads
+    a mask for objects whose mesh extent contradicts ``meta.bbox_side_len``.
     """
     from o3b.dataset.housecorr3d._frame_utils import (
         build_cam_intr4x4,
@@ -419,6 +451,22 @@ def _index_scene(
             except Exception:
                 cam_tform4x4_obj_list = cam_tform4x4_world
 
+            # Rotation that carries the PAM mesh into the frame this pose
+            # annotation refers to, for the few objects whose mesh axes are a
+            # permutation of it (see ObjMeshAligner).  None for everything else.
+            obj_tform4x4_obj_mesh = None
+            if aligner is not None:
+                obj_tform4x4_obj_mesh = aligner.correction(
+                    object_id, bbox_side_len,
+                    frame_ctx=partial(
+                        _align_frame_ctx,
+                        cam_intr4x4_list=cam_intr4x4_list,
+                        cam_tform4x4_obj_list=cam_tform4x4_obj_list,
+                        mask_path=mask_path if mask_rpath else None,
+                        mask_id=mask_id,
+                    ),
+                )
+
             frame_id = f"{data_type}/{scene_name}/{frame_id_raw}/{obj_idx}"
 
             cur.execute(
@@ -428,8 +476,8 @@ def _index_scene(
                      category, object_id,
                      rgb_path, depth_path, mask_path,
                      cam_intr4x4, cam_tform4x4_obj, obj_size3d,
-                     obj_scale, has_kpts, is_valid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     obj_scale, obj_tform4x4_obj_mesh, has_kpts, is_valid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     frame_id, scene_name, obj_idx, mask_id, split, data_type,
@@ -438,7 +486,9 @@ def _index_scene(
                     json.dumps(cam_intr4x4_list)      if cam_intr4x4_list      is not None else None,
                     json.dumps(cam_tform4x4_obj_list) if cam_tform4x4_obj_list is not None else None,
                     json.dumps(bbox_side_len)          if bbox_side_len         is not None else None,
-                    obj_scale, has_kpts, is_valid,
+                    obj_scale,
+                    json.dumps(obj_tform4x4_obj_mesh) if obj_tform4x4_obj_mesh is not None else None,
+                    has_kpts, is_valid,
                 ),
             )
             n += 1

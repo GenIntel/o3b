@@ -579,6 +579,7 @@ class HouseCorr3D(ConfigurableDataset):
     ) -> None:
         """Index frame-object data from ROPE/SOPE into frames.db."""
         import sqlite3 as _sq
+        from o3b.dataset.housecorr3d._frame_utils import ObjMeshAligner
         from o3b.dataset.housecorr3d.frame_dataset import _index_scene
 
         path_raw        = cls._path_raw(cfg)
@@ -638,10 +639,25 @@ class HouseCorr3D(ConfigurableDataset):
                 cam_tform4x4_obj TEXT,
                 obj_size3d       TEXT,
                 obj_scale        REAL,
+                obj_tform4x4_obj_mesh TEXT,
                 has_kpts         INTEGER DEFAULT 0,
                 is_valid         INTEGER DEFAULT 1
             )
         """)
+        # CREATE TABLE IF NOT EXISTS leaves an index built before this column
+        # existed untouched, so add it in place rather than forcing --remove.
+        if "obj_tform4x4_obj_mesh" not in {
+            r[1] for r in cur.execute("PRAGMA table_info(frames)")
+        }:
+            cur.execute("ALTER TABLE frames ADD COLUMN obj_tform4x4_obj_mesh TEXT")
+
+        # Resolves the per-object mesh→annotation rotation (see ObjMeshAligner);
+        # shared across scenes so each object is decided once, and cached on
+        # disk so re-indexing does not re-read every mesh.
+        aligner = ObjMeshAligner(
+            path_object_meshes=path_raw / "PAM" / "object_meshes",
+            cache_path=path_preprocess / "obj_mesh_align.json",
+        )
 
         from tqdm import tqdm
 
@@ -687,7 +703,7 @@ class HouseCorr3D(ConfigurableDataset):
                     cur=cur, scene_dir=scene_dir, scene_name=scene_dir.name,
                     split="test", data_type="real", path_raw=path_raw,
                     kpts_preprocess=kpts_preprocess, limit=_scene_limit(), filter_kpts=filter_kpts,
-                    categories=categories, cat_counts=cat_counts,
+                    categories=categories, cat_counts=cat_counts, aligner=aligner,
                 )
                 bar.set_postfix(rows_written=rows_written, rows_loadable=rows_loadable)
                 if _update(n_total, n_match):
@@ -717,16 +733,31 @@ class HouseCorr3D(ConfigurableDataset):
                     cur=cur, scene_dir=scene_dir, scene_name=scene_name,
                     split=split_name, data_type="synthetic", path_raw=path_raw,
                     kpts_preprocess=kpts_preprocess, limit=_scene_limit(), filter_kpts=filter_kpts,
-                    categories=categories, cat_counts=cat_counts,
+                    categories=categories, cat_counts=cat_counts, aligner=aligner,
                 )
                 bar.set_postfix(rows_written=rows_written, rows_loadable=rows_loadable)
                 if _update(n_total, n_match):
                     bar.close(); break
 
+        # Backfill: an object's rotation is only decided after a few of its
+        # frames have been scored, so earlier rows (and rows an earlier index
+        # run wrote, which INSERT OR IGNORE leaves alone) still carry NULL.
+        for oid, corr in aligner.resolved_corrections.items():
+            cur.execute(
+                "UPDATE frames SET obj_tform4x4_obj_mesh = ? WHERE object_id = ?",
+                (json.dumps(corr), oid),
+            )
+
         con.commit()
         con.close()
+        aligner.save_cache()
         print(f"\nDone. {rows_written} frame-object rows written, "
               f"{rows_loadable} of them loadable ({loadable_note}) → {db_path}")
+        if aligner.n_corrected or aligner.n_unresolved:
+            print(f"mesh alignment: {aligner.n_corrected} object(s) given a "
+                  f"mesh→annotation rotation, {aligner.n_unresolved} left "
+                  f"uncorrected (mesh and annotated box disagree, but no "
+                  f"rotation fits the mask better) → {aligner.cache_path}")
 
     @classmethod
     def visualize(
@@ -928,7 +959,8 @@ class HouseCorr3D(ConfigurableDataset):
 
         Object geometry (mesh, kpts, tform) is delegated to _load_object_from_row,
         which applies obj_gl_tform4x4_obj_raw, mesh_type conversion, and normalises kpts to
-        NCDS space.  obj_size is rescaled from mesh units to metres via obj_scale.
+        NCDS space.  obj_size is rescaled from mesh units to metres via the scale
+        derived in _obj_scale_from_row.
         cam_tform4x4_obj_ncds = cam_tform4x4_obj_metric @ obj_ncds0c_tform4x4_obj
         maps NCDS → camera space in metric units.
         """
@@ -947,6 +979,31 @@ class HouseCorr3D(ConfigurableDataset):
             trgt_object    = trgt_fo,
         )
 
+    def _obj_scale_from_row(self, row, obj) -> float:
+        """Metres per mesh unit for this row's object.
+
+        The ``obj_scale`` column holds ``meta.scale``, which converts the
+        *original* scan into metres — but PAM ships the ROPE objects already
+        converted, so applying it again shrinks them 1000× and collapses
+        cam_bbox3d, obj_size, the amodal mask and keypoint visibility while the
+        mask-derived cam_bbox2d stays correct.  The id prefix cannot tell the
+        two apart (SOPE references ``real-*`` objects whose meshes *are* in
+        millimetres), but ``obj_size3d`` (= ``meta.bbox_side_len``) is the
+        metric extent in both regimes, so its ratio against the mesh's own
+        longest side is the scale that holds for both.  Falls back to the stored
+        value when there is no mesh to measure against.
+        """
+        fallback = float(row.get("obj_scale") or 1.0)
+        size3d = row.get("obj_size3d")
+        mesh_size = float(obj.obj_size) if (obj is not None and obj.obj_size) else 0.0
+        if not size3d or mesh_size <= 0:
+            return fallback
+        try:
+            longest = max(float(s) for s in json.loads(size3d))
+        except Exception:
+            return fallback
+        return (longest / mesh_size) if longest > 0 else fallback
+
     def _load_frame_object_by_rowidx(self, row_idx: int) -> FrameObject:
         from o3b.dataset.housecorr3d.frame_dataset import (
             _load_image_tensor, _load_depth_tensor, _load_mask_tensor,
@@ -955,12 +1012,12 @@ class HouseCorr3D(ConfigurableDataset):
         row  = self._frame_rows[row_idx]
         mods = self.cfg.modalities
         oid       = row.get("object_id", "")
-        obj_scale = float(row.get("obj_scale") or 1.0)
 
         # ── Object first: mesh, tform, kpts, bbox3d ───────────────────────────
         obj_row = self._obj_by_id.get(oid)
         obj     = self._load_object_from_row(obj_row) if obj_row is not None else None
         tform   = obj.obj_ncds0c_tform4x4_obj if obj is not None else None
+        obj_scale = self._obj_scale_from_row(row, obj)
 
         # ── frame modalities ──────────────────────────────────────────────────
         rgb = _load_image_tensor(self.path_raw / row["rgb_path"]) \
@@ -1008,6 +1065,12 @@ class HouseCorr3D(ConfigurableDataset):
             U, _, Vh = torch.linalg.svd(cam_tform4x4_obj_raw[:3, :3].float())
             cam_tform4x4_obj_metric = cam_tform4x4_obj_raw.clone().float()
             cam_tform4x4_obj_metric[:3, :3] = (U @ Vh) * obj_scale
+
+        # Right-multiply: per-object mesh→annotation rotation, for the instances
+        # whose PAM mesh axes are a permutation of the frame the pose refers to
+        # (resolved at index time, see ObjMeshAligner). Applied to the pose only,
+        # so object space stays in the mesh's own frame.
+        cam_tform4x4_obj_metric = self._apply_obj_mesh_tform(cam_tform4x4_obj_metric, row)
 
         # obj_gl_tform4x4_obj_raw rotates the metric object frame by T into the canonical
         # orientation (applied on both sides of obj_ncds0c_tform4x4_obj in
@@ -1100,9 +1163,24 @@ class HouseCorr3D(ConfigurableDataset):
 
     # ── occlusion-aware keypoint visibility helpers ───────────────────────────
 
-    def _cam_tform4x4_obj_metric(self, row) -> "Optional[torch.Tensor]":
+    def _apply_obj_mesh_tform(self, metric, row):
+        """Fold a row's ``obj_tform4x4_obj_mesh`` into the metric cam←obj pose.
+
+        Right-multiplied *before* obj_gl_tform4x4_obj_raw's ``@ inv(T)``, so it
+        acts in the raw mesh frame the aligner resolved it in.
+        """
+        corr = row.get("obj_tform4x4_obj_mesh")
+        if metric is None or not corr:
+            return metric
+        try:
+            return metric @ torch.tensor(json.loads(corr), dtype=torch.float32)
+        except Exception:
+            return metric
+
+    def _cam_tform4x4_obj_metric(self, row, obj=None) -> "Optional[torch.Tensor]":
         """Canonical-metric cam←obj SE(3) for a frame row (SVD-normalised R, obj_scale
-        embedded, obj_gl_tform4x4_obj_raw applied as @ inv(T) to match _load_object_from_row)."""
+        embedded, obj_tform4x4_obj_mesh folded in, obj_gl_tform4x4_obj_raw applied
+        as @ inv(T) to match _load_object_from_row)."""
         raw = row.get("cam_tform4x4_obj")
         if not raw:
             return None
@@ -1110,10 +1188,11 @@ class HouseCorr3D(ConfigurableDataset):
         if self.cfg.cam_tform4x4_cam_raw is not None:
             C = torch.tensor(self.cfg.cam_tform4x4_cam_raw, dtype=torch.float32)
             M = C @ M
-        obj_scale = float(row.get("obj_scale") or 1.0)
+        obj_scale = self._obj_scale_from_row(row, obj)
         U, _, Vh = torch.linalg.svd(M[:3, :3].float())
         out = M.clone().float()
         out[:3, :3] = (U @ Vh) * obj_scale
+        out = self._apply_obj_mesh_tform(out, row)
         if self.cfg.obj_gl_tform4x4_obj_raw is not None:
             from o3b.cv.geometry.transform import inv_tform4x4
             T = torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=torch.float32)
@@ -1126,11 +1205,13 @@ class HouseCorr3D(ConfigurableDataset):
         obj_row = self._obj_by_id.get(oid)
         if obj_row is None:
             return None
-        metric = self._cam_tform4x4_obj_metric(row)
-        if metric is None:
-            return None
         obj = self._load_object_from_row(obj_row)
         if obj is None or obj.mesh is None:
+            return None
+        # obj first: the metric pose's scale is derived from the mesh (see
+        # _obj_scale_from_row)
+        metric = self._cam_tform4x4_obj_metric(row, obj)
+        if metric is None:
             return None
         tform = obj.obj_ncds0c_tform4x4_obj
         ncds = (metric @ tform.float()) if tform is not None else metric
@@ -1235,7 +1316,7 @@ class HouseCorr3D(ConfigurableDataset):
         R, t = ncds[:3, :3], ncds[:3, 3]
         verts_cam = (R @ obj.mesh.verts.float().t()).t() + t
 
-        obj_scale = float(row.get("obj_scale") or 1.0)
+        obj_scale = self._obj_scale_from_row(row, obj)
         obj_size  = (obj.obj_size * obj_scale) if obj.obj_size is not None else None
 
         # which vertices are visible (front-most surface in the all-objects render)
