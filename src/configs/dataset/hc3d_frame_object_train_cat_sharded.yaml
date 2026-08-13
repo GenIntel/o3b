@@ -24,7 +24,8 @@
 # o3b dataset viz -d hc3d_frame_object_train_cat_sharded -p slurm_lmbl40 --remote
 
 # 4b) upload the built shards to the HuggingFace Hub — one repo per category,
-#     ${huggingface_name}; --override replaces an already-uploaded cache
+#     ${huggingface_name}, converted to Parquet (one config per sharded_name) so
+#     the repo gets a dataset viewer + Croissant; --override replaces it
 # o3b dataset hf-upload -d hc3d_frame_object_train_cat_sharded --override -p slurm_lmbl40 --remote -a "-c backpack"
 #     …and, on the consuming machine, set use_huggingface: true to pull them
 #     into <path_preprocess>/sharded/ instead of building them from raw data
@@ -84,12 +85,13 @@ sharded_override: false
 
 
 # HuggingFace Hub repo holding this category's sharded cache — one repo per
-# category (see hf-upload above), with the cache in a folder named after
-# ${sharded_name}, so caches that differ only in shard parameters (n / b / r /
-# mesh_type) live side by side in it.
-# use_huggingface: true downloads that folder into
-# <path_preprocess>/sharded/<sharded_name> instead of building it from the raw
-# data, so no index / SOPE files are needed on that machine.
+# category (see hf-upload above). The cache is uploaded as Parquet under a config
+# named after ${sharded_name}, so caches that differ only in shard parameters
+# (n / b / r / mesh_type) live side by side in it, and the repo gets a dataset
+# viewer + Croissant file (raw save_to_disk .arrow gets neither).
+# use_huggingface: true loads that config from the hub (into the datasets cache)
+# instead of building it from the raw data, so no index / SOPE files are
+# needed on that machine.
 huggingface_name: GenIntel/hc3d_frame_object_train_cat_sharded_c${category}
 use_huggingface: false
 

@@ -352,12 +352,15 @@ class ConfigurableDataset(_TorchDataset):
             ItemType.SCENE_OBJECT: SceneObject,
         }[self.cfg.item_type]
 
-    def _sharded_dir(self) -> Path:
+    def _sharded_dir(self) -> Optional[Path]:
+        """Where the cache lives locally, or None without a path_preprocess.
+
+        None is a normal state for ``use_huggingface`` on a machine that only
+        consumes the hub copy and has no dataset root of its own; building a
+        cache still requires the directory (``_setup_sharded`` raises there).
+        """
         if self.cfg.path_preprocess is None:
-            raise ValueError(
-                "sharded_name is set but path_preprocess is None; "
-                "cannot resolve the sharded dataset location."
-            )
+            return None
         return Path(self.cfg.path_preprocess) / "sharded" / self.cfg.sharded_name
 
     def _setup_sharded(self) -> None:
@@ -369,7 +372,7 @@ class ConfigurableDataset(_TorchDataset):
         )
 
         path = self._sharded_dir()
-        if path.exists() and not self.cfg.sharded_override:
+        if path is not None and path.exists() and not self.cfg.sharded_override:
             print(f"Loading sharded dataset from {path}")
             self._sharded = read_sharded_dataset(path)
             self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
@@ -377,12 +380,19 @@ class ConfigurableDataset(_TorchDataset):
 
         if self.cfg.use_huggingface:
             # Not on disk (or sharded_override forces a refresh): fetch this
-            # config's folder from the hub instead of building it from raw data.
-            from o3b.dataset.huggingface import download_sharded
-            path = download_sharded(self.cfg)
-            self._sharded = read_sharded_dataset(path)
-            self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
+            # config's Parquet shards from the hub instead of building them from
+            # raw data.  Same triple as the local path, so nothing below cares.
+            from o3b.dataset.huggingface import load_from_hub
+            (self._sharded, self._sharded_meshes,
+             self._sharded_mesh_rows) = load_from_hub(self.cfg)
             return
+
+        if path is None:
+            raise ValueError(
+                "sharded_name is set but path_preprocess is None; cannot resolve "
+                "where to build the sharded dataset (set use_huggingface: true to "
+                "load it from the hub instead)."
+            )
 
         from tqdm import tqdm
 
@@ -587,7 +597,11 @@ class ConfigurableDataset(_TorchDataset):
         n = len(dataset)
         print(f"Initialised {cls.__name__} (item_type={ItemType(cfg.item_type).value}) — {n} items")
         if getattr(dataset, "_sharded", None) is not None:
-            print(f"  sharded cache: {dataset._sharded_dir()}")
+            local = dataset._sharded_dir()
+            from_hub = cfg.use_huggingface and (local is None or not local.exists())
+            print(f"  sharded cache: "
+                  + (f"{cfg.huggingface_name} (config {cfg.sharded_name}) on the "
+                     f"HuggingFace Hub" if from_hub else str(local)))
 
         if limit > 0 and n:
             from tqdm import tqdm
