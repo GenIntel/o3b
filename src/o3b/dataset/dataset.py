@@ -100,6 +100,15 @@ class DatasetConfig:
     # (0 = build sequentially in the main process)
     sharded_num_workers: int                = 0
 
+    # HuggingFace Hub repo holding this config's sharded cache, in a folder named
+    # after sharded_name.  Category-sharded configs interpolate ${category} into
+    # it (e.g. "GenIntel/hc3d_frame_object_train_cat_sharded_cbackpack"), giving
+    # one repo per category.  `o3b dataset hf-upload` pushes a built cache there;
+    # use_huggingface=True downloads it instead of building it from raw data
+    # (into the same <path_preprocess>/sharded/<sharded_name> a local build uses).
+    huggingface_name:  Optional[str]        = None
+    use_huggingface:   bool                 = False
+
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
 
@@ -135,6 +144,8 @@ class DatasetConfig:
             "sharded_override":   self.sharded_override,
             "sharded_shard_size": self.sharded_shard_size,
             "sharded_num_workers": self.sharded_num_workers,
+            "huggingface_name":   self.huggingface_name,
+            "use_huggingface":    self.use_huggingface,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -171,6 +182,8 @@ class DatasetConfig:
             sharded_override     = bool(d.get("sharded_override", False)),
             sharded_shard_size   = int(d.get("sharded_shard_size", 1000)),
             sharded_num_workers  = int(d.get("sharded_num_workers", 0)),
+            huggingface_name     = d.get("huggingface_name"),
+            use_huggingface      = bool(d.get("use_huggingface", False)),
             extra           = d.get("extra", {}),
         )
 
@@ -299,7 +312,19 @@ class ConfigurableDataset(_TorchDataset):
         self._sharded_mesh_rows = None   # {object_id: sidecar row index}
         self._transform = _build_transform(cfg.transform)
         self._sharded_transform = _build_transform(cfg.sharded_transform)
-        self._setup()
+        if cfg.use_huggingface and cfg.sharded_name:
+            # Items come from the hub, so the raw data and the SQLite index this
+            # normally reads are optional here — a machine that only downloads
+            # the shards has neither.  Failures are reported, not raised: nothing
+            # below the shards is needed to serve items.
+            try:
+                self._setup()
+            except Exception as e:
+                print(f"WARNING: {type(self).__name__}._setup() failed "
+                      f"({type(e).__name__}: {e}); continuing with the "
+                      f"HuggingFace shards alone.")
+        else:
+            self._setup()
         if cfg.sharded_name:
             self._setup_sharded()
 
@@ -346,6 +371,15 @@ class ConfigurableDataset(_TorchDataset):
         path = self._sharded_dir()
         if path.exists() and not self.cfg.sharded_override:
             print(f"Loading sharded dataset from {path}")
+            self._sharded = read_sharded_dataset(path)
+            self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
+            return
+
+        if self.cfg.use_huggingface:
+            # Not on disk (or sharded_override forces a refresh): fetch this
+            # config's folder from the hub instead of building it from raw data.
+            from o3b.dataset.huggingface import download_sharded
+            path = download_sharded(self.cfg)
             self._sharded = read_sharded_dataset(path)
             self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
             return

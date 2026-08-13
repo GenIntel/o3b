@@ -14,6 +14,9 @@
 # 3) viz
 # o3b dataset viz -d hc3d_frame_object_test_real_pair_cat_sharded -p slurm_lmbl40 --remote
 
+# 3b) upload the built shards to the HuggingFace Hub (one folder per category)
+# o3b dataset hf-upload -d hc3d_frame_object_test_real_pair_cat_sharded --override -p slurm_lmbl40 --remote -a "-c bread,-c facial_cream,-c hair_dryer,-c handbag,-c tooth_brush"
+
 # 4) copy the built shards to another platform
 # o3b dataset sync-shard -d hc3d_frame_object_test_real_pair_cat_sharded -s slurm -t slurm_jupiter -c '*'
 
@@ -27,3 +30,8 @@ filter_is_real: true
 
 # distinct from the synthetic sharded cache (same fields, different source data)
 sharded_name: hc3d_frame_object_test_real_n${filter_count_max}_b${sharded_shard_size}_r${img_size}_m${mesh_type}_c${category}
+
+# own hub repo per category, like the cache itself (inherited from the synthetic
+# pair config otherwise, which would mix the two datasets into one repo)
+huggingface_name: GenIntel/hc3d_frame_object_test_real_pair_cat_sharded_c${category}
+use_huggingface: false

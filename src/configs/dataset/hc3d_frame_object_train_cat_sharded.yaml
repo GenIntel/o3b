@@ -23,6 +23,12 @@
 # 4) viz
 # o3b dataset viz -d hc3d_frame_object_train_cat_sharded -p slurm_lmbl40 --remote
 
+# 4b) upload the built shards to the HuggingFace Hub — one repo per category,
+#     ${huggingface_name}; --override replaces an already-uploaded cache
+# o3b dataset hf-upload -d hc3d_frame_object_train_cat_sharded --override -p slurm_lmbl40 --remote -a "-c backpack"
+#     …and, on the consuming machine, set use_huggingface: true to pull them
+#     into <path_preprocess>/sharded/ instead of building them from raw data
+
 # 5) copy the built shards to another platform (runs on this machine, which is the
 #    only host that can reach both clusters; -c '*' takes every category at once,
 #    -n previews). Re-runs resume; an existing identical target is skipped.
@@ -75,6 +81,17 @@ transform:
 
 sharded_name: hc3d_frame_object_train_n${filter_count_max}_b${sharded_shard_size}_r${img_size}_m${mesh_type}_c${category}
 sharded_override: false
+
+
+# HuggingFace Hub repo holding this category's sharded cache — one repo per
+# category (see hf-upload above), with the cache in a folder named after
+# ${sharded_name}, so caches that differ only in shard parameters (n / b / r /
+# mesh_type) live side by side in it.
+# use_huggingface: true downloads that folder into
+# <path_preprocess>/sharded/<sharded_name> instead of building it from the raw
+# data, so no index / SOPE files are needed on that machine.
+huggingface_name: GenIntel/hc3d_frame_object_train_cat_sharded_c${category}
+use_huggingface: false
 
 # overrides the (already-lowered) default from hc3d_frame_object_pair.yaml;
 # kept explicit here since this is the config that actually triggers the build

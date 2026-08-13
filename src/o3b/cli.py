@@ -10,6 +10,12 @@ Usage:
   # -a starts one run per comma-separated ablation, each a fragment of extra
   #    init arguments — with --remote one sbatch job per ablation:
   #    o3b dataset init -d <ds> -p <platform> --remote -a "-c backpack,-c book"
+  o3b dataset hf-upload -d <ds>_sharded    [--override] [--public] [--dry-run]
+                                         [--platform PLATFORM] [-c CATEGORIES]
+                                         [--remote] [-a ABLATIONS]
+  # pushes <path_preprocess>/sharded/<sharded_name> to the config's
+  # 'huggingface_name' repo, one folder per category; a config with
+  # 'use_huggingface: true' loads its shards from there instead of building them
   o3b dataset viz    -d dm_object_pair     [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
@@ -99,6 +105,38 @@ def _build_dataset_parser(sub):
              'arguments (e.g. -a "-c backpack,-c book"). One run is started per '
              "ablation — a separate sbatch job each with --remote, otherwise "
              "sequentially in this process",
+    )
+
+    p_hf = ds_sub.add_parser(
+        "hf-upload",
+        help="Upload the built sharded cache to the config's 'huggingface_name' repo "
+             "on the HuggingFace Hub (one folder per ${category}); `use_huggingface: "
+             "true` then loads it from there instead of building it",
+    )
+    _add_config(p_hf)
+    p_hf.add_argument(
+        "--override", action="store_true",
+        help="Replace the folder if the repo already holds it (stale files removed)",
+    )
+    p_hf.add_argument(
+        "--public", action="store_true",
+        help="Create the repo public when it does not exist yet (default: private). "
+             "Ignored for a repo that already exists",
+    )
+    p_hf.add_argument(
+        "-n", "--dry-run", action="store_true",
+        help="Show what would be uploaded (path, size, target URL) without uploading",
+    )
+    p_hf.add_argument(
+        "--remote", action="store_true",
+        help="Run the upload on the --platform's compute node via `o3b platform run` "
+             "(where the shards are), instead of from here",
+    )
+    p_hf.add_argument(
+        "-a", "--ablation", default=None, metavar="ABLATIONS",
+        help="Comma-separated ablations, each a fragment of extra `o3b dataset "
+             'hf-upload` arguments (e.g. -a "-c backpack,-c book"); one upload runs '
+             "per ablation — a separate sbatch job each with --remote",
     )
 
     p_sync = ds_sub.add_parser(
@@ -372,8 +410,13 @@ def _run_dataset_remote(args) -> None:
         parts += ["--max", str(args.max_index)]
     if command == "init" and args.limit:
         parts += ["--limit", str(args.limit)]
-    if command == "init" and getattr(args, "override", False):
+    if command in ("init", "hf-upload") and getattr(args, "override", False):
         parts.append("--override")
+    if command == "hf-upload":
+        if getattr(args, "public", False):
+            parts.append("--public")
+        if getattr(args, "dry_run", False):
+            parts.append("--dry-run")
     remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
     job_name = f"{command}_{args.config.stem}"
@@ -493,9 +536,14 @@ def _run_dataset(args, parser=None, argv=None):
     if getattr(args, "ablation", None):
         _run_dataset_ablations(args, parser, argv)
         return
-    if (args.dataset_command in ("index", "init", "tform-obj-to-db")
+    if (args.dataset_command in ("index", "init", "tform-obj-to-db", "hf-upload")
             and getattr(args, "remote", False)):
         _run_dataset_remote(args)
+        return
+    if args.dataset_command == "hf-upload":
+        # Uploads a directory; no need to instantiate (and so index) the dataset.
+        from o3b.dataset.huggingface import run_hf_upload
+        run_hf_upload(args)
         return
     if args.dataset_command == "sync-shard":
         from o3b.dataset.sync import sync_sharded
@@ -3531,12 +3579,17 @@ def _run_bench_run(args) -> None:
     # sharded cache.  Same contract as build_dataset_from_config_or_name(),
     # which is what the method's train.dataset_train already goes through.
     overrides = _platform_to_dataset_overrides(platform)
-    if default_dataset:
-        ds_base = _load_yaml_with_defaults(
-            _resolve_dataset_config(default_dataset), overrides=overrides, resolve=False
-        )
-    else:
-        ds_base = {}
+
+    _ds_base_cache: dict[str, dict] = {}
+
+    def _load_ds_base(name: str) -> dict:
+        if name not in _ds_base_cache:
+            _ds_base_cache[name] = _load_yaml_with_defaults(
+                _resolve_dataset_config(name), overrides=overrides, resolve=False
+            )
+        return _ds_base_cache[name]
+
+    ds_base = _load_ds_base(default_dataset) if default_dataset else {}
 
     # ── inject platform config as 'platform:' so ${platform.path_exps} resolves ─
     try:
@@ -3595,11 +3648,21 @@ def _run_bench_run(args) -> None:
             combo_stem = None
 
         # merge benchmark/ablation dataset section on top of base dataset config
-        run_ds = run_raw.get("dataset") or {}
+        #
+        # `dataset: {dataset_name: X}` replaces the base config named in the
+        # benchmark's `defaults: - dataset:` — the eval-side counterpart of
+        # method.train.dataset_train.dataset_name, so an ablation can evaluate
+        # the same method on another dataset (e.g. the real/ROPE test pairs)
+        # without a benchmark config per dataset.  The named config is loaded
+        # unresolved like the default one, so the benchmark's dataset keys
+        # (category, img_size, …) still propagate into its interpolations.
+        run_ds = dict(run_raw.get("dataset") or {})
+        _ds_name = run_ds.pop("dataset_name", None)
+        ds_base_run = _load_ds_base(_ds_name) if _ds_name else ds_base
         ds_merged = OmegaConf.to_container(
-            OmegaConf.merge(OmegaConf.create(ds_base), OmegaConf.create(run_ds)),
+            OmegaConf.merge(OmegaConf.create(ds_base_run), OmegaConf.create(run_ds)),
             resolve=True,
-        ) if run_ds else OmegaConf.to_container(OmegaConf.create(ds_base), resolve=True)
+        ) if run_ds else OmegaConf.to_container(OmegaConf.create(ds_base_run), resolve=True)
 
         # A dataset config that carries its own `category` (the *_cat_sharded
         # ones do, and derive `sharded_name` from it) must end up agreeing with
@@ -3691,6 +3754,10 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
     hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
 
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
+    # The compute node has no `huggingface-cli login` state of its own, so hub
+    # access from a job (o3b dataset hf-upload --remote, use_huggingface
+    # downloads) rides on this credential.
+    hf_token = _credential(cfg, "huggingface.token")
     try:
         submodule_root = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"], text=True, cwd=Path(__file__).parent,
@@ -3729,6 +3796,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
         "REPO_URL":        repo_url,
         "REPO_NAME":       repo_name,
         "GITHUB_TOKEN":    token,
+        **({"HF_TOKEN": hf_token} if hf_token else {}),
         "SETUP":           setup,
         "BRANCH":          branch,
         "PULL":            pull,
