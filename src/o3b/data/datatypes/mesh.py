@@ -12,6 +12,33 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+# NCDS object size: the longest object side spans [-1, 1] (see o3b.io._load_mesh).
+OBJ_SIZE_NCDS = 2.0
+
+
+def verts_ncds(verts: Tensor, rescale: bool = True, recenter: bool = False) -> Tensor:
+    """Normalise mesh verts towards NCDS: ``rescale`` makes the longest side span
+    ``OBJ_SIZE_NCDS``, ``recenter`` moves the AABB centre to the origin.
+
+    Meshes loaded via ``o3b.io._load_mesh`` are already NCDS, so both are a no-op
+    for them.  A *predicted* mesh is only nominally NCDS — an instance-deformation
+    head moves its extent and centre — while ``pred_cam_tform4x4_obj`` is an NCDS
+    pose (the metric scale lives in the pose, not the verts), so any drift turns
+    into a scale/offset error once the mesh is posed into camera space.
+
+    The scale factor is taken from the pre-shift AABB, so the two flags are
+    order-independent.
+    """
+    v = verts.float()
+    if v.numel() == 0 or not (rescale or recenter):
+        return v
+    v_min, v_max = v.min(dim=0).values, v.max(dim=0).values
+    if recenter:
+        v = v - (v_min + v_max) * 0.5
+    if rescale:
+        v = v * (OBJ_SIZE_NCDS / (v_max - v_min).max().clamp(min=1e-8))
+    return v
+
 
 @contextlib.contextmanager
 def _file_lock(path: Path):

@@ -8,10 +8,8 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# NCDS object size: the longest object side spans [-1, 1] (see o3b.io._load_mesh).
-_OBJ_SIZE_NCDS = 2.0
-
 from o3b.task.task import OD3D_Task, register_task
+from o3b.data.datatypes.mesh import OBJ_SIZE_NCDS as _OBJ_SIZE_NCDS, verts_ncds
 from o3b.data.datatypes.frame_object import FrameObjectPairBatch
 from o3b.task.datatypes.frame_object_pair_quant import FrameObjectPairQuantBatch
 from o3b.task.datatypes.frame_object_pair_qualit import FrameObjectPairQualitBatch
@@ -289,39 +287,16 @@ def _pred_featmap2d(batch, src_ncds, kpts_valid):
 _WARNED_MESH_CORRESP = False
 
 
-def _verts_ncds(verts: torch.Tensor, rescale: bool = True, recenter: bool = False) -> torch.Tensor:
-    """Normalise mesh verts towards NCDS: ``rescale`` makes the longest side span
-    ``_OBJ_SIZE_NCDS``, ``recenter`` moves the AABB centre to the origin.
-
-    GT meshes are already NCDS (``o3b.io._load_mesh``), so both are a no-op for
-    them.  Predicted meshes are only nominally NCDS — a method's instance
-    deformation changes the extent — and ``pred_cam_tform4x4_obj`` is an NCDS
-    pose (the metric scale lives in the pose, not the verts), so that drift
-    becomes a per-side scale error in the src→trgt barycentric transfer.
-    Recentring is off by default: where a method puts the mesh origin is the
-    pose's business, not ours.
-    """
-    v = verts.float()
-    if v.numel() == 0 or not (rescale or recenter):
-        return v
-    v_min, v_max = v.min(dim=0).values, v.max(dim=0).values
-    if recenter:
-        v = v - (v_min + v_max) * 0.5
-    if rescale:
-        v = v * (_OBJ_SIZE_NCDS / (v_max - v_min).max().clamp(min=1e-8))
-    return v
-
-
-def _mesh_ncds(mesh, rescale: bool = True, recenter: bool = False):
-    """``mesh`` with :func:`_verts_ncds`-normalised verts (colors/UVs/texture kept)."""
+def _mesh_ncds(mesh, rescale: bool = False, recenter: bool = False):
+    """``mesh`` with :func:`verts_ncds`-normalised verts (colors/UVs/texture kept)."""
     from dataclasses import replace
     if mesh is None or mesh.verts is None:
         return mesh
-    return replace(mesh, verts=_verts_ncds(mesh.verts, rescale, recenter))
+    return replace(mesh, verts=verts_ncds(mesh.verts, rescale, recenter))
 
 
 def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt,
-                       ncds_rescale: bool = True, ncds_recenter: bool = False):
+                       ncds_rescale: bool = False, ncds_recenter: bool = False):
     """Variant c: mesh (barycentric) correspondence.
 
     Per sample: pose the src/trgt meshes into their camera spaces with the
@@ -353,12 +328,12 @@ def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt,
             if f_src.shape != f_trgt.shape or len(m_src.verts) != len(m_trgt.verts):
                 continue  # barycentric transfer needs identical topology
 
-            # normalise both meshes to NCDS before posing: the poses are NCDS
-            # poses, and src/trgt must be normalised the same way for the
-            # barycentric transfer to be a correspondence between comparable
-            # shapes (no-op for GT meshes).
-            v_src  = _verts_ncds(m_src.verts,  ncds_rescale, ncds_recenter).cpu()
-            v_trgt = _verts_ncds(m_trgt.verts, ncds_rescale, ncds_recenter).cpu()
+            # optionally normalise both meshes to NCDS before posing: the poses
+            # are NCDS poses, and src/trgt must be normalised the same way for
+            # the barycentric transfer to be a correspondence between comparable
+            # shapes.  Off by default — see the class docstring.
+            v_src  = verts_ncds(m_src.verts,  ncds_rescale, ncds_recenter).cpu()
+            v_trgt = verts_ncds(m_trgt.verts, ncds_rescale, ncds_recenter).cpu()
             v_src_cam  = transf3d_broadcast(v_src,  pred_src[b].float().cpu())
             v_trgt_cam = transf3d_broadcast(v_trgt, pred_trgt[b].float().cpu())
 
@@ -525,13 +500,17 @@ class CamCrsp3DNNTask(OD3D_Task):
 
     ``mesh_ncds_rescale`` / ``mesh_ncds_recenter`` control how the meshes of the
     ``mesh`` variant are normalised into NCDS before being posed — see
-    :func:`_verts_ncds`.  Both are no-ops for GT meshes.
+    :func:`o3b.data.datatypes.mesh.verts_ncds`.  Both default to off: GT meshes
+    are already NCDS, and a method that emits a predicted mesh is expected to
+    normalise it itself (as MorpheusMethod's own ``mesh_ncds_rescale`` /
+    ``mesh_ncds_recenter`` do) so that its mesh and pose stay consistent.  Turn
+    them on to normalise here instead, for a method that does not.
     """
 
     def __init__(
         self,
         qualit: bool = True,
-        mesh_ncds_rescale: bool = True,
+        mesh_ncds_rescale: bool = False,
         mesh_ncds_recenter: bool = False,
         **kwargs,
     ):

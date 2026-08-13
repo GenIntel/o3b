@@ -106,6 +106,25 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     if is_main:
         print(f"Task:    {run_raw['task']['class_name']}")
 
+    # ── checkpoint directory ──────────────────────────────────────────────────
+    # A method that trains writes its checkpoints into the directory named after
+    # the run that produced them, ${platform.path_exps}/<run_name>, so the W&B
+    # run and the checkpoints on disk carry the same name: a ckpts/ ablation
+    # selects a training run by pasting that name back in, and nothing has to be
+    # decided about the directory at training time.
+    # An explicit method.train.checkpoint_dir in the config still wins.
+    method_cfg = run_raw.get("method")
+    _train_cfg = method_cfg.get("train") if isinstance(method_cfg, dict) else None
+    if isinstance(_train_cfg, dict) and not _train_cfg.get("checkpoint_dir"):
+        _path_exps = (run_raw.get("platform") or {}).get("path_exps")
+        if _path_exps:
+            _train_cfg["checkpoint_dir"] = f"{_path_exps}/{run_name}"
+            if is_main:
+                print(f"Ckpts:   {_train_cfg['checkpoint_dir']}")
+        elif is_main:
+            print("WARNING: platform.path_exps is unset — a method that trains "
+                  "has nowhere to write its checkpoints")
+
     # ── method (optional) ─────────────────────────────────────────────────────
     # The method runs on each batch before the task (e.g. a pose estimator that
     # writes predicted poses). A method that fails to build ends the run: the
@@ -117,7 +136,6 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     #   allow_oracle_fallback: true   in the run config, or
     #   O3B_ALLOW_ORACLE_FALLBACK=1   in the environment.
     method = None
-    method_cfg = run_raw.get("method")
     if method_cfg:
         cls_name = method_cfg.get("class_name")
         try:
