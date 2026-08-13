@@ -8,6 +8,9 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+# NCDS object size: the longest object side spans [-1, 1] (see o3b.io._load_mesh).
+_OBJ_SIZE_NCDS = 2.0
+
 from o3b.task.task import OD3D_Task, register_task
 from o3b.data.datatypes.frame_object import FrameObjectPairBatch
 from o3b.task.datatypes.frame_object_pair_quant import FrameObjectPairQuantBatch
@@ -286,7 +289,39 @@ def _pred_featmap2d(batch, src_ncds, kpts_valid):
 _WARNED_MESH_CORRESP = False
 
 
-def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt):
+def _verts_ncds(verts: torch.Tensor, rescale: bool = True, recenter: bool = False) -> torch.Tensor:
+    """Normalise mesh verts towards NCDS: ``rescale`` makes the longest side span
+    ``_OBJ_SIZE_NCDS``, ``recenter`` moves the AABB centre to the origin.
+
+    GT meshes are already NCDS (``o3b.io._load_mesh``), so both are a no-op for
+    them.  Predicted meshes are only nominally NCDS — a method's instance
+    deformation changes the extent — and ``pred_cam_tform4x4_obj`` is an NCDS
+    pose (the metric scale lives in the pose, not the verts), so that drift
+    becomes a per-side scale error in the src→trgt barycentric transfer.
+    Recentring is off by default: where a method puts the mesh origin is the
+    pose's business, not ours.
+    """
+    v = verts.float()
+    if v.numel() == 0 or not (rescale or recenter):
+        return v
+    v_min, v_max = v.min(dim=0).values, v.max(dim=0).values
+    if recenter:
+        v = v - (v_min + v_max) * 0.5
+    if rescale:
+        v = v * (_OBJ_SIZE_NCDS / (v_max - v_min).max().clamp(min=1e-8))
+    return v
+
+
+def _mesh_ncds(mesh, rescale: bool = True, recenter: bool = False):
+    """``mesh`` with :func:`_verts_ncds`-normalised verts (colors/UVs/texture kept)."""
+    from dataclasses import replace
+    if mesh is None or mesh.verts is None:
+        return mesh
+    return replace(mesh, verts=_verts_ncds(mesh.verts, rescale, recenter))
+
+
+def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt,
+                       ncds_rescale: bool = True, ncds_recenter: bool = False):
     """Variant c: mesh (barycentric) correspondence.
 
     Per sample: pose the src/trgt meshes into their camera spaces with the
@@ -318,8 +353,14 @@ def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt):
             if f_src.shape != f_trgt.shape or len(m_src.verts) != len(m_trgt.verts):
                 continue  # barycentric transfer needs identical topology
 
-            v_src_cam  = transf3d_broadcast(m_src.verts.float().cpu(),  pred_src[b].float().cpu())
-            v_trgt_cam = transf3d_broadcast(m_trgt.verts.float().cpu(), pred_trgt[b].float().cpu())
+            # normalise both meshes to NCDS before posing: the poses are NCDS
+            # poses, and src/trgt must be normalised the same way for the
+            # barycentric transfer to be a correspondence between comparable
+            # shapes (no-op for GT meshes).
+            v_src  = _verts_ncds(m_src.verts,  ncds_rescale, ncds_recenter).cpu()
+            v_trgt = _verts_ncds(m_trgt.verts, ncds_rescale, ncds_recenter).cpu()
+            v_src_cam  = transf3d_broadcast(v_src,  pred_src[b].float().cpu())
+            v_trgt_cam = transf3d_broadcast(v_trgt, pred_trgt[b].float().cpu())
 
             import trimesh
             from trimesh.triangles import points_to_barycentric, barycentric_to_points
@@ -481,10 +522,22 @@ class CamCrsp3DNNTask(OD3D_Task):
     Qualitative: correspondences drawn on the query|target frame RGB, and on a
     top-down render of the target object.  Predicted poses fall back to GT when
     unavailable (oracle upper bound).
+
+    ``mesh_ncds_rescale`` / ``mesh_ncds_recenter`` control how the meshes of the
+    ``mesh`` variant are normalised into NCDS before being posed — see
+    :func:`_verts_ncds`.  Both are no-ops for GT meshes.
     """
 
-    def __init__(self, qualit: bool = True, **kwargs):
+    def __init__(
+        self,
+        qualit: bool = True,
+        mesh_ncds_rescale: bool = True,
+        mesh_ncds_recenter: bool = False,
+        **kwargs,
+    ):
         self.qualit = qualit
+        self.mesh_ncds_rescale  = mesh_ncds_rescale
+        self.mesh_ncds_recenter = mesh_ncds_recenter
         self._warned_missing: set[tuple] = set()
 
     def forward(self, batch: FrameObjectPairBatch, return_qualit: bool = True) -> Tuple[FrameObjectPairQuantBatch, FrameObjectPairQualitBatch]:
@@ -577,7 +630,10 @@ class CamCrsp3DNNTask(OD3D_Task):
         )
 
         # ── variant c: mesh (barycentric) correspondence ───────────────────────
-        pred_mesh_kpts = _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt)
+        pred_mesh_kpts = _pred_mesh_corresp(
+            batch, query_kpts_cam_q, pred_src, pred_trgt,
+            self.mesh_ncds_rescale, self.mesh_ncds_recenter,
+        )
 
         # ── metrics: euclidean error + PCK @ 0.1 * trgt_obj_size, per variant ──
         threshold = 0.1 * trgt_obj_size.float().to(dev)  # (B,)
@@ -654,7 +710,6 @@ class CamCrsp3DNNTask(OD3D_Task):
         # NCDS units (longest side → obj_size_ncds) and posed with the predicted
         # cam_tform4x4_obj_ncds (the GT NCDS pose/size is used as the oracle
         # fallback when no prediction is available).
-        _OBJ_SIZE_NCDS = 2.0
 
         def _frames_with_bbox(rgb, bbox3d, intr, pose_ncds):
             frames = list(rgb) if rgb is not None else None
@@ -875,6 +930,11 @@ class CamCrsp3DNNTask(OD3D_Task):
                 m_src, m_trgt = src_meshes[b], trgt_meshes[b]
                 if m_src is None or m_trgt is None:
                     continue
+                # same NCDS normalisation as _pred_mesh_corresp, so the rendered
+                # surface (and its NOCS-0c colors) match the geometry the
+                # correspondences were computed on
+                m_src  = _mesh_ncds(m_src,  self.mesh_ncds_rescale, self.mesh_ncds_recenter)
+                m_trgt = _mesh_ncds(m_trgt, self.mesh_ncds_rescale, self.mesh_ncds_recenter)
                 valid, correct = kpts_valid[b].cpu(), is_correct[b].cpu()
 
                 # ── row 1: GT viewpoints — NOCS render overlaid on the frame RGB ─
