@@ -6,6 +6,9 @@
 
 defaults:
   - hc3d_frame_object_test
+  # filter_frames: the annotated frame subset (~10 evenly-spaced views per ROPE
+  # scene); shared with hc3d_frame_object_test_real_pair
+  - hc3d_frames_test_real
   - _self_
 
 # filter_is_real: null → all data  |  false → synthetic only  |  true → real only

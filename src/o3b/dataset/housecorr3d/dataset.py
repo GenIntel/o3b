@@ -23,6 +23,87 @@ from o3b.dataset.utils import (
 
 _MESH_EXTS = {".obj", ".ply", ".glb", ".gltf", ".stl", ".fbx"}
 
+# recognised tokens of a filter_frames group key (e.g. "test_real"); everything
+# else in a key is treated as a free label and matches any row
+_FRAME_FILTER_SPLITS     = {"train", "test", "val"}
+_FRAME_FILTER_DATA_TYPES = {"real", "synthetic"}
+
+
+def _frame_filter_key(value) -> str:
+    """Normalised scene / frame id, used on both sides of the filter_frames match.
+
+    Zero-padding width differs between ROPE ("000097") and SOPE ("0007"), and
+    unquoted YAML entries arrive as ints, so purely numeric ids are compared by
+    value; anything else (SOPE scene names like "00_0105") compares verbatim.
+    """
+    s = str(value).strip()
+    return str(int(s)) if s.isdigit() else s
+
+
+def _parse_filter_frames(filter_frames) -> "Optional[list[tuple[Optional[str], dict]]]":
+    """Normalise ``cfg.filter_frames`` → [(group_key, {scene: frames|None}), …].
+
+    Accepts the grouped form ``{group: {scene: [frame, …]}}`` (group names a
+    split and/or data_type, e.g. "test_real") and the flat form
+    ``{scene: [frame, …]}``, which applies to every split / data_type.  A scene
+    mapped to null/empty keeps all of that scene's frames.  Returns None when no
+    filtering is configured.
+    """
+    if not filter_frames:
+        return None
+
+    def _scene_map(d: dict) -> dict:
+        return {
+            _frame_filter_key(scene): (
+                None if frames is None or len(frames) == 0
+                else {_frame_filter_key(f) for f in frames}
+            )
+            for scene, frames in d.items()
+        }
+
+    groups: list[tuple[Optional[str], dict]] = []
+    flat: dict = {}
+    for key, value in filter_frames.items():
+        if isinstance(value, dict):
+            groups.append((str(key), _scene_map(value)))
+        else:  # flat form: key is a scene name, value its frame list
+            flat.update(_scene_map({key: value}))
+    if flat:
+        groups.append((None, flat))
+    return groups or None
+
+
+def _frame_group_matches(key: Optional[str], split, data_type) -> bool:
+    """Does a group key like "test_real" apply to a row of this split/data_type?"""
+    if key is None:
+        return True
+    for token in key.split("_"):
+        if token in _FRAME_FILTER_SPLITS and token != split:
+            return False
+        if token in _FRAME_FILTER_DATA_TYPES and token != data_type:
+            return False
+    return True
+
+
+def _frame_row_in_filter(row: dict, groups: "list[tuple[Optional[str], dict]]") -> bool:
+    """Is this frames.db row whitelisted by a parsed filter_frames spec?"""
+    # frame_id is "<data_type>/<scene_name>/<frame_id>/<object_idx>"; several
+    # rows (one per object) share the same frame.
+    parts = str(row.get("frame_id") or "").split("/")
+    if len(parts) < 2:
+        return False
+    scene = _frame_filter_key(row.get("scene_name"))
+    frame = _frame_filter_key(parts[-2])
+    for key, scenes in groups:
+        if not _frame_group_matches(key, row.get("split"), row.get("data_type")):
+            continue
+        if scene not in scenes:
+            continue
+        frames = scenes[scene]
+        if frames is None or frame in frames:
+            return True
+    return False
+
 
 @register_dataset("HouseCorr3D")
 class HouseCorr3D(ConfigurableDataset):
@@ -154,11 +235,15 @@ class HouseCorr3D(ConfigurableDataset):
                 else:
                     real_clause2 = " AND data_type = 'synthetic'"
                 kpts_clause2  = " AND has_kpts = 1" if has_kpts else ""
+                frame_groups  = _parse_filter_frames(self.cfg.filter_frames)
                 # In pair mode filter_count_max caps the number of *pairs* (applied in
                 # _build_frame_pairs), so the full frame pool must stay available here.
+                # A frame whitelist is applied in Python below, so the cap must not be
+                # spent on rows the whitelist then drops either.
                 limit_clause2 = (
                     f" LIMIT {limit}"
-                    if limit and self.cfg.item_type == ItemType.FRAME_OBJECT else ""
+                    if limit and self.cfg.item_type == ItemType.FRAME_OBJECT
+                    and frame_groups is None else ""
                 )
 
                 if cats2:
@@ -175,6 +260,16 @@ class HouseCorr3D(ConfigurableDataset):
                 ).fetchall()
                 # rowid is 1-based; our list is 0-based
                 self._frame_rows_id = [r[0] - 1 for r in frows]
+
+                if frame_groups is not None:
+                    n_before = len(self._frame_rows_id)
+                    self._frame_rows_id = [
+                        rid for rid in self._frame_rows_id
+                        if _frame_row_in_filter(self._frame_rows[rid], frame_groups)
+                    ]
+                    if limit and self.cfg.item_type == ItemType.FRAME_OBJECT:
+                        self._frame_rows_id = self._frame_rows_id[:limit]
+                    print(f"filter_frames: kept {len(self._frame_rows_id)} / {n_before} frame rows")
             finally:
                 con2.close()
 

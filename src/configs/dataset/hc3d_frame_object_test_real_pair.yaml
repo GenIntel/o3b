@@ -9,6 +9,9 @@
 
 defaults:
   - hc3d_frame_object_test_pair
+  # filter_frames: same annotated frame subset hc3d_frame_object_test_real uses,
+  # so pairs are formed only from those frames
+  - hc3d_frames_test_real
   - _self_
 
 # filter_is_real: null → all data  |  false → synthetic only  |  true → real only
@@ -21,3 +24,5 @@ categories:
   - hair_dryer
   - handbag
   - tooth_brush
+
+

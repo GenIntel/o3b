@@ -23,6 +23,9 @@
 
 defaults:
   - hc3d_frame_object_test_pair_cat_sharded
+  # filter_frames: same annotated frame subset as hc3d_frame_object_test_real_pair
+  # (rebuild the shards with --override to pick this up in an existing cache)
+  - hc3d_frames_test_real
   - _self_
 
 # filter_is_real: null → all data  |  false → synthetic only  |  true → real only

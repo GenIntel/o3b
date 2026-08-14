@@ -32,6 +32,12 @@ class BatchType(str, Enum):
     SCENE_OBJECT      = "scene_object"
 
 
+def _to_plain(obj):
+    """OmegaConf containers → plain dict / list (configs may arrive as DictConfig)."""
+    from omegaconf import OmegaConf
+    return OmegaConf.to_container(obj, resolve=True) if OmegaConf.is_config(obj) else obj
+
+
 # ── Dataset config ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -76,6 +82,11 @@ class DatasetConfig:
     #   "cross"   → full cross-product (every view of A with every view of B), ~n_views^2
     frame_pair_view_mode: str                = "aligned"
     filter_is_real:    Optional[bool]        = None   # None = all, True = real only, False = synthetic only
+    # frame whitelist: {group: {scene_name: [frame_id, …]}} (or {scene_name: […]}
+    # without the grouping level). Group tokens are matched against the row's
+    # split / data_type ("test_real" → split=test and data_type=real); a scene
+    # mapped to null keeps all of its frames. None = no frame filtering.
+    filter_frames:     Optional[dict]        = None
     filter_score_zero: bool                  = False  # OpenTT: drop clips where both scores == 0
     # dataset-wide rigid transform mapping the raw object frame → canonical (GL) object
     # frame, applied to every loaded object (4x4, R|t convention)
@@ -135,6 +146,7 @@ class DatasetConfig:
             "frame_pair_views_per_instance": self.frame_pair_views_per_instance,
             "frame_pair_view_mode":          self.frame_pair_view_mode,
             "filter_is_real":     self.filter_is_real,
+            "filter_frames":      self.filter_frames,
             "filter_score_zero":  self.filter_score_zero,
             "obj_gl_tform4x4_obj_raw": self.obj_gl_tform4x4_obj_raw,
             "cam_tform4x4_cam_raw": self.cam_tform4x4_cam_raw,
@@ -173,6 +185,7 @@ class DatasetConfig:
             frame_pair_view_mode = d.get("frame_pair_view_mode", "aligned"),
             filter_is_real    = None if "filter_is_real" not in d or d["filter_is_real"] is None
                                  else bool(d["filter_is_real"]),
+            filter_frames     = _to_plain(d.get("filter_frames")) or None,
             filter_score_zero = bool(d.get("filter_score_zero", False)),
             obj_gl_tform4x4_obj_raw = d.get("obj_gl_tform4x4_obj_raw", d.get("obj_tform4x4")),
             cam_tform4x4_cam_raw = d.get("cam_tform4x4_cam_raw"),
