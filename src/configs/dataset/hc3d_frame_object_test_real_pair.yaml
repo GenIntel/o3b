@@ -17,6 +17,18 @@ defaults:
 # filter_is_real: null → all data  |  false → synthetic only  |  true → real only
 filter_is_real: true
 
+# The frame whitelist leaves only 73-108 frames per category (6-40 per
+# instance), so the synthetic default of 50 sampled views per instance would
+# duplicate frames and inflate the cross product to a fixed 30k pairs, with full
+# frame coverage buried 15-28k pairs deep.  Taking every filtered frame instead
+# makes the pool exactly the real frame combinations: 3.5k-8.3k pairs per
+# category, all 565 whitelisted frames represented.
+frame_pair_views_per_instance: -1
+
+# Above the largest resulting pool (hair_dryer, 8262), so the cap no longer
+# truncates coverage -- it is only a safety valve now.
+filter_count_max: 10000
+
 # Only these categories are annotated in the real (ROPE) data.
 categories:
   - bread
