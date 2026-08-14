@@ -85,6 +85,33 @@ def _frame_group_matches(key: Optional[str], split, data_type) -> bool:
     return True
 
 
+def _browse_sharded(dataset, object_id: Optional[str]) -> bool:
+    """Should `viz` browse the sharded cache rather than the SQLite index?
+
+    Whenever a cache is loaded, it — not frames.db — is what the config serves,
+    and it may be all this machine has (a `use_huggingface` consumer has no raw
+    data and no index).  ``--object-id`` is the exception: that filter is an
+    index lookup, so it keeps the raw path, which is also where it is useful.
+    """
+    if getattr(dataset, "_sharded", None) is None:
+        return False
+    if object_id:
+        print("--object-id filters the SQLite index, not the sharded cache: "
+              "browsing the index instead.")
+        return False
+    return True
+
+
+def _sharded_viz_range(dataset, limit: int) -> "tuple[int, int, str]":
+    """(shown, total, source) for a browser reading the sharded cache."""
+    total = len(dataset)
+    path  = dataset._sharded_dir()
+    from_hub = dataset.cfg.use_huggingface and (path is None or not path.exists())
+    source = (f"{dataset.cfg.huggingface_name} (config {dataset.cfg.sharded_name})"
+              if from_hub else str(path))
+    return min(limit, total), total, source
+
+
 def _frame_row_in_filter(row: dict, groups: "list[tuple[Optional[str], dict]]") -> bool:
     """Is this frames.db row whitelisted by a parsed filter_frames spec?"""
     # frame_id is "<data_type>/<scene_name>/<frame_id>/<object_idx>"; several
@@ -951,29 +978,34 @@ class HouseCorr3D(ConfigurableDataset):
 
         path_preprocess = cls._path_preprocess(cfg)
         db_path = db or path_preprocess / "frames.db"
-        if not db_path.exists():
-            print(f"No index found at {db_path}. Run 'index' first.", file=sys.stderr)
-            sys.exit(1)
 
-        # Load dataset with all modalities for visualization
+        # Load dataset with all modalities for visualization.  The index is
+        # checked only on the branch that reads it — a machine serving a
+        # downloaded sharded cache has no frames.db and needs none.
         viz_cfg = _r(cfg, modalities=None, object_modalities=None)
         dataset = cls(viz_cfg)
-        if not dataset._frame_rows_id:
-            print("No frames found matching the current config filters.")
-            return
 
-        total = len(dataset._frame_rows_id)
-        if object_id:
-            dataset._frame_rows_id = [
-                i for i in dataset._frame_rows_id
-                if dataset._frame_rows[i].get("object_id") == object_id
-            ]
-        if limit < len(dataset._frame_rows_id):
+        if _browse_sharded(dataset, object_id):
+            n, total, source = _sharded_viz_range(dataset, limit)
+        else:
+            if not db_path.exists():
+                print(f"No index found at {db_path}. Run 'index' first.", file=sys.stderr)
+                sys.exit(1)
+            if not dataset._frame_rows_id:
+                print("No frames found matching the current config filters.")
+                return
+            total = len(dataset._frame_rows_id)
+            if object_id:
+                dataset._frame_rows_id = [
+                    i for i in dataset._frame_rows_id
+                    if dataset._frame_rows[i].get("object_id") == object_id
+                ]
             dataset._frame_rows_id = dataset._frame_rows_id[:limit]
+            n, source = len(dataset._frame_rows_id), db_path
 
-        print(f"Showing {len(dataset._frame_rows_id)} / {total} frames  {db_path}\n")
+        print(f"Showing {n} / {total} frames  {source}\n")
 
-        _visualize_frame_objects_viser(dataset, debug=debug, obj_centric=obj_centric)
+        _visualize_frame_objects_viser(dataset, n=n, debug=debug, obj_centric=obj_centric)
 
     @classmethod
     def _visualize_frame_object_pairs(
@@ -991,30 +1023,35 @@ class HouseCorr3D(ConfigurableDataset):
 
         path_preprocess = cls._path_preprocess(cfg)
         db_path = db or path_preprocess / "frames.db"
-        if not db_path.exists():
-            print(f"No index found at {db_path}. Run 'index' first.", file=sys.stderr)
-            sys.exit(1)
 
-        # Load all modalities for visualization
+        # Load all modalities for visualization.  The index is checked only on
+        # the branch that reads it — a machine serving a downloaded sharded
+        # cache has no frames.db and needs none.
         viz_cfg = _r(cfg, modalities=None, object_modalities=None)
         dataset = cls(viz_cfg)
-        if not dataset._frame_pairs_id:
-            print("No frame-object pairs found matching the current config filters.")
-            return
 
-        total = len(dataset._frame_pairs_id)
-        if object_id:
-            dataset._frame_pairs_id = [
-                (a, b) for (a, b) in dataset._frame_pairs_id
-                if dataset._frame_rows[a].get("object_id") == object_id
-                or dataset._frame_rows[b].get("object_id") == object_id
-            ]
-        if limit < len(dataset._frame_pairs_id):
+        if _browse_sharded(dataset, object_id):
+            n, total, source = _sharded_viz_range(dataset, limit)
+        else:
+            if not db_path.exists():
+                print(f"No index found at {db_path}. Run 'index' first.", file=sys.stderr)
+                sys.exit(1)
+            if not dataset._frame_pairs_id:
+                print("No frame-object pairs found matching the current config filters.")
+                return
+            total = len(dataset._frame_pairs_id)
+            if object_id:
+                dataset._frame_pairs_id = [
+                    (a, b) for (a, b) in dataset._frame_pairs_id
+                    if dataset._frame_rows[a].get("object_id") == object_id
+                    or dataset._frame_rows[b].get("object_id") == object_id
+                ]
             dataset._frame_pairs_id = dataset._frame_pairs_id[:limit]
+            n, source = len(dataset._frame_pairs_id), db_path
 
-        print(f"Showing {len(dataset._frame_pairs_id)} / {total} frame pairs  {db_path}\n")
+        print(f"Showing {n} / {total} frame pairs  {source}\n")
 
-        _visualize_frame_object_pairs_viser(dataset, debug=debug, obj_centric=obj_centric)
+        _visualize_frame_object_pairs_viser(dataset, n=n, debug=debug, obj_centric=obj_centric)
 
     # ── item loading ──────────────────────────────────────────────────────────
 

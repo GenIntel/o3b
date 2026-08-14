@@ -69,7 +69,9 @@ def _warn_exr_once(path, err) -> None:
                    path, err, detail)
 
 
-def _visualize_frame_object_pairs_viser(dataset, debug: bool = False, obj_centric: bool = False) -> None:
+def _visualize_frame_object_pairs_viser(
+    dataset, n: Optional[int] = None, debug: bool = False, obj_centric: bool = False,
+) -> None:
     """Interactive viser browser for HouseCorr3D frame-object *pairs*.
 
     Each pair (query=src, target=trgt) is shown side-by-side in the 3-D scene;
@@ -89,7 +91,8 @@ def _visualize_frame_object_pairs_viser(dataset, debug: bool = False, obj_centri
     server = make_viser_server()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
 
-    n = len(dataset._frame_pairs_id)
+    if n is None:
+        n = len(dataset)
     if n == 0:
         print("No frame-object pairs found matching the current config filters.")
         return
@@ -117,10 +120,10 @@ def _visualize_frame_object_pairs_viser(dataset, debug: bool = False, obj_centri
 
     def _load(i: int) -> None:
         _clear()
-        pair = dataset._load_frame_object_pair(i)
+        # dataset[i] reads the sharded cache when one is loaded and the raw
+        # frames.db rows otherwise, applying the transform either way
+        pair = dataset[i]
         src, trgt = pair.src_object, pair.trgt_object
-        if dataset._transform is not None:
-            src, trgt = dataset._transform(src), dataset._transform(trgt)
 
         # shared per-index keypoint colors so src/trgt correspond
         K = src.obj_kpts3d.shape[0] if src.obj_kpts3d is not None else 0
@@ -186,7 +189,9 @@ def _visualize_frame_object_pairs_viser(dataset, debug: bool = False, obj_centri
         print("\nStopping.")
 
 
-def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bool = False) -> None:
+def _visualize_frame_objects_viser(
+    dataset, n: Optional[int] = None, debug: bool = False, obj_centric: bool = False,
+) -> None:
     """Interactive viser browser for HouseCorr3D frame-object items.
 
     obj_centric=False (default): camera-centric — camera at origin, object transformed.
@@ -208,7 +213,8 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
     server = make_viser_server()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
 
-    n = len(dataset._frame_rows_id)
+    if n is None:
+        n = len(dataset)
     idx     = [0]
     handles: list = []
     _img_handle = [None]   # GuiImageHandle for the sidebar modality view
@@ -233,12 +239,9 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
 
     def _load(i: int) -> None:
         _clear()
-        if getattr(dataset, "_sharded", None) is not None:
-            fo = dataset[i]  # reads from shards; applies transform internally
-        else:
-            fo = dataset._load_frame_object(i)
-            if dataset._transform is not None:
-                fo = dataset._transform(fo)
+        # dataset[i] reads the sharded cache when one is loaded and the raw
+        # frames.db rows otherwise, applying the transform either way
+        fo = dataset[i]
 
         # 3-D scene (mesh, camera frustum, rgb panel, depth pc, axes, keypoints)
         handles.extend(fo.viz(server=server, obj_centric=obj_centric))
@@ -267,9 +270,10 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
             else:
                 _img_handle[0].image = imgs[mod]
 
-        row = dataset._frame_rows[dataset._frame_rows_id[i]]
-        cat = row.get("category", "")
-        fid = row.get("frame_id", str(i))
+        # from the item itself, so the label works for shard-backed items too
+        # (frame_object_id is the frames.db frame_id)
+        cat = fo.category if fo.category is not None else ""
+        fid = fo.frame_object_id or str(i)
         label.value = f"[{i + 1}/{n}]  {fid}  cat={cat}"
         print(f"  [{i + 1}/{n}] {fid}  cat={cat}")
 

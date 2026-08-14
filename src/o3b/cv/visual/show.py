@@ -2,6 +2,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 import os
+import threading
+from contextlib import contextmanager
 import cv2
 from o3b.cv.visual.draw import tensor_to_cv_img, cv_img_to_tensor
 from o3b.cv.visual.resize import resize
@@ -346,6 +348,41 @@ def plotly_fig_2_tensor(fig, width=None, height=None):
 
 
 _offscreen_renderers: dict = {}
+# The cached renderer's GL context may only be current in one thread at a time,
+# and pyrender never hands it back (EGLPlatform.make_uncurrent is a no-op stub),
+# so a second thread's eglMakeCurrent fails with EGL_BAD_ACCESS on drivers that
+# enforce this.  viser dispatches its GUI callbacks on a thread pool, so the
+# frame browsers hit exactly that when an item needs a render (fo_mask_amodal).
+# Renders therefore run one at a time and release the context afterwards.
+_offscreen_render_lock = threading.Lock()
+
+
+def _release_gl_context(renderer) -> None:
+    """Unbind the renderer's EGL context so another thread can make it current."""
+    platform = getattr(renderer, "_platform", None)
+    display  = getattr(platform, "_egl_display", None)
+    if display is None:
+        return  # not the EGL backend (pyglet / OSMesa): nothing to release
+    try:
+        from OpenGL.EGL import EGL_NO_CONTEXT, EGL_NO_SURFACE, eglMakeCurrent
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)
+    except Exception as e:  # releasing is best-effort; the next render rebinds
+        logger.debug(f"could not release EGL context: {type(e).__name__}: {e}")
+
+
+@contextmanager
+def offscreen_renderer(width: int, height: int):
+    """The process-wide OffscreenRenderer, held exclusively for the block.
+
+    Every pyrender render must go through this: it serialises renders across
+    threads and returns the GL context afterwards (see _offscreen_render_lock).
+    """
+    with _offscreen_render_lock:
+        renderer = _offscreen_renderer(width, height)
+        try:
+            yield renderer
+        finally:
+            _release_gl_context(renderer)
 
 
 def _offscreen_renderer(width: int, height: int):
@@ -459,11 +496,10 @@ def render_trimesh_to_tensor(
 
     # pyrender.Viewer(scene, shadows=True)
 
-    # Offscreen renderer, reused across calls of the same size
-    renderer = _offscreen_renderer(width, height)
-
-    # Render the scene
-    color, depth = renderer.render(scene)
+    # Offscreen renderer, reused across calls of the same size (and shared
+    # across threads, hence the exclusive hold)
+    with offscreen_renderer(width, height) as renderer:
+        color, depth = renderer.render(scene)
 
     # Convert to torch tensor (C, H, W) format
     rgb_tensor = (
