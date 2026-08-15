@@ -23,7 +23,7 @@ filter_is_real: true
 # every filtered frame instead makes the pool exactly the real frame
 # combinations: 3564 / 6786 / 8262 / 6882 / 5190 pairs for bread / facial_cream
 # / hair_dryer / handbag / tooth_brush.
-frame_pair_views_per_instance: -1
+frame_pair_views_per_instance: 50
 
 # filter_count_max still caps that pool at 1000 pairs per category (inherited
 # value, kept explicit here): the items are drawn broad-coverage-first, so the

@@ -36,7 +36,7 @@ filter_is_real: true
 # whitelisted frame of each instance instead of 50 sampled views, still capped
 # at 1000 pairs per category.  filter_count_max is unchanged, so sharded_name
 # stays at n1000: rebuilding replaces the existing caches in place (--override).
-frame_pair_views_per_instance: -1
+frame_pair_views_per_instance: 50
 filter_count_max: 1000
 
 # distinct from the synthetic sharded cache (same fields, different source data)
