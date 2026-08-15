@@ -18,11 +18,10 @@ defaults:
 filter_is_real: true
 
 # The frame whitelist leaves only 73-108 frames per category (6-40 per
-# instance), so sampling 50 views per instance (the synthetic default) would
-# duplicate frames and spend the pair budget on repeated combinations.  Taking
-# every filtered frame instead makes the pool exactly the real frame
-# combinations: 3564 / 6786 / 8262 / 6882 / 5190 pairs for bread / facial_cream
-# / hair_dryer / handbag / tooth_brush.
+# instance), so 50 views per instance (the synthetic default) already covers
+# most instances outright and merely repeats frames for the few larger ones.
+# Keeping the default is fine — it does not really affect the results, because
+# filter_count_max below caps the pool at 1000 pairs per category anyway.
 frame_pair_views_per_instance: 50
 
 # filter_count_max still caps that pool at 1000 pairs per category (inherited
