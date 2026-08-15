@@ -113,3 +113,14 @@ filter_count_max: 2000   # per category when `categories` is set
 # All 1076 categories by default. `-c apple,mug` (or a list here) restricts it,
 # and is what makes a local run over the sshfs mount responsive.
 categories:
+
+# Hand-picked selection, from <path_preprocess>/subset/<subset_name>.yaml — the
+# sequences (or single frames) that file lists, and nothing else. null = no such
+# filter. Build one with
+#
+#   o3b dataset select-subset -d every9d_v3 -s every9d_v3_test
+#
+# od3d's own subsets in that directory are read as they are, name and all
+# (`-s uco3d_ctools_f4_s10`). The selection applies before the caps above, so
+# filter_count_max still counts what it left.
+subset_name:

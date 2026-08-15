@@ -1,0 +1,25 @@
+# every9d_v7_test — the test half of every9d_v7.
+#
+#   o3b dataset viz -d every9d_v7_test -c chair
+#
+# The selection lives in <path_preprocess>/subset/every9d_v7_test.yaml: at most
+# 5 sequences per category, drawn from subset every9d_v6_test — 3855 sequences
+# over its 911 categories (a category with 5 or fewer contributes all of them).
+# The draw is `random.Random(0).sample` over each category's sorted ids, so it
+# is reproducible but not biased towards alphabetically-first sequences.
+#
+# Object granularity, deliberately: every9d_v6_test names single *frames*, this
+# names the `<category>/<sequence>` they belong to, so a test object is seen
+# from up to frames_count_max_per_sequence views rather than one. Use
+# every9d_v6_test itself for the one-frame-per-object protocol.
+#
+# every9d_v7_train is every9d_v7 minus exactly these ids; the two partition
+# every9d_v7 and inherit its tform_obj_type (every9d_v7), so a relabelling round
+# reaches both. Re-sampling this file without rewriting every9d_v7_train breaks
+# the partition — they are written together.
+
+defaults:
+  - every9d_v7
+  - _self_
+
+subset_name: "every9d_v7_test"

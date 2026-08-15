@@ -1,0 +1,18 @@
+# every9d_v7_train — the train half of every9d_v7: every9d_v7 minus every9d_v7_test.
+#
+#   o3b dataset viz -d every9d_v7_train -c chair
+#
+# 110549 sequences = 114404 (every9d_v7) - 3855 (every9d_v7_test), object
+# granularity, in <path_preprocess>/subset/every9d_v7_train.yaml. Disjoint from
+# every9d_v7_test by construction, so nothing a model trains on here appears
+# there — the two were written in one pass and re-sampling either alone breaks
+# that.
+#
+# Everything else — paths, mesh_type, tform_obj_type (every9d_v7), modalities,
+# transform, the frame/sequence caps — is inherited from every9d_v7.
+
+defaults:
+  - every9d_v7
+  - _self_
+
+subset_name: "every9d_v7_train"

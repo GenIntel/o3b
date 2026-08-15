@@ -15,6 +15,10 @@ from o3b.data.modalities import (
 )
 
 
+# "not read yet", distinct from a subset that resolved to None (= unfiltered).
+_UNSET = object()
+
+
 # ── Item / batch type enums ───────────────────────────────────────────────────
 
 class ItemType(str, Enum):
@@ -71,6 +75,12 @@ class DatasetConfig:
     # filtering
     categories:        Optional[list[str]]   = None   # None = all
     subsets:           Optional[list[str]]   = None   # None = all; e.g. ["train"] or ["train","val"]
+    # named hand-picked selection: keeps only the items whose object id (or frame
+    # id) is listed in path_preprocess/subset/<subset_name>.yaml — see
+    # o3b/dataset/subset_store.py.  Applied before filter_count_max, so the cap
+    # counts what the selection left.  Unrelated to `subsets` above, which is
+    # DenseMatcher's per-object split column.
+    subset_name:       Optional[str]         = None   # None = no selection filter
     filter_count_max:  Optional[int]         = None   # None = all; max number of samples to load
     filter_has_kpts:   bool                  = False
     # frame_object_pair: how many viewpoints (frames) to sample per object instance
@@ -141,6 +151,7 @@ class DatasetConfig:
             "object_modalities": sorted(self.object_modalities) if self.object_modalities else None,
             "categories":        self.categories,
             "subsets":           self.subsets,
+            "subset_name":       self.subset_name,
             "filter_count_max":  self.filter_count_max,
             "filter_has_kpts":    self.filter_has_kpts,
             "frame_pair_views_per_instance": self.frame_pair_views_per_instance,
@@ -179,6 +190,7 @@ class DatasetConfig:
             object_modalities = set(d["object_modalities"]) if d.get("object_modalities") else None,
             categories       = d.get("categories"),
             subsets          = d.get("subsets"),
+            subset_name      = d.get("subset_name"),
             filter_count_max = d.get("filter_count_max") or d.get("max_samples"),
             filter_has_kpts   = bool(d.get("filter_has_kpts",   False)),
             frame_pair_views_per_instance = int(d.get("frame_pair_views_per_instance", 1)),
@@ -343,6 +355,58 @@ class ConfigurableDataset(_TorchDataset):
 
     def _setup(self) -> None:
         pass
+
+    # ── named subsets ─────────────────────────────────────────────────────────
+
+    def subset(self):
+        """The ``Subset`` ``subset_name`` names, or None when nothing is selected.
+
+        Read lazily and cached: subclasses call it from ``_setup``, and some
+        (UCO3D's ``_walker``) build an instance without going through
+        ``__init__`` at all, so there is no one place to load it eagerly.
+
+        ``extra.subset_ids`` short-circuits the file and selects the listed ids
+        directly — how a tool asks for a specific handful of objects without
+        writing a file first.
+        """
+        cached = getattr(self, "_subset_cache", _UNSET)
+        if cached is _UNSET:
+            cached = self._load_subset()
+            self._subset_cache = cached
+        return cached
+
+    def _load_subset(self):
+        from o3b.dataset import subset_store
+
+        explicit = (self.cfg.extra or {}).get("subset_ids")
+        if explicit is not None:
+            return subset_store.from_ids(explicit)
+        if not self.cfg.subset_name:
+            return None
+        if self.cfg.path_preprocess is None:
+            raise ValueError(
+                f"subset_name is {self.cfg.subset_name!r} but path_preprocess is None; "
+                f"cannot resolve subset/{self.cfg.subset_name}.yaml"
+            )
+        sub = subset_store.load(self.cfg.path_preprocess, self.cfg.subset_name)
+        print(f"subset {self.cfg.subset_name!r}: {len(sub)} ids from "
+              f"{subset_store.find(self.cfg.path_preprocess, self.cfg.subset_name)}")
+        return sub
+
+    def in_subset(self, object_id: Optional[str] = None,
+                  frame_id: Optional[str] = None) -> bool:
+        """Does this item survive the subset filter? (True when there is none)
+
+        Pass the ids the item actually has: with only an ``object_id`` this is
+        the walk-level question "is any part of this object selected", and with
+        a ``frame_id`` as well it is the per-item one.
+        """
+        sub = self.subset()
+        if sub is None:
+            return True
+        if frame_id is None:
+            return sub.has_object(object_id)
+        return sub.has_item(object_id, frame_id)
 
     # ── HuggingFace sharding ──────────────────────────────────────────────────
 

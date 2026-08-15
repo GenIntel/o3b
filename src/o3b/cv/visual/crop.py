@@ -159,7 +159,7 @@ def crop_with_bbox(
     if H_out <= 10.0 or W_out <= 10.0:
         raise ValueError
 
-    logger.info(scale)
+    logger.debug(scale)
     return crop(
         img,
         H_out,

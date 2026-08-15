@@ -49,6 +49,12 @@ class DenseMatcher(ConfigurableDataset):
             _id_to_idx: dict[str, int] = {r["object_id"]: i for i, r in enumerate(self._object_rows)}
             cats    = self.cfg.categories
             subsets = self.cfg.subsets
+            # subset/<subset_name>.yaml: a hand-picked list of object ids,
+            # applied before filter_count_max counts them (so the cap leaves SQL
+            # while one is active).  Distinct from `subsets`, the index's split
+            # column.
+            subset  = self.subset()
+            limit   = self.cfg.filter_count_max
 
             def _build_clauses(prefix: str = "") -> tuple[str, list]:
                 """Return (WHERE clauses string, params list) for optional filters."""
@@ -70,12 +76,15 @@ class DenseMatcher(ConfigurableDataset):
 
             if self.cfg.item_type == ItemType.OBJECT:
                 clauses, params = _build_clauses()
-                limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
+                limit_clause = f" LIMIT {limit}" if limit and subset is None else ""
                 rows = cur.execute(
                     f"SELECT object_id FROM objects WHERE 1=1{clauses}{limit_clause}",
                     params,
                 ).fetchall()
-                self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
+                oids = [r["object_id"] for r in rows]
+                if subset is not None:
+                    oids = [o for o in oids if subset.has_object(o)][:limit or None]
+                self._object_rows_id = [_id_to_idx[o] for o in oids]
 
             elif self.cfg.item_type == ItemType.OBJECT_PAIR:
                 # Pairs are derived on the fly (all same-category combinations);
@@ -84,7 +93,7 @@ class DenseMatcher(ConfigurableDataset):
                 trgt_clauses, trgt_params = _build_clauses(prefix="b.")
                 all_clauses = src_clauses + trgt_clauses
                 all_params  = src_params  + trgt_params
-                limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
+                limit_clause = f" LIMIT {limit}" if limit and subset is None else ""
                 rows = cur.execute(f"""
                     SELECT a.object_id AS src_object_id, b.object_id AS trgt_object_id
                     FROM objects a
@@ -92,10 +101,13 @@ class DenseMatcher(ConfigurableDataset):
                     WHERE a.category IS NOT NULL{all_clauses}
                     ORDER BY a.object_id, b.object_id{limit_clause}
                 """, all_params).fetchall()
-                self._object_rows_id = [
-                    (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])
-                    for r in rows
-                ]
+                pairs = [(r["src_object_id"], r["trgt_object_id"]) for r in rows]
+                if subset is not None:
+                    # both sides, or a pair would reach outside the selection
+                    pairs = [p for p in pairs
+                             if subset.has_object(p[0])
+                             and subset.has_object(p[1])][:limit or None]
+                self._object_rows_id = [(_id_to_idx[s], _id_to_idx[t]) for s, t in pairs]
         finally:
             con.close()
 

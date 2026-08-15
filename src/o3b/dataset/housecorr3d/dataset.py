@@ -182,6 +182,13 @@ class HouseCorr3D(ConfigurableDataset):
                 self._obj_by_id = {r["object_id"]: r for r in self._object_rows}
 
                 cats = self.cfg.categories  # Optional[list[str]]
+                # A named subset (subset/<subset_name>.yaml) selects ids by hand.
+                # It thins the rows *before* filter_count_max counts them, so
+                # with one active the cap moves out of SQL and is applied to the
+                # filtered list below.  Small tables here, so filtering in python
+                # beats an IN (…) with thousands of bound parameters.
+                subset = self.subset()
+                limit  = self.cfg.filter_count_max
 
                 if self.cfg.item_type == ItemType.OBJECT:
                     kpts_clause = " AND obj_kpts3d IS NOT NULL" if self.cfg.filter_has_kpts else ""
@@ -190,7 +197,7 @@ class HouseCorr3D(ConfigurableDataset):
                         else " AND object_id NOT LIKE '%real%'" if self.cfg.filter_is_real is False
                         else ""
                     )
-                    limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
+                    limit_clause = f" LIMIT {limit}" if limit and subset is None else ""
                     if cats:
                         placeholders = ", ".join("?" * len(cats))
                         cat_clause   = f" AND category IN ({placeholders})"
@@ -201,7 +208,10 @@ class HouseCorr3D(ConfigurableDataset):
                         f"SELECT object_id FROM objects WHERE 1=1{kpts_clause}{real_clause}{cat_clause}{limit_clause}",
                         params,
                     ).fetchall()
-                    self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
+                    oids = [r["object_id"] for r in rows]
+                    if subset is not None:
+                        oids = [o for o in oids if subset.has_object(o)][:limit or None]
+                    self._object_rows_id = [_id_to_idx[o] for o in oids]
 
                 elif self.cfg.item_type == ItemType.OBJECT_PAIR:
                     # Pairs are derived on the fly (all same-category combinations);
@@ -217,7 +227,7 @@ class HouseCorr3D(ConfigurableDataset):
                         if self.cfg.filter_is_real is False
                         else ""
                     )
-                    limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
+                    limit_clause = f" LIMIT {limit}" if limit and subset is None else ""
                     if cats:
                         placeholders = ", ".join("?" * len(cats))
                         cat_clause   = f" AND a.category IN ({placeholders})"
@@ -231,10 +241,13 @@ class HouseCorr3D(ConfigurableDataset):
                         WHERE a.category IS NOT NULL{kpts_clause}{real_clause}{cat_clause}
                         ORDER BY a.object_id, b.object_id{limit_clause}
                     """, params).fetchall()
-                    self._object_rows_id = [
-                        (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])
-                        for r in rows
-                    ]
+                    pairs = [(r["src_object_id"], r["trgt_object_id"]) for r in rows]
+                    if subset is not None:
+                        # both sides, or a pair would reach outside the selection
+                        pairs = [p for p in pairs
+                                 if subset.has_object(p[0])
+                                 and subset.has_object(p[1])][:limit or None]
+                    self._object_rows_id = [(_id_to_idx[s], _id_to_idx[t]) for s, t in pairs]
             finally:
                 con.close()
 
@@ -244,6 +257,9 @@ class HouseCorr3D(ConfigurableDataset):
                 return
             con2 = sqlite3.connect(f"file:{frames_db}?immutable=1", uri=True, timeout=30)
             con2.row_factory = sqlite3.Row
+            # Bound again because the objects block above is skipped without an
+            # index.db, and a frame config need not have one.  subset() is cached.
+            subset = self.subset()
             try:
                 cur2 = con2.cursor()
                 self._frame_rows = [dict(r) for r in cur2.execute("SELECT * FROM frames").fetchall()]
@@ -270,7 +286,7 @@ class HouseCorr3D(ConfigurableDataset):
                 limit_clause2 = (
                     f" LIMIT {limit}"
                     if limit and self.cfg.item_type == ItemType.FRAME_OBJECT
-                    and frame_groups is None else ""
+                    and frame_groups is None and subset is None else ""
                 )
 
                 if cats2:
@@ -294,9 +310,18 @@ class HouseCorr3D(ConfigurableDataset):
                         rid for rid in self._frame_rows_id
                         if _frame_row_in_filter(self._frame_rows[rid], frame_groups)
                     ]
-                    if limit and self.cfg.item_type == ItemType.FRAME_OBJECT:
-                        self._frame_rows_id = self._frame_rows_id[:limit]
                     print(f"filter_frames: kept {len(self._frame_rows_id)} / {n_before} frame rows")
+                if subset is not None:
+                    self._frame_rows_id = [
+                        i for i in self._frame_rows_id
+                        if subset.has_item(self._frame_rows[i].get("object_id"),
+                                           self._frame_rows[i].get("frame_id"))
+                    ]
+                # Either filter moved the cap out of SQL, so spend it here on what
+                # they left; pairs cap their own count in _build_frame_pairs.
+                if (limit and (frame_groups is not None or subset is not None)
+                        and self.cfg.item_type == ItemType.FRAME_OBJECT):
+                    self._frame_rows_id = self._frame_rows_id[:limit]
             finally:
                 con2.close()
 

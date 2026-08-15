@@ -122,6 +122,20 @@ class OpenTT(ConfigurableDataset):
         if split in ("test", "all"):
             self._ingest_split("test",  _TEST_NAMES,  frame_stride, scene_len, clip_stride, manifest)
 
+        # subset/<subset_name>.yaml selects clips by hand.  OpenTT has no object
+        # id, so an entry is either a video name (the whole video's clips) or one
+        # clip's scene_id, <name>_<first frame>.  Before the cap, so the cap
+        # counts what the selection left.
+        subset = self.subset()
+        if subset is not None:
+            before = len(self._clips)
+            self._clips = [
+                c for c in self._clips
+                if subset.has_item(c["name"], f"{c['name']}_{c['indices'][0]:07d}")
+            ]
+            print(f"subset {self.cfg.subset_name or 'extra.subset_ids'}: kept "
+                  f"{len(self._clips)}/{before} clips")
+
         if self.cfg.filter_count_max:
             self._clips = self._clips[: self.cfg.filter_count_max]
 

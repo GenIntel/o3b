@@ -1,0 +1,25 @@
+# every9d_v6_test — every9d_v6 restricted to the hand-picked test selection.
+#
+#   o3b dataset viz -d every9d_v6_test -c chair
+#
+# The selection lives in <path_preprocess>/subset/every9d_v6_test.yaml, outside
+# this repo, so it can be re-picked without touching the config:
+#
+#   o3b dataset select-subset -d every9d_v6 -s every9d_v6_test
+#
+# Its current contents came from configs/dataset/every9d_v6_test_frames.yaml —
+# 1724 entries, one *frame* of each of 1724 sequences over 575 categories. Frame
+# granularity is deliberate and the loader honours it: an entry matching a frame
+# id keeps that frame alone, where a bare `<category>/<sequence>` would keep
+# every frame of the sequence. So this config yields 1724 items, not 1724 x
+# frames_count_max_per_sequence.
+#
+# Everything else — paths, mesh_type, tform_obj_type, modalities, transform, the
+# frame/sequence caps — is inherited from every9d_v6. The caps still apply, but
+# to what the selection left: filter_count_max counts the selected frames.
+
+defaults:
+  - every9d_v6
+  - _self_
+
+subset_name: "every9d_v6_test"

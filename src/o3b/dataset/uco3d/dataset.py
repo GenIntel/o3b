@@ -141,6 +141,19 @@ class UCO3D(ConfigurableDataset):
                     f"{tform_obj_store.db_path(self.cfg.path_preprocess, self.cfg.tform_obj_type).name}"
                 )
 
+    def _subset_frames(self, category: str, sequence: str, frames: list) -> list:
+        """The frames of a sequence a subset leaves, before any thinning.
+
+        A subset listing whole sequences (``apple/1-2-3``) keeps all of them; one
+        listing frame ids (``apple/1-2-3/66``, which is how od3d's own subsets in
+        ``subset/`` are written) keeps exactly the frames it names.
+        """
+        sub = self.subset()
+        if sub is None or sub.has_item(object_id=f"{category}/{sequence}"):
+            return frames
+        return [f for f in frames
+                if sub.has_item(frame_id=f"{category}/{sequence}/{f}")]
+
     def _has_tform_obj(self, category: str, sequence: str) -> bool:
         """Is this sequence in the dataset? (a dict lookup when the db is present)"""
         if self.cfg.tform_obj_type == "raw":
@@ -238,6 +251,13 @@ class UCO3D(ConfigurableDataset):
         n_frames: dict[str, int] = {}
         n_seqs: dict[str, int] = {}
         for (cat, seq), frames in by_sequence.items():
+            # before the caps, exactly as in _walk_rows: a subset thins the pool
+            # the caps then count, it does not carve items out of a capped pool.
+            if not self.in_subset(f"{cat}/{seq}"):
+                continue
+            frames = self._subset_frames(cat, seq, frames)
+            if not frames:
+                continue
             if seqs_max is not None and n_seqs.get(cat, 0) >= seqs_max:
                 continue
             if limit is not None and n_frames.get(cat, 0) >= limit:
@@ -272,8 +292,9 @@ class UCO3D(ConfigurableDataset):
 
         Only sequences that have both a ``tform_obj`` for the configured type and
         a mesh survive — od3d applies the same filter, and a sequence missing
-        either cannot produce a posed item.  Directory listings only; no YAML is
-        read here.
+        either cannot produce a posed item.  With ``subset_name`` set, only the
+        sequences that subset lists survive as well.  Directory listings only; no
+        YAML is read here.
         """
         extra = self.cfg.extra or {}
         frames_max   = extra.get("frames_count_max_per_sequence")
@@ -301,6 +322,10 @@ class UCO3D(ConfigurableDataset):
                 if seqs_max is not None and n_seq >= seqs_max:
                     break
                 sequence = seq_dir.name
+                # first: a subset lookup is a set membership test, while the two
+                # checks below are a stat() each (a network round trip over sshfs)
+                if not self.in_subset(f"{category}/{sequence}"):
+                    continue
                 if not self._has_tform_obj(category, sequence):
                     continue
                 if not self.path_mesh(category, sequence).exists():
@@ -310,6 +335,7 @@ class UCO3D(ConfigurableDataset):
                     (p.stem for p in seq_dir.iterdir() if p.suffix == ".yaml"),
                     key=lambda s: (len(s), s),  # numeric frame names, zero-padding-free
                 )
+                frames = self._subset_frames(category, sequence, frames)
                 if not frames:
                     continue
                 n_seq += 1
@@ -681,11 +707,14 @@ class UCO3D(ConfigurableDataset):
         db_path = db or cls._path_preprocess(cfg) / "frames.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Walk unrestricted: the cache should not inherit this run's frame cap
-        # or per-sequence thinning, both of which apply again when it is read.
+        # Walk unrestricted: the cache should not inherit this run's frame cap,
+        # per-sequence thinning or subset selection — all three apply again when
+        # it is read, and frames.db is keyed by tform_obj_type alone, so a
+        # subset-thinned walk written into it would starve every other config.
         extra = dict(cfg.extra or {})
         extra["frames_count_max_per_sequence"] = None
-        walk_cfg = _r(cfg, filter_count_max=None, extra=extra)
+        extra.pop("subset_ids", None)
+        walk_cfg = _r(cfg, filter_count_max=None, subset_name=None, extra=extra)
         dataset = cls._walker(walk_cfg)
 
         con = sqlite3.connect(db_path, timeout=60)

@@ -1,0 +1,38 @@
+# every9d_v7 — every9d_v6 restricted to the union of the v3 and v6_test selections.
+#
+#   o3b dataset viz -d every9d_v7 -c chair
+#
+# The selection lives in <path_preprocess>/subset/every9d_v7.yaml, outside this
+# repo. It is
+#
+#   subset every9d_v3        114368 sequences   (the ones that have a tform_obj
+#                                                under all_canonical_poses_filtered_center3d_auto)
+#   ∪ subset every9d_v6_test   5314 sequences   (the hand-picked test selection)
+#   = 114404 sequences over 966 categories      (5278 of them were in both)
+#
+# so it is every9d_v3 plus the 36 sequences the v6 test selection added — the
+# review-filtered set, widened by whatever the test picking pulled back in.
+#
+# Object granularity: every entry is `<category>/<sequence>`, so the whole
+# sequence is kept and each contributes up to frames_count_max_per_sequence
+# items — unlike every9d_v6_test, whose entries name single frames.
+#
+# The poses come from tform_obj/every9d_v7.db, forked from every9d_v6.db by
+#
+#   o3b dataset cp-tform-obj-type -d every9d_v6 -t every9d_v7 -p slurm
+#
+# on 2026-08-14 and free to diverge from it: relabelling a sequence here does not
+# touch every9d_v6. It carries all 123066 of v6's rows, so it covers the whole
+# selection — v6 was forked from the *unfiltered* labels, so it is a superset of
+# what every9d_v3 selected. Everything else — paths, mesh_type, modalities,
+# transform, the frame/sequence caps — is inherited from every9d_v6.
+#
+# every9d_v7_test / every9d_v7_train split this one, and inherit from it, so a
+# relabelling round only has to be pointed at here.
+
+defaults:
+  - every9d_v6
+  - _self_
+
+tform_obj_type: "every9d_v7"
+subset_name: "every9d_v7"

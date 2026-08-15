@@ -1,0 +1,22 @@
+# every9d_v6 — every9d_v4 under the canonical poses in tform_obj/every9d_v6/.
+#
+# Forked from all_canonical_poses_center3d_auto
+# by `o3b dataset cp-tform-obj-type -d every9d_v4 -t every9d_v6 -p default`
+# on 2026-08-12, and free to diverge from it: this config reads
+# <path_preprocess>/tform_obj/every9d_v6/, so relabelling or deleting a
+# tform_obj.pt there changes what this dataset contains (a sequence without one
+# is skipped).
+#
+#   o3b dataset viz -d every9d_v6 -c chair
+#
+# Everything else — paths, mesh_type, modalities, transform, the frame/sequence
+# caps — is inherited from every9d_v4.
+#
+# NOTE: od3d keys some of its behaviour off a `_center3d_auto` suffix in this
+# name; o3b does not, and filters purely on the tform_obj.pt existing.
+
+defaults:
+  - every9d_v4
+  - _self_
+
+tform_obj_type: "every9d_v6"

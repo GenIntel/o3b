@@ -39,6 +39,8 @@ from pathlib import Path
 # ── dataset sub-parser ────────────────────────────────────────────────────────
 
 def _build_dataset_parser(sub):
+    from o3b.dataset.grid import GRID_COLS, GRID_OBJECTS, GRID_VIEWS, PREFETCH
+
     p = sub.add_parser("dataset", help="Dataset commands (fetch, index, init, viz)")
     ds_sub = p.add_subparsers(dest="dataset_command", required=True)
 
@@ -325,12 +327,97 @@ def _build_dataset_parser(sub):
         help="Second dataset config shown alongside for comparison (read-only), "
              "e.g. -r every9d_v3",
     )
-    p_axes.add_argument("--objects", type=int, default=5, metavar="N",
-                        help="Objects shown per category (default: 5)")
-    p_axes.add_argument("--views", type=int, default=3, metavar="N",
-                        help="Frames shown per object (default: 3)")
+    p_axes.add_argument("--objects", type=int, default=GRID_OBJECTS, metavar="N",
+                        help=f"Objects shown per category (default: {GRID_OBJECTS})")
+    p_axes.add_argument("--views", type=int, default=GRID_VIEWS, metavar="N",
+                        help=f"Views shown per object, stacked downwards "
+                             f"(default: {GRID_VIEWS})")
+    p_axes.add_argument("--cols", type=int, default=GRID_COLS, metavar="N",
+                        help=f"Objects side by side before a new block of rows "
+                             f"starts (default: {GRID_COLS})")
+    p_axes.add_argument("--prefetch", type=int, default=PREFETCH, metavar="N",
+                        help="Warm the crop cache for the next N categories in the "
+                             "background, 0 to disable (default: %(default)s)")
     p_axes.add_argument("--category", default=None, metavar="NAME",
                         help="Start on this category")
+
+    p_sax = ds_sub.add_parser(
+        "select-and-axes-tform-obj-type",
+        help="Select a category's objects, then swap/flip the axes of those "
+             "objects alone and write the result back to its tform_obj store — "
+             "select-subset and axes-tform-obj-type in one window (Tab switches)",
+    )
+    _add_config(p_sax)
+    p_sax.add_argument("-s", "--subset", default=None, metavar="NAME",
+                       help="Also keep the selection as "
+                            "<path_preprocess>/subset/<NAME>.yaml, loaded at start "
+                            "and autosaved (default: the selection only aims the "
+                            "rotation and is not written anywhere)")
+    p_sax.add_argument("--objects", type=int, default=GRID_OBJECTS, metavar="N",
+                       help=f"Objects shown per page (default: {GRID_OBJECTS})")
+    p_sax.add_argument("--views", type=int, default=GRID_VIEWS, metavar="N",
+                       help=f"Views shown per object, stacked downwards "
+                            f"(default: {GRID_VIEWS})")
+    p_sax.add_argument("--cols", type=int, default=GRID_COLS, metavar="N",
+                       help=f"Objects side by side before a new block of rows "
+                            f"starts (default: {GRID_COLS})")
+    p_sax.add_argument("--prefetch", type=int, default=PREFETCH, metavar="N",
+                       help="Warm the crop cache for the first page of the next N "
+                            "categories in the background, 0 to disable "
+                            "(default: %(default)s)")
+    p_sax.add_argument("--category", default=None, metavar="NAME",
+                       help="Start on this category")
+    p_sax.add_argument("--max-count", type=int, default=None, metavar="N",
+                       help="Offer at most N objects per category, which is what "
+                            "makes opening a big one fast (the walk stops there). "
+                            "Everything already selected is offered on top of the "
+                            "cap (default: the whole category)")
+    p_sax.add_argument("--max-height", type=int, default=None, metavar="PX",
+                       help="Scale the grid to at most this many pixels tall "
+                            "(default: the screen height)")
+
+    p_sel = ds_sub.add_parser(
+        "select-subset",
+        help="Pick the objects of a named subset: page through a category's objects "
+             "and toggle each one in or out, writing "
+             "<path_preprocess>/subset/<name>.yaml",
+    )
+    _add_config(p_sel)
+    p_sel.add_argument("-s", "--subset", required=True, metavar="NAME",
+                       help="Subset name, e.g. every9d_v5_test — stored as "
+                            "<path_preprocess>/subset/<NAME>.yaml and used by a "
+                            "dataset config's subset_name field")
+    p_sel.add_argument("--objects", type=int, default=GRID_OBJECTS, metavar="N",
+                       help=f"Objects shown per page (default: {GRID_OBJECTS})")
+    p_sel.add_argument("--views", type=int, default=GRID_VIEWS, metavar="N",
+                       help=f"Views shown per object, stacked downwards "
+                            f"(default: {GRID_VIEWS})")
+    p_sel.add_argument("--cols", type=int, default=GRID_COLS, metavar="N",
+                       help=f"Objects side by side before a new block of rows "
+                            f"starts (default: {GRID_COLS})")
+    p_sel.add_argument("--prefetch", type=int, default=PREFETCH, metavar="N",
+                       help="Warm the crop cache for the first page of the next N "
+                            "categories in the background, 0 to disable "
+                            "(default: %(default)s)")
+    p_sel.add_argument("--category", default=None, metavar="NAME",
+                       help="Start on this category")
+    p_sel.add_argument("--max-count", type=int, default=None, metavar="N",
+                       help="Offer at most N objects per category, which is what "
+                            "makes opening a big one fast (the walk stops there). "
+                            "Everything already selected is offered on top of the "
+                            "cap (default: the whole category)")
+    p_sel.add_argument("--init-count", type=int, default=None, metavar="N",
+                       help="Offer only the categories that start with exactly N "
+                            "objects selected — reviewing a slice of the standing "
+                            "selection instead of filling one up (default: all "
+                            "categories)")
+    p_sel.add_argument("--target-count", type=int, default=None, metavar="N",
+                       help="Objects wanted per category: categories already at N "
+                            "are reported and skipped, so only the ones still short "
+                            "of it are offered (default: no target, all categories)")
+    p_sel.add_argument("--max-height", type=int, default=None, metavar="PX",
+                       help="Scale the grid to at most this many pixels tall "
+                            "(default: the screen height)")
 
 
 
@@ -615,7 +702,26 @@ def _run_dataset(args, parser=None, argv=None):
                 _resolve_dataset_config(args.reference), overrides=overrides)
         run_axes_editor(cls, cfg, reference=ref_cfg, ref_cls=ref_cls,
                         n_objects=args.objects, n_views=args.views,
+                        cols=args.cols, prefetch=args.prefetch,
                         category=args.category)
+        return
+    elif args.dataset_command == "select-and-axes-tform-obj-type":
+        from o3b.dataset.select_axes import run_select_axes_editor
+        run_select_axes_editor(cls, cfg, args.subset, dataset_name=args.config.stem,
+                               n_objects=args.objects, n_views=args.views,
+                               cols=args.cols, prefetch=args.prefetch,
+                               category=args.category, max_height=args.max_height,
+                               max_count=args.max_count)
+        return
+    elif args.dataset_command == "select-subset":
+        from o3b.dataset.select_subset import run_subset_editor
+        run_subset_editor(cls, cfg, args.subset, dataset_name=args.config.stem,
+                          n_objects=args.objects, n_views=args.views,
+                          cols=args.cols, prefetch=args.prefetch,
+                          category=args.category, max_height=args.max_height,
+                          target_count=args.target_count,
+                          init_count=args.init_count,
+                          max_count=args.max_count)
         return
     elif args.dataset_command == "tform":
         from o3b.dataset.tform import run_tform_viewer
