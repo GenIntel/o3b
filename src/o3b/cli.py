@@ -576,7 +576,7 @@ def _run_dataset_viz_remote(args) -> None:
     import random
     import uuid
 
-    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_home,
      use_conda, path_conda, mp_env, modules) = _platform_srun_context(args.platform)
 
     # viser silently increments its port when the requested one is taken, which
@@ -587,7 +587,7 @@ def _run_dataset_viz_remote(args) -> None:
     local_port  = _find_free_local_port(args.port or 8080)
     job_name    = f"o3b_viz_{uuid.uuid4().hex[:8]}"
 
-    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_home,
                                  use_conda=use_conda, path_conda=path_conda, mp_env=mp_env,
                                  modules=modules)
     init_lines += [
@@ -1701,10 +1701,10 @@ def _mp_env_from_cfg(cfg) -> dict:
 def _platform_srun_context(platform: str):
     """Return the srun context for a platform.
 
-    (ssh_host, srun_base, repo_path, env_path, path_cuda, path_ws,
-     hf_datasets_cache, use_conda, path_conda, mp_env) — env_path is the venv
-    directory or, with use_conda, the conda env prefix; mp_env is the
-    multiprocessing / fd-limit environment from `_mp_env_from_cfg`.
+    (ssh_host, srun_base, repo_path, env_path, path_cuda, path_ws, hf_home,
+     use_conda, path_conda, mp_env) — env_path is the venv directory or, with
+    use_conda, the conda env prefix; mp_env is the multiprocessing / fd-limit
+    environment from `_mp_env_from_cfg`.
     """
     import os, re, subprocess
     from omegaconf import OmegaConf
@@ -1754,7 +1754,7 @@ def _platform_srun_context(platform: str):
     if str(cfg.get("setup_on_login", False)).lower() in ("true", "1", "yes"):
         pull, pull_subs = "false", "false"
     skip_subs      = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
-    hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
+    hf_home        = cfg.get("path_hf_home", "") or ""
 
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
     try:
@@ -1842,13 +1842,13 @@ def _platform_srun_context(platform: str):
     if not env_layout["use_conda"]:
         srun += f",CUDA_HOME={path_cuda},CUDACXX={path_cuda}/bin/nvcc"
 
-    return (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+    return (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_home,
             env_layout["use_conda"], env_layout["path_conda"], _mp_env_from_cfg(cfg),
             modules)
 
 
 def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
-                    hf_datasets_cache: str = "", use_conda: bool = False,
+                    hf_home: str = "", use_conda: bool = False,
                     path_conda: str = "", mp_env: dict | None = None,
                     modules: str = "", node_count: int = 1,
                     gpu_count: int = 1, nccl_env: dict | None = None) -> list[str]:
@@ -1929,8 +1929,18 @@ def _srun_env_lines(path_cuda: str, env_path: str, repo_path: str, path_ws: str,
             f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/${{_cuda_triple}}/include",
             f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/${{_cuda_triple}}/lib",
         ]
-    if hf_datasets_cache:
-        lines.append(f"export HF_DATASETS_CACHE={hf_datasets_cache}")
+    if hf_home:
+        # HF_HOME, not HF_DATASETS_CACHE. The latter only moves the `datasets`
+        # Arrow build cache; the bytes downloaded from the hub go through
+        # `hf_hub_download`, which `datasets` calls without a cache_dir (see
+        # datasets/utils/file_utils.py, the hf:// branch of cached_path), so
+        # they land in HF_HUB_CACHE = ~/.cache/huggingface/hub regardless. On a
+        # cluster with a home quota that is the failure mode: a
+        # `use_huggingface: true` run dies with "OSError: [Errno 122] Disk quota
+        # exceeded" mid-download while the redirected datasets cache sits empty.
+        # HF_HOME is the single root both derive from (plus xet/ and token), so
+        # setting it moves everything at once.
+        lines.append(f"export HF_HOME={hf_home}")
     # acquire the same directory lock used by setup_slurm.sh so concurrent
     # srun jobs don't race on git pull / submodule update / venv install
     if path_ws:
@@ -2141,12 +2151,12 @@ def _run_platform_runi(args):
     # always lands in a checkout matching what was pushed
     _maybe_pull_platform(args, args.platform)
 
-    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_home,
      use_conda, path_conda, mp_env, modules) = _platform_srun_context(args.platform)
 
     # Write a small activation script so bash --init-file can source it without
     # wrapping srun in a bash -c subshell (which breaks the PTY).
-    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_home,
                                  use_conda=use_conda, path_conda=path_conda, mp_env=mp_env,
                                  modules=modules)
     remote_init = f"{path_ws}/.od3d_init" if path_ws else "~/.od3d_init"
@@ -2244,7 +2254,7 @@ def _run_platform_setupi(args):
     import re
     import subprocess
 
-    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_datasets_cache,
+    (ssh_host, srun, repo_path, env_path, path_cuda, path_ws, hf_home,
      use_conda, path_conda, mp_env, modules) = _platform_srun_context(args.platform)
 
     cfg, _ = _load_platform_config(args.platform)
@@ -2278,7 +2288,7 @@ def _run_platform_setupi(args):
     _scp(setup_script_local, f"{remote_setup}.new")
     subprocess.run(["ssh", ssh_host, f"mv -f {remote_setup}.new {remote_setup}"], check=True)
 
-    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+    init_lines = _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_home,
                                  use_conda=use_conda, path_conda=path_conda, mp_env=mp_env,
                                  modules=modules)
     init_lines += [
@@ -3951,7 +3961,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
     if str(cfg.get("setup_on_login", False)).lower() in ("true", "1", "yes"):
         pull, pull_subs = "false", "false"
     path_home      = cfg.get("path_home", path_ws)
-    hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
+    hf_home        = cfg.get("path_hf_home", "") or ""
 
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
     # The compute node has no `huggingface-cli login` state of its own, so hub
@@ -4034,7 +4044,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
                   if _nccl else {})
     run_script_content = "\n".join(
         ["#!/usr/bin/env bash", "set -euo pipefail", ""] +
-        _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_datasets_cache,
+        _srun_env_lines(path_cuda, env_path, repo_path, path_ws, hf_home,
                         use_conda=env_layout["use_conda"],
                         path_conda=env_layout["path_conda"],
                         mp_env=_mp_env_from_cfg(cfg),

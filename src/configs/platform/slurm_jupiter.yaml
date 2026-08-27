@@ -91,7 +91,11 @@ path_cuda: /e/software/default/stages/2025/software/CUDA/12
 
 # scratch is the I/O-heavy tier (auto-purged after 90 days), which is what the
 # HF Arrow build cache wants; the finished shards land in path_datasets_preprocess.
-path_hf_datasets_cache: /e/scratch/${.project}/sommer7/hf_datasets
+# Exported as HF_HOME, so the hub download cache lands here too rather than in
+# the home quota — see the note in slurm.yaml. Purging costs nothing here: the
+# compute nodes have no route to the internet, so hub/ only ever holds what a
+# login-node download put there.
+path_hf_home: /e/scratch/${.project}/sommer7/hf
 
 # venv, not conda — see the note on the blocked defaults channel above.
 use_conda: False

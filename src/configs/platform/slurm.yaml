@@ -35,11 +35,18 @@ path_datasets_preprocess: /work/dlclarge1/sommerl-od3d/datasets # for student: /
 # the data is already here — nothing to sshfs-mount when running on the cluster
 path_datasets_sshfs: ${.path_datasets_raw}
 
-# HF datasets writes its Arrow build cache to ~/.cache by default, which
-# exceeds the home quota on the cluster — use node-local /tmp instead
-# (the final shards are written via save_to_disk to path_datasets_preprocess).
-path_hf_datasets_cache: /tmp/hf_datasets
-#path_hf_datasets_cache: /work/dlclarge1/sommerl-od3d/datasets/cache
+# Everything HuggingFace writes goes under ~/.cache/huggingface by default,
+# which exceeds the home quota on the cluster (50gb soft / 75gb hard). Exported
+# as HF_HOME by the job preamble, which covers both halves at once: the
+# `datasets` Arrow build cache (hub/ is what actually fills up — a
+# `use_huggingface: true` run pulls ~2 gb of parquet per test category) and the
+# xet cache. The final shards are still written via save_to_disk to
+# path_datasets_preprocess.
+#
+# Deliberately on /work rather than node-local /tmp: the hub cache is
+# content-addressed and lock-protected, so concurrent per-category jobs share it
+# safely, and /tmp would re-download every category on every job.
+path_hf_home: ${.path_ws}/hf
 
 partition:  alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-1080ti, lmb_gpu-rtx2080, testdlc_gpu-rtx2080, alldlc_gpu-rtx3080, alldlc_gpu-rtx2080, lmbdlc_gpu-rtx2080
 

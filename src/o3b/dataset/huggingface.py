@@ -62,11 +62,16 @@ DOWNLOADING
 -----------
 ``use_huggingface: true`` in the dataset config makes ``_setup_sharded`` call
 ``load_from_hub`` instead of building the cache from raw data.  It is a plain
-``load_dataset``, so the Parquet lands in the ``datasets`` cache
-(``HF_DATASETS_CACHE``, set per platform by ``path_hf_datasets_cache``) and
-everything downstream (record decoding, the mesh sidecar) is unchanged.  A
-machine that already has the local ``sharded/<sharded_name>`` directory keeps
-using it and never contacts the hub.
+``load_dataset``, so the Parquet lands in the HuggingFace caches under
+``HF_HOME`` (set per platform by ``path_hf_home``) and everything downstream
+(record decoding, the mesh sidecar) is unchanged.  A machine that already has
+the local ``sharded/<sharded_name>`` directory keeps using it and never contacts
+the hub.
+
+Note that ``HF_DATASETS_CACHE`` alone is *not* enough to relocate this: it only
+covers the ``datasets`` Arrow build cache, while the downloaded Parquet goes
+through ``hf_hub_download`` — which ``datasets`` calls without a ``cache_dir``
+— and so lands in ``HF_HUB_CACHE``.  ``HF_HOME`` is the root both derive from.
 
 CREDENTIALS
 -----------
