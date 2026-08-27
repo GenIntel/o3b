@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -929,8 +930,31 @@ def _save_script_locally(name: str, content: str, ts: str | None = None) -> Path
     return path
 
 
-def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script: str) -> str:
-    """Return a complete sbatch script string built from platform config values."""
+# Log lines that mean "this node's GPU is broken", not "this run is broken": the
+# job fails through no fault of its own and the identical job succeeds elsewhere,
+# so `_make_sbatch_script` resubmits on them with the node excluded. Kept
+# deliberately narrow — a pattern that also matches a genuine bug in the code
+# would burn the whole retry budget on a run that can never succeed. Extend per
+# platform with the `resubmit_error_patterns` key (it replaces this list).
+_GPU_FAULT_PATTERNS = [
+    "uncorrectable ECC error",
+    "cudaErrorECCUncorrectable",
+    "CUDA_ERROR_ECC_UNCORRECTABLE",
+    "Failed to initialize NVML",
+    "CUDA driver initialization failed",
+    "no CUDA-capable device is detected",
+    "CUDA error: unspecified launch failure",
+]
+
+
+def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script: str,
+                        self_path: str = "") -> str:
+    """Return a complete sbatch script string built from platform config values.
+
+    ``self_path`` is the script's own path on the remote. Passing it arms the
+    automatic-resubmission epilogue (see below), which needs to hand the file
+    back to `sbatch`; without it the script just runs the command and exits.
+    """
 
     node_count      = int(cfg.get("node_count", 1))
     gpu_count       = int(cfg.get("gpu_count_per_node", 1))
@@ -992,13 +1016,85 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     else:
         launch = f"bash {remote_setup_script}"
 
+    # `--requeue` above only covers node failure and preemption: a job whose GPU
+    # throws an uncorrectable ECC error exits non-zero like any other failure and
+    # slurm leaves it dead.  That node then fails every job it is handed until an
+    # admin resets it, so the retry has to land somewhere else — which rules out
+    # `scontrol requeue` (same allocation) and means a fresh sbatch with the node
+    # added to --exclude.  Off when the caller passes no `self_path`, since there
+    # is nothing to resubmit then (`o3b platform setup` takes that path).
+    resubmit     = bool(self_path) and str(cfg.get("resubmit_on_gpu_error", True)).lower() \
+                       in ("true", "1", "yes")
+    max_attempts = int(cfg.get("resubmit_max_attempts", 3))
+    excl_node    = str(cfg.get("resubmit_exclude_node", True)).lower() in ("true", "1", "yes")
+    patterns     = [str(p) for p in (cfg.get("resubmit_error_patterns", None) or [])] \
+                       or _GPU_FAULT_PATTERNS
+
+    if not resubmit:
+        lines += [
+            "",
+            "set -euo pipefail",
+            "",
+            env_block,
+            "",
+            launch,
+        ]
+        return "\n".join(lines) + "\n"
+
+    # Scanned instead of a `tee` copy: `#SBATCH -o` already points the job's
+    # stdout+stderr here, so the text is on disk by the time the command returns
+    # and a long training run does not get its whole output duplicated to /tmp.
+    # Only the tail is read — with --open-mode=append a slurm-requeued attempt
+    # shares one file with its predecessor, and the older attempt's error must
+    # not re-trigger a resubmission.
+    log_path = f"{path_home}/slurm_jobs/{job_name}_${{SLURM_JOB_ID}}.o"
+    # `set -e` is dropped: the failure below has to be caught, not aborted on.
     lines += [
         "",
-        "set -euo pipefail",
+        "set -uo pipefail",
         "",
         env_block,
         "",
+        "# --- automatic resubmission on GPU hardware faults -------------------",
+        "# $1 is the attempt counter and $2 the exclude list accumulated over the",
+        "# chain; both are empty on the first submission, and the --exclude given",
+        "# on the resubmit command line overrides the #SBATCH header above.",
+        'O3B_ATTEMPT="${1:-1}"',
+        f'O3B_EXCLUDE="${{2:-{nodes_exclude or ""}}}"',
+        f'O3B_SELF="{self_path}"',
+        f"O3B_MAX_ATTEMPTS={max_attempts}",
+        f'O3B_LOG="{log_path}"',
+        "O3B_PATTERNS=" + shlex.quote("|".join(patterns)),
+        "",
         launch,
+        "O3B_RC=$?",
+        "",
+        'if [ "$O3B_RC" -ne 0 ] && [ "$O3B_ATTEMPT" -lt "$O3B_MAX_ATTEMPTS" ] && '
+        'tail -n 5000 "$O3B_LOG" 2>/dev/null | grep -qE "$O3B_PATTERNS"; then',
+        "    O3B_NEXT=$((O3B_ATTEMPT + 1))",
+        # The batch script cannot tell which node of a multi-node allocation
+        # raised the fault, so all of them are excluded.  Set
+        # resubmit_exclude_node: false on a platform where that starves the queue.
+        ('    O3B_BAD="$(scontrol show hostnames "${SLURM_JOB_NODELIST:-}" 2>/dev/null'
+         ' | paste -sd, -)"') if excl_node else '    O3B_BAD=""',
+        # deduplicated: two attempts can land on the same node before it is
+        # excluded, and the list is otherwise passed on down the whole chain
+        '    O3B_NEW_EXCLUDE="$(printf \'%s\\n\' "$O3B_EXCLUDE" "$O3B_BAD" | tr \',\' \'\\n\''
+        " | grep -v '^$' | sort -u | paste -sd, -)\"",
+        '    echo "=== o3b: GPU hardware fault on ${O3B_BAD:-?} (exit $O3B_RC) —'
+        ' resubmitting attempt $O3B_NEXT/$O3B_MAX_ATTEMPTS,'
+        ' excluding ${O3B_NEW_EXCLUDE:-<none>} ==="',
+        "    if command -v sbatch >/dev/null 2>&1; then",
+        '        sbatch ${O3B_NEW_EXCLUDE:+--exclude="$O3B_NEW_EXCLUDE"}'
+        ' "$O3B_SELF" "$O3B_NEXT" "$O3B_NEW_EXCLUDE"',
+        "    else",
+        '        echo "=== o3b: sbatch unavailable on this node — cannot resubmit ==="',
+        "    fi",
+        "fi",
+        # Exit with the real code even after queueing the retry: the attempt did
+        # fail, and `o3b platform status` should show FAILED next to the new
+        # PENDING job rather than a COMPLETED that hides the fault.
+        'exit "$O3B_RC"',
     ]
     return "\n".join(lines) + "\n"
 
@@ -4068,14 +4164,19 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
         ["", f"o3b_launch {command}"]
     )
     remote_run_script = f"{path_ws}/.bench_run_{job_name}_{ts}.sh"
+    # Resolved before the script is built: the resubmission epilogue hands this
+    # very path back to sbatch, so the script has to know where it will land.
+    # Both scripts stay on the remote afterwards for the same reason — a retry
+    # queued hours later still needs them.
+    remote_sbatch = f"{path_ws}/.bench_sbatch_{job_name}_{ts}.sh"
 
     sbatch_script = _make_sbatch_script(
         cfg,
         job_name=job_name,
         env_vars=env_vars,
         remote_setup_script=remote_run_script,
+        self_path=remote_sbatch,
     )
-    remote_sbatch = f"{path_ws}/.bench_sbatch_{job_name}_{ts}.sh"
 
     # Save both scripts locally with the same timestamp before sending to remote
     local_run    = _save_script_locally(f"bench_run_{job_name}",    run_script_content, ts=ts)

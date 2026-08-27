@@ -12,6 +12,23 @@ http_proxy: http://tfproxy.informatik.intra.uni-freiburg.de:8080
 
 restart_upon_fail: True
 
+# `restart_upon_fail` (--requeue) only covers node failure and preemption. A GPU
+# that throws an uncorrectable ECC error mid-run instead fails the job like any
+# ordinary error, and the node keeps failing every job it is handed until an
+# admin resets it — which is how `nodes_exclude` below accumulated its entries by
+# hand. With this on, the job script greps its own slurm log for the hardware
+# faults in cli._GPU_FAULT_PATTERNS and, on a match, resubmits itself with the
+# allocation's nodes appended to --exclude (see cli._make_sbatch_script).
+resubmit_on_gpu_error: True
+resubmit_max_attempts: 3      # counts the first attempt, so 3 = at most 2 retries
+resubmit_exclude_node: True   # false = retry anywhere, including the faulty node
+# Replaces the default pattern list (ERE, matched against the log tail). Keep any
+# addition specific to a *hardware* fault: a pattern that also matches a bug in
+# the run spends the whole retry budget on something that can never succeed.
+# resubmit_error_patterns:
+#   - "uncorrectable ECC error"
+#   - "CUDA error: an illegal memory access"
+
 branch: main
 pull: True
 pull_submodules: True
