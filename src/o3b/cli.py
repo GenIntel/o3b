@@ -2657,6 +2657,56 @@ def _build_bench_parser(sub):
     _add_fetch_args(p_viz)
     _add_qualit_arg(p_viz)
 
+    # ── checkpoint movement (see o3b/checkpoints.py) ──────────────────────────
+    # Both take the same -b/-a/-p line as `bench run`/`rrun`: the checkpoint
+    # they act on is the one those runs would load, read out of the resolved
+    # method.checkpoints_cats rather than named on the command line.
+    def _add_ckpt_args(q, source_help: str):
+        _add_bench_args(q)
+        q.add_argument(
+            "-t", "--target", default="default", metavar="PLATFORM",
+            help="Platform the checkpoints are copied to (default: default, i.e. this "
+                 "machine). Its path_exps is where a local `bench run` with the same "
+                 "ablation looks for them.",
+        )
+        q.add_argument(
+            "--override", action="store_true",
+            help=f"Replace {source_help} instead of skipping it.",
+        )
+        q.add_argument(
+            "-n", "--dry-run", action="store_true",
+            help="Print what would happen; transfer and upload nothing.",
+        )
+
+    p_rsync = bench_sub.add_parser(
+        "rsync",
+        help="Copy the checkpoint each benchmark/ablation run loads to another platform",
+    )
+    _add_ckpt_args(p_rsync, "a target file that already matches the source")
+
+    p_hfup = bench_sub.add_parser(
+        "hf-upload",
+        help="Publish the checkpoint each benchmark/ablation run loads to the HuggingFace Hub",
+    )
+    _add_ckpt_args(p_hfup, "a checkpoint already in the repo")
+    p_hfup.add_argument(
+        "--repo", default=None, metavar="REPO_ID",
+        help="Hub model repo to publish to (default: checkpoints_huggingface.repo_id "
+             "from the ckpts/ ablation).",
+    )
+    p_hfup.add_argument(
+        "--prefix", default=None, metavar="PREFIX",
+        help="Folder inside the repo holding this method's checkpoints, as "
+             "<prefix>/<category>/<file> (default: checkpoints_huggingface.prefix).",
+    )
+    p_hfup.add_argument(
+        "--private", action="store_true",
+        help="Create the repo private if it does not exist yet. The default is "
+             "public, matching the dataset repo — a ckpts/*_hf.yaml ablation is "
+             "only usable without a token if the checkpoints it names are. An "
+             "existing repo keeps whatever visibility it has either way.",
+    )
+
     p_wbsync = bench_sub.add_parser(
         "wbsync",
         help="Upload a platform's offline W&B runs from its login node",
@@ -3650,19 +3700,35 @@ def _run_bench(args) -> None:
         _run_bench_fetch(args)
     elif args.bench_command == "viz":
         _run_bench_viz(args)
+    elif args.bench_command == "rsync":
+        from o3b.checkpoints import run_bench_rsync
+        run_bench_rsync(args)
+    elif args.bench_command == "hf-upload":
+        from o3b.checkpoints import run_bench_hf_upload
+        run_bench_hf_upload(args)
     elif args.bench_command == "wbsync":
         _run_bench_wbsync(args)
 
 
-def _run_bench_run(args) -> None:
+def _bench_runs(benchmark: Path, ablation, platform_arg: str | None):
+    """Resolve a `bench` invocation into one config per ablation combination.
+
+    Returns ``(platform, default_dataset, runs)``, where *runs* holds one
+    ``(combo, run_raw, combo_stem)`` per ablation combination: the benchmark
+    YAML with the platform config injected as ``platform:`` (so
+    ``${platform.path_exps}`` resolves), the combo's ablation YAMLs merged on
+    top in order and every ``${...}`` resolved.  The ``dataset:`` section is
+    only the benchmark's own block — merging it onto the named base config is
+    `_run_bench_run`'s job, since only it builds a dataset.
+
+    `bench run`, `bench rsync` and `bench hf-upload` all go through here: the
+    checkpoint the latter two move around has to be the very file the run would
+    load, which only holds while "what config does this run see" has one answer.
+    """
     import yaml
     from omegaconf import OmegaConf
 
-    from o3b.dataset.dataset import _load_yaml_with_defaults
-    from o3b.dataset.cli import _platform_to_dataset_overrides, _resolve_dataset_config
-    from o3b.run import _run_bench_run_with_cfg
-
-    with open(args.benchmark) as f:
+    with open(benchmark) as f:
         raw = yaml.safe_load(f)
 
     # ── resolve platform and dataset from defaults list ───────────────────────
@@ -3674,7 +3740,71 @@ def _run_bench_run(args) -> None:
             default_platform = item.get("platform", default_platform)
             default_dataset  = item.get("dataset",  default_dataset)
 
-    platform = args.platform if args.platform is not None else (default_platform or "default")
+    platform = platform_arg if platform_arg is not None else (default_platform or "default")
+
+    # ── inject platform config as 'platform:' so ${platform.path_exps} resolves ─
+    try:
+        platform_cfg, _ = _load_platform_config(platform)
+        platform_cfg_resolved = OmegaConf.to_container(
+            OmegaConf.create(platform_cfg), resolve=True
+        )
+        raw["platform"] = platform_cfg_resolved
+    except Exception:
+        pass
+
+    # ── collect ablation combinations (Cartesian product across entries) ────────
+    combos = _ablation_combinations(ablation) if ablation else [()]
+
+    # ── pre-resolve dataset section in isolation so ${key} interpolations
+    #    refer to sibling keys (e.g. ${category}) regardless of nesting later ──
+    if isinstance(raw.get("dataset"), dict):
+        try:
+            raw["dataset"] = OmegaConf.to_container(
+                OmegaConf.create(raw["dataset"]), resolve=True
+            )
+        except Exception:
+            pass  # leave unresolved; the per-run merge will handle it
+
+    runs = []
+    for combo in combos:
+        if combo:
+            # merge all ablation YAMLs in the combo sequentially
+            merged_ablation = OmegaConf.create({})
+            for ablation_file in combo:
+                with open(ablation_file) as f:
+                    merged_ablation = OmegaConf.merge(
+                        merged_ablation, OmegaConf.create(yaml.safe_load(f) or {})
+                    )
+            run_raw = OmegaConf.to_container(
+                OmegaConf.merge(OmegaConf.create(dict(raw)), merged_ablation),
+                resolve=True,
+            )
+            combo_stem = "__".join(f.stem for f in combo)
+        else:
+            # resolve the whole raw config together (not just the 'dataset'
+            # sub-section) so ${category}-style interpolations that reference
+            # sibling top-level keys resolve correctly, mirroring the combo branch
+            run_raw = OmegaConf.to_container(
+                OmegaConf.create(dict(raw)), resolve=True
+            )
+            combo_stem = None
+        runs.append((combo, run_raw, combo_stem))
+    return platform, default_dataset, runs
+
+
+def _run_bench_run(args) -> None:
+    from omegaconf import OmegaConf
+
+    from o3b.dataset.dataset import _load_yaml_with_defaults
+    from o3b.dataset.cli import _platform_to_dataset_overrides, _resolve_dataset_config
+    from o3b.run import _run_bench_run_with_cfg
+
+    platform, default_dataset, runs = _bench_runs(
+        args.benchmark, args.ablation, args.platform
+    )
+    if not runs:
+        print(f"WARNING: no YAML files found in {args.ablation!r}")
+        return
 
     # ── load base dataset config once (shared across all ablations) ───────────
     # Loaded *unresolved* (resolve=False): the ablation's dataset keys are
@@ -3699,61 +3829,12 @@ def _run_bench_run(args) -> None:
 
     ds_base = _load_ds_base(default_dataset) if default_dataset else {}
 
-    # ── inject platform config as 'platform:' so ${platform.path_exps} resolves ─
-    try:
-        platform_cfg, _ = _load_platform_config(platform)
-        platform_cfg_resolved = OmegaConf.to_container(
-            OmegaConf.create(platform_cfg), resolve=True
-        )
-        raw["platform"] = platform_cfg_resolved
-    except Exception:
-        pass
-
-    # ── collect ablation combinations (Cartesian product across entries) ────────
-    if args.ablation:
-        combos = _ablation_combinations(args.ablation)
-        if not combos:
-            print(f"WARNING: no YAML files found in {args.ablation!r}")
-            return
-    else:
-        combos = [()]  # single run with no ablation
-
-    # ── pre-resolve dataset section in isolation so ${key} interpolations
-    #    refer to sibling keys (e.g. ${category}) regardless of nesting later ──
-    if isinstance(raw.get("dataset"), dict):
-        try:
-            raw["dataset"] = OmegaConf.to_container(
-                OmegaConf.create(raw["dataset"]), resolve=True
-            )
-        except Exception:
-            pass  # leave unresolved; the per-run merge will handle it
-
     # ── run once per combination ──────────────────────────────────────────────
-    for combo in combos:
-        if combo:
-            # merge all ablation YAMLs in the combo sequentially
-            merged_ablation = OmegaConf.create({})
-            for ablation_file in combo:
-                with open(ablation_file) as f:
-                    merged_ablation = OmegaConf.merge(
-                        merged_ablation, OmegaConf.create(yaml.safe_load(f) or {})
-                    )
-            run_raw = OmegaConf.to_container(
-                OmegaConf.merge(OmegaConf.create(dict(raw)), merged_ablation),
-                resolve=True,
-            )
-            combo_stem = "__".join(f.stem for f in combo)
+    for _combo, run_raw, combo_stem in runs:
+        if combo_stem:
             print(f"\n{'='*60}")
             print(f"Ablation: {combo_stem}")
             print(f"{'='*60}")
-        else:
-            # resolve the whole raw config together (not just the 'dataset'
-            # sub-section) so ${category}-style interpolations that reference
-            # sibling top-level keys resolve correctly, mirroring the combo branch
-            run_raw = OmegaConf.to_container(
-                OmegaConf.create(dict(raw)), resolve=True
-            )
-            combo_stem = None
 
         # merge benchmark/ablation dataset section on top of base dataset config
         #

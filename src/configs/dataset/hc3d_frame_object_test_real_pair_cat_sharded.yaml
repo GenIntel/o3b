@@ -50,4 +50,6 @@ sharded_name: hc3d_frame_object_test_real_n${filter_count_max}_b${sharded_shard_
 # the real caches land in their own subsets rather than over the synthetic ones.
 huggingface_name: GenIntelLab/HouseCorr3D
 huggingface_config_name: ${sharded_name}
+# all 5 real categories are published — see the synthetic config for the
+# local-cache-wins rule this flag lives under
 use_huggingface: false

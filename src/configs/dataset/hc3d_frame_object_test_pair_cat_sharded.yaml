@@ -84,6 +84,11 @@ sharded_override: false
 huggingface_name: GenIntelLab/HouseCorr3D
 huggingface_config_name: ${sharded_name}
 
+# All 50 categories of this cache are published, so a machine without the local
+# sharded/ directory pulls them instead of needing the index + SOPE raw data.
+# A machine that *does* have the local cache keeps using it (_setup_sharded
+# checks the directory first) — this flag only decides what happens when it is
+# missing.
 use_huggingface: false
 
 
