@@ -7,11 +7,22 @@ name = "o3b"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
+    "torch>=2.0",  # imported at module scope by ~126 modules; previously only
+                   # transitive via torchvision/timm, which left the version to
+                   # whatever those happened to resolve
+    "numpy",
     "gdown",
     "hydra-core",
     "omegaconf",
     "opencv-python<5",  # opencv 5.0 wheels dropped OpenEXR support (depth/mask .exr loading)
     "torchvision",
+    "Pillow",     # o3b.cv.io, o3b.cv.visual.show / .video
+    "matplotlib", # o3b.cv.geometry.fit.se3s_alignment; `dataset viz --render`
+    "tqdm",
+    "pandas",     # o3b.multiprocessing
+    "psutil",     # o3b.io.get_ram_in_gb, o3b.multiprocessing
+    "scikit-learn",  # o3b.cv.cluster.embed, o3b.cv.geometry.mesh_simplification
+    "kornia",     # o3b.cv.geometry.fit.phase_corr
     "potpourri3d", # fmap
     "robust-laplacian", # fmap
     "xatlas",
@@ -28,6 +39,14 @@ dependencies = [
     "gdist",
     "qwen-vl-utils",
     "datasets",
+    "huggingface_hub",  # imported directly by o3b.checkpoints (hf:// checkpoint
+                        # URLs) and o3b.dataset.huggingface (hub up/download).
+                        # It used to arrive only transitively through
+                        # `datasets`, so pip would skip installing it into an
+                        # env whenever *any* copy was already importable — e.g.
+                        # a stale one in ~/.local — and that copy then shadowed
+                        # the env for every process.
+    "pyarrow",          # o3b.dataset.sharding writes the sharded Arrow cache
 ]
 
 [project.scripts]
@@ -48,6 +67,19 @@ nvdiffrast = ["nvdiffrast @ git+https://github.com/NVlabs/nvdiffrast.git"]
 # every x86_64 platform exactly as before.
 open3d = ["open3d"]
 libigl = ["libigl"]
+
+# Optional because the code that needs them is opt-in, not because they are hard
+# to install: keeping them out of the core list is what lets `import o3b.cv.io`
+# work without them.
+sql = ["sqlalchemy"]                     # o3b.multiprocessing.SQLTableDataset only
+tsdf = ["numba", "scikit-image"]         # o3b.cv.reconstruction.tsdf_fusion only
+
+# NOT declared anywhere, deliberately: pytorch3d (module-level import in
+# o3b.cv.geometry._mesh and 11 other modules) publishes no wheel pip can resolve
+# for this torch/CUDA pair, so an extra naming it would only ever fail. It is
+# installed by _install_pytorch3d_checked in setup/setup_slurm.sh. Same for the
+# per-method backends (diff3f, densematcher, genpose2, litept, partfield), which
+# the platform config's `deps:` groups install.
 
 [tool.setuptools.packages.find]
 where = ["src"]

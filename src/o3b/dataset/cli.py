@@ -6,6 +6,7 @@ Usage:
   od3d_dataset index  -d dm_object          [--db index.db] [--platform PLATFORM]
   od3d_dataset init   -d dm_object          [--limit N] [--override] [--platform PLATFORM]
   od3d_dataset viz    -d dm_object_pair     [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
+                                            [--use-huggingface | --no-use-huggingface]
   od3d_dataset sshfs  -d uco3d -p slurm     [--unmount] [--dry-run]
   od3d_dataset cp-tform-obj-type -d every9d_v3 -t can_pose_v5 [-p slurm] [--dry-run]
   od3d_dataset select-subset -d every9d_v3 -s every9d_v3_test [--objects N] [--views N]
@@ -65,6 +66,27 @@ def _platform_to_dataset_overrides(platform: str) -> list[str]:
     if sshfs := plat_cfg.get("path_datasets_sshfs"):
         overrides.append(f"path_datasets_sshfs={sshfs}")
     return overrides
+
+
+def _apply_use_huggingface(cfg, use_huggingface: bool | None) -> None:
+    """Apply the `--use-huggingface` / `--no-use-huggingface` override to *cfg*.
+
+    None (the flag was not given) leaves the config's own value alone.  The
+    override only matters for a sharded config: it is what `_setup_sharded`
+    consults when the cache is missing under <path_preprocess>/sharded/, so
+    `--use-huggingface` downloads it from the hub instead of building it.
+    """
+    if use_huggingface is None or use_huggingface == cfg.use_huggingface:
+        return
+    if use_huggingface and not cfg.sharded_name:
+        print(
+            "WARNING: --use-huggingface has no effect on a config without "
+            "'sharded_name' — the hub holds sharded caches only (try the "
+            "*_sharded variant of this config).",
+            file=sys.stderr,
+        )
+    print(f"Overriding use_huggingface={use_huggingface} (config: {cfg.use_huggingface})")
+    cfg.use_huggingface = use_huggingface
 
 
 def _load_class_from_config(config_path: Path, overrides: list[str] | None = None):
@@ -337,6 +359,13 @@ def main(argv=None) -> None:
                        help="Show front/top/right camera frustums in the viser scene")
     p_vis.add_argument("--object-centric", action="store_true",
                        help="Object-centric view: place object at world origin, camera in object space")
+    p_vis.add_argument(
+        "--use-huggingface", action=argparse.BooleanOptionalAction, default=None,
+        help="Override the config's 'use_huggingface': with it, a sharded config "
+             "whose cache is missing locally is downloaded from the HuggingFace Hub "
+             "instead of built; --no-use-huggingface forces the local build "
+             "(default: whatever the config says)",
+    )
 
     args = parser.parse_args(argv)
     from o3b.cli import _categories_to_dataset_overrides
@@ -400,6 +429,7 @@ def main(argv=None) -> None:
     elif args.command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True
+        _apply_use_huggingface(cfg, args.use_huggingface)
         cls.visualize(
             cfg,
             db=args.db,

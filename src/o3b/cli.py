@@ -22,8 +22,11 @@ Usage:
                                          [--render-frames N] [--renderer BACKEND]
                                          [--debug] [--platform PLATFORM]
                                          [--port PORT] [--remote]
+                                         [--use-huggingface | --no-use-huggingface]
   # --remote runs the viewer on the platform's compute node (interactive srun)
   # and tunnels its viser port to http://localhost:<--port>.
+  # --use-huggingface overrides the config's 'use_huggingface': a sharded config
+  # whose cache is not on this machine is then downloaded from the hub.
   # Pair datasets need no separate index step (pairs derived at load time).
   o3b bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
   o3b platform setup    -p <platform>
@@ -218,6 +221,13 @@ def _build_dataset_parser(sub):
         "--remote", action="store_true",
         help="Run the visualization on the --platform's compute node via an interactive "
              "srun and tunnel its viser port to localhost:--port",
+    )
+    p_vis.add_argument(
+        "--use-huggingface", action=argparse.BooleanOptionalAction, default=None,
+        help="Override the config's 'use_huggingface': with it, a sharded config "
+             "whose cache is missing locally is downloaded from the HuggingFace Hub "
+             "instead of built; --no-use-huggingface forces the local build "
+             "(default: whatever the config says)",
     )
 
     p_tform = ds_sub.add_parser(
@@ -544,6 +554,8 @@ def _viz_remote_command(args, remote_port: int) -> str:
         parts.append("--debug")
     if args.object_centric:
         parts.append("--object-centric")
+    if args.use_huggingface is not None:
+        parts.append("--use-huggingface" if args.use_huggingface else "--no-use-huggingface")
     return " ".join(shlex.quote(p) for p in parts)
 
 
@@ -682,6 +694,8 @@ def _run_dataset(args, parser=None, argv=None):
     elif args.dataset_command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True
+        from o3b.dataset.cli import _apply_use_huggingface
+        _apply_use_huggingface(cfg, args.use_huggingface)
         cls.visualize(
             cfg,
             db=args.db,
