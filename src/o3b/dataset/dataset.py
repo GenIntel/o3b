@@ -123,10 +123,11 @@ class DatasetConfig:
 
     # HuggingFace Hub repo holding this config's sharded cache.  All hc3d configs
     # share one repo ("GenIntelLab/HouseCorr3D") and become separate *subsets*
-    # (hub configs) of it, named by huggingface_config_name — which interpolates
-    # ${category}, so there is one subset per split-variant and category
-    # (e.g. "train_backpack").  It defaults to sharded_name when unset, which is
-    # what a config publishing its cache directory verbatim gets.
+    # (hub configs) of it, named by huggingface_config_name — which they set to
+    # ${sharded_name}, so a subset is named after the cache directory it came
+    # from and ${category} gives one per category.  It defaults to sharded_name
+    # when unset; setting it explicitly is how a config publishes under a hub
+    # name that differs from its local cache directory.
     # `o3b dataset hf-upload` pushes a built cache there; use_huggingface=True
     # downloads it instead of building it from raw data (into the same
     # <path_preprocess>/sharded/<sharded_name> a local build uses).

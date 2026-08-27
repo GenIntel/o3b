@@ -17,27 +17,30 @@ shards and maintains the README ``configs:`` block that the viewer reads.  Each
 cache becomes one *config* — what the Hub UI calls a **subset** — of the
 ``huggingface_name`` repo.  All hc3d caches share the single repo
 ``GenIntelLab/HouseCorr3D`` and are told apart by ``huggingface_config_name``,
-which interpolates ``${category}``, so the repo holds one subset per
-split-variant and category:
+which mirrors ``sharded_name`` and so interpolates ``${category}``: the repo
+holds one subset per split-variant and category, named exactly like the cache
+directory it came from.
 
     GenIntelLab/HouseCorr3D/
       README.md                    ← configs: block, one entry per subset
-      train_backpack/
+      hc3d_frame_object_train_n50000_b100_r512_mmc16_cbackpack/
         train-00000-of-000NN.parquet …
-      train_backpack_meshes/
+      hc3d_frame_object_train_n50000_b100_r512_mmc16_cbackpack_meshes/
         train-00000-of-00001.parquet          ← mesh sidecar
-      train_book/ …
-      test_pair_backpack/ …                   ← hc3d_frame_object_test_pair
-      test_real_pair_bread/ …                 ← hc3d_frame_object_test_real_pair
+      hc3d_frame_object_train_n50000_b100_r512_mmc16_cbook/ …
+      hc3d_frame_object_test_n1000_b100_r512_mmc16_cbackpack/ …
+      hc3d_frame_object_test_real_n1000_b100_r512_mmc16_cbread/ …
       …
 
 Uploading is one command per category (``-a "-c backpack,-c book"`` runs
 several, each pushing its own subset into that repo) and a consumer pulls only
-the subset it needs.  ``huggingface_config_name`` deliberately drops the shard
-parameters (item cap, shard size, resolution, mesh type) that ``sharded_name``
-carries, so a rebuilt cache replaces its subset in place rather than adding a
-near-duplicate; a config that wants the old side-by-side behaviour just leaves
-``huggingface_config_name`` unset and is published under ``sharded_name``.
+the subset it needs.  Carrying the shard parameters (item cap, shard size,
+resolution, mesh type) in the subset name lets caches that differ only in those
+sit side by side rather than overwriting one another; re-pushing a subset
+replaces exactly its own shards.  ``huggingface_config_name`` exists as a
+separate field because it is a *hub* name: it defaults to ``sharded_name`` but
+can be set to anything, and the local cache directory is always found under
+``sharded_name`` regardless.
 
 Because the subsets share one repo, per-category uploads run concurrently
 (``-a`` with ``--remote`` submits one sbatch job each) all rewrite the same
@@ -93,10 +96,11 @@ def _resolve_cfg(config_path: Path, platform: str, categories: str | None):
 def hub_config_name(cfg) -> str | None:
     """The subset (hub config) this cache is published as.
 
-    ``huggingface_config_name`` when the config sets one — the hc3d configs do,
-    since they all share one repo and need short, stable subset names that do
-    not carry the local cache's shard parameters.  Otherwise the cache directory
-    name itself, which is what publishing a single-cache repo amounts to.
+    ``huggingface_config_name`` when the config sets one — the hc3d configs set
+    it to ``${sharded_name}``, so their subsets are named after the cache
+    directory even though they all share one repo.  Otherwise the cache
+    directory name itself, which is the same thing by default; the field exists
+    so a config can publish under a name of its own without moving the cache.
     """
     return cfg.huggingface_config_name or cfg.sharded_name
 

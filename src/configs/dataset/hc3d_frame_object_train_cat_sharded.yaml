@@ -87,16 +87,18 @@ sharded_override: false
 
 # HuggingFace Hub repo holding the sharded caches (see hf-upload above). All
 # hc3d variants share the one repo and are told apart by huggingface_config_name
-# — the Hub calls those *subsets*, and ${category} makes one per category, so
-# this config contributes train_backpack, train_book, … to it. The cache is
-# uploaded as Parquet, which is what gives the repo a dataset viewer + Croissant
-# file (raw save_to_disk .arrow gets neither); the mesh sidecar becomes a second
-# subset, train_${category}_meshes.
+# — the Hub calls those *subsets*. It mirrors ${sharded_name}, so a subset is
+# named exactly like the cache directory it came from and carries the shard
+# parameters too (n / b / r / mesh_type): caches differing only in those live
+# side by side instead of overwriting one another, and ${category} gives one
+# subset per category. The cache is uploaded as Parquet, which is what gives the
+# repo a dataset viewer + Croissant file (raw save_to_disk .arrow gets neither);
+# the mesh sidecar becomes a second subset, ${sharded_name}_meshes.
 # use_huggingface: true loads that subset from the hub (into the datasets cache)
 # instead of building it from the raw data, so no index / SOPE files are
 # needed on that machine.
 huggingface_name: GenIntelLab/HouseCorr3D
-huggingface_config_name: train_${category}
+huggingface_config_name: ${sharded_name}
 use_huggingface: false
 
 # overrides the (already-lowered) default from hc3d_frame_object_pair.yaml;

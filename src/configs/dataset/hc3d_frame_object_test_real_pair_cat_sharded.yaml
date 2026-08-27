@@ -44,9 +44,10 @@ filter_count_max: 1000
 # distinct from the synthetic sharded cache (same fields, different source data)
 sharded_name: hc3d_frame_object_test_real_n${filter_count_max}_b${sharded_shard_size}_r${img_size}_m${mesh_type}_c${category}
 
-# Same repo as every other hc3d variant, own subset per category — the name has
-# to be overridden here, since the inherited one (test_pair_${category}) would
-# publish the real caches over the synthetic ones.
+# Same repo as every other hc3d variant, own subset per category. Both values are
+# inherited from the synthetic pair config and repeated here only to keep the file
+# readable: the subset mirrors ${sharded_name}, which is overridden just above, so
+# the real caches land in their own subsets rather than over the synthetic ones.
 huggingface_name: GenIntelLab/HouseCorr3D
-huggingface_config_name: test_real_pair_${category}
+huggingface_config_name: ${sharded_name}
 use_huggingface: false
