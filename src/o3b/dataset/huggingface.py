@@ -250,8 +250,8 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
 
         from datasets import load_from_disk
 
-        # Before, so this push's card starts from a small one (see _strip_dataset_info),
-        # and after, so the one block this push added does not accumulate for the next.
+        # Only before the push, and only once the card is actually large — see
+        # _strip_dataset_info on why each extra commit here is expensive.
         _strip_dataset_info(api, repo_id)
         _push_with_retry(
             load_from_disk(str(path)), api, repo_id,
@@ -259,7 +259,6 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
             private=private, token=token,
             commit_message=f"{'update' if config_name in uploaded else 'add'} {config_name}",
         )
-        _strip_dataset_info(api, repo_id)
         # The mesh sidecar is a dataset of its own (object_id → mesh), stored
         # next to the shards locally; on the hub it is a second config so the
         # item shards stay one clean table for the viewer.
@@ -271,22 +270,18 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
                 private=private, token=token,
                 commit_message=f"meshes for {config_name}",
             )
-            _strip_dataset_info(api, repo_id)
     except Exception as e:
         _reraise_with_identity(e, api, platform, repo_id)
     print(f"Done. https://huggingface.co/datasets/{repo_id}/viewer/{config_name}")
 
 
 def _is_commit_conflict(exc: Exception) -> bool:
-    """True for the Hub's "someone else committed first" responses (409 / 412)."""
-    seen, e = set(), exc
-    while e is not None and id(e) not in seen:
-        seen.add(id(e))
-        status = getattr(getattr(e, "response", None), "status_code", None)
-        if status in (409, 412) or "412" in str(e)[:200] or "409" in str(e)[:200]:
-            return True
-        e = e.__context__ or e.__cause__
-    return False
+    """True for the Hub's "someone else committed first" responses (409 / 412).
+
+    Reads the status off the response, never out of the message — see
+    ``_http_status`` for why grepping the text misfires.
+    """
+    return _http_status(exc) in (409, 412)
 
 
 def _push_with_retry(dset, api, repo_id: str, *, attempts: int = 10, **kwargs) -> None:
@@ -319,8 +314,17 @@ def _push_with_retry(dset, api, repo_id: str, *, attempts: int = 10, **kwargs) -
             _strip_dataset_info(api, repo_id)
 
 
-def _strip_dataset_info(api, repo_id: str, attempts: int = 8) -> None:
+def _strip_dataset_info(api, repo_id: str, attempts: int = 8,
+                        min_bytes: int = 300_000) -> None:
     """Drop the card's ``dataset_info:`` block, keeping ``configs:``.
+
+    Only acts once the card has grown past *min_bytes*, because **every commit
+    counts against the Hub's rate limit of 128 repository commits per hour** and
+    a bulk upload is already spending ~2 of them per category.  Stripping on
+    every push cost a third (and a fourth, for the mesh sidecar), which is what
+    exhausted the quota mid-run and 429'd the remaining jobs.  At ~38 kB per
+    block the default threshold leaves ~18 blocks of headroom under the ~1 MB
+    ceiling while firing roughly once per eight uploads.
 
     ``push_to_hub`` embeds the full Arrow feature schema of every config in the
     card's YAML front matter — ~38 kB per subset for these nested tensor
@@ -355,6 +359,8 @@ def _strip_dataset_info(api, repo_id: str, attempts: int = 8) -> None:
             return  # no card yet (or unreadable) — nothing to strip
         if not text.startswith("---"):
             return
+        if len(text) < min_bytes:
+            return  # still small — not worth a commit against the hourly quota
         _, front, body = text.split("---", 2)
         meta = yaml.safe_load(front) or {}
         if "dataset_info" not in meta:
@@ -436,10 +442,39 @@ def _identity(api, platform: str) -> str:
         return f"<not logged in: {type(e).__name__}> (token from {source})"
 
 
+def _http_status(exc: Exception) -> "int | None":
+    """The HTTP status behind *exc*, from the response rather than its text.
+
+    The message is not safe to grep: every Hub error carries a request id like
+    ``Root=1-6a9027a9-74851641184448c403c122b9``, and a plain ``"403" in text``
+    matches inside it — which turned a 429 rate-limit into a bogus "cannot write
+    to this namespace" report.
+    """
+    seen, e = set(), exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status is not None:
+            return int(status)
+        e = e.__context__ or e.__cause__
+    return None
+
+
 def _reraise_with_identity(exc: Exception, api, platform: str, repo_id: str):
     """Add who the token belongs to to a permission error, then re-raise."""
     text = str(exc)
-    if "403" in text or "401" in text or "Forbidden" in text or "Unauthorized" in text:
+    status = _http_status(exc)
+    if status == 429 or "rate limit" in text.lower():
+        raise RuntimeError(
+            f"{text}\n"
+            f"  the Hub allows 128 repository commits per hour and this bulk upload "
+            f"exhausted them. Each category costs ~2 commits (its shards, and the "
+            f"mesh sidecar), so ~50 categories per hour is the ceiling — split the "
+            f"-a ablation list into waves and leave an hour between them, or wait "
+            f"out the window and re-run with --override (finished categories are "
+            f"skipped without it)."
+        ) from exc
+    if status in (401, 403) or "Forbidden" in text or "Unauthorized" in text:
         namespace = repo_id.split("/")[0]
         raise PermissionError(
             f"{text}\n"
