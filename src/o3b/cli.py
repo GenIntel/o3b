@@ -2706,6 +2706,14 @@ def _build_bench_parser(sub):
              "only usable without a token if the checkpoints it names are. An "
              "existing repo keeps whatever visibility it has either way.",
     )
+    p_hfup.add_argument(
+        "--remote", action="store_true",
+        help="Run the upload as an sbatch job on -p instead of here, so the "
+             "checkpoints go straight from that platform to the Hub rather than "
+             "being fetched to this machine first (same idea as `o3b dataset "
+             "hf-upload --remote`). The local benchmark/ablation YAMLs are staged "
+             "on the platform, as `bench rrun` does.",
+    )
 
     p_wbsync = bench_sub.add_parser(
         "wbsync",
@@ -3704,8 +3712,11 @@ def _run_bench(args) -> None:
         from o3b.checkpoints import run_bench_rsync
         run_bench_rsync(args)
     elif args.bench_command == "hf-upload":
-        from o3b.checkpoints import run_bench_hf_upload
-        run_bench_hf_upload(args)
+        if getattr(args, "remote", False):
+            _run_bench_hf_upload_remote(args)
+        else:
+            from o3b.checkpoints import run_bench_hf_upload
+            run_bench_hf_upload(args)
     elif args.bench_command == "wbsync":
         _run_bench_wbsync(args)
 
@@ -4115,6 +4126,74 @@ def _upload_local_configs(ssh_host: str, stage_dir: str, files: list[tuple[Path,
         ["ssh", ssh_host, f"mkdir -p {stage_dir} && tar -xf - -C {stage_dir}"],
         input=buf.getvalue(), check=True,
     )
+
+
+def _run_bench_hf_upload_remote(args) -> None:
+    """`o3b bench hf-upload --remote`: publish from the platform holding the files.
+
+    Without this the upload runs here, so every checkpoint is first pulled off
+    the cluster (``sync_checkpoints``) and then pushed to the Hub — the payload
+    crosses the network twice, and a 50-category sweep is several GB each way.
+    Running the same command *on* the platform makes the source local to it, so
+    the files go straight to the Hub.
+
+    The remote invocation therefore passes ``-t`` equal to ``-p``: source and
+    target platform are the same one, which is what tells ``upload_checkpoints``
+    to skip the fetch and read ``${platform.path_exps}`` directly. The local
+    benchmark/ablation YAMLs are staged on the platform first (as `bench rrun`
+    does), because the checkpoint paths come out of the ckpts/ ablation and the
+    remote repo checkout may not have this machine's edits to it.
+    """
+    import shlex
+    from datetime import datetime
+
+    platform = args.platform or "slurm"
+    cfg, _ = _load_platform_config(platform)
+    ssh_host = cfg.get("ssh")
+    path_ws = cfg.get("path_ws", "")
+    if not ssh_host or ssh_host is False:
+        raise ValueError(
+            f"platform '{platform}' has no ssh host — there is nothing to run the "
+            f"upload on. Drop --remote to upload from this machine instead."
+        )
+
+    ablation = list(args.ablation or [])
+    job_name = f"hfup_{args.benchmark.stem}"
+    if not path_ws:
+        print("WARNING: platform has no path_ws — the job will use the configs in "
+              "the remote repo checkout, not the local ones")
+        bench_arg = _repo_rel(args.benchmark)
+        abl_args = [_repo_rel(f) for f in ablation]
+    else:
+        ts = datetime.now().strftime("%m%d_%H%M%S")
+        stage = f"{path_ws}/.bench_cfgs/{job_name}_{ts}"
+        files = [(args.benchmark, _stage_rel(args.benchmark))]
+        files += [(f, _stage_rel(f)) for f in ablation]
+        _upload_local_configs(ssh_host, stage, files)
+        bench_arg = f"{stage}/{_stage_rel(args.benchmark)}"
+        abl_args = [f"{stage}/{_stage_rel(f)}" for f in ablation]
+        print(f"Staged {len(files)} local config(s) → {ssh_host}:{stage}")
+
+    # -t == -p: the checkpoints are already on the platform the job runs on, so
+    # upload_checkpoints reads them in place instead of syncing them anywhere
+    parts = ["o3b", "bench", "hf-upload", "-b", bench_arg,
+             "-p", platform, "-t", platform]
+    if abl_args:
+        parts += ["-a", ",".join(abl_args)]
+    if args.override:
+        parts.append("--override")
+    if args.dry_run:
+        parts.append("-n")
+    if args.private:
+        parts.append("--private")
+    if args.repo:
+        parts += ["--repo", args.repo]
+    if args.prefix:
+        parts += ["--prefix", args.prefix]
+    remote_cmd = " ".join(shlex.quote(p) for p in parts)
+
+    print(f"Submitting on {platform}: {remote_cmd}")
+    _run_platform_run_cmd(platform, remote_cmd, job_name=job_name)
 
 
 def _run_bench_rrun(args) -> None:
