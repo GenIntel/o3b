@@ -246,11 +246,15 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
 
         from datasets import load_from_disk
 
+        # Before, so this push's card starts from a small one (see _strip_dataset_info),
+        # and after, so the one block this push added does not accumulate for the next.
+        _strip_dataset_info(api, repo_id)
         load_from_disk(str(path)).push_to_hub(
             repo_id, config_name=config_name, split=split,
             private=private, token=token,
             commit_message=f"{'update' if config_name in uploaded else 'add'} {config_name}",
         )
+        _strip_dataset_info(api, repo_id)
         # The mesh sidecar is a dataset of its own (object_id → mesh), stored
         # next to the shards locally; on the hub it is a second config so the
         # item shards stay one clean table for the viewer.
@@ -261,9 +265,68 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
                 private=private, token=token,
                 commit_message=f"meshes for {config_name}",
             )
+            _strip_dataset_info(api, repo_id)
     except Exception as e:
         _reraise_with_identity(e, api, platform, repo_id)
     print(f"Done. https://huggingface.co/datasets/{repo_id}/viewer/{config_name}")
+
+
+def _strip_dataset_info(api, repo_id: str, attempts: int = 8) -> None:
+    """Drop the card's ``dataset_info:`` block, keeping ``configs:``.
+
+    ``push_to_hub`` embeds the full Arrow feature schema of every config in the
+    card's YAML front matter — ~38 kB per subset for these nested tensor
+    records, against ~85 bytes for the ``configs:`` entry the dataset viewer
+    actually needs.  The Hub validates that front matter on every commit
+    (``/api/validate-yaml``) and rejects it with **413 Payload Too Large** past
+    ~1 MB, which one shared repo reaches at ~26 subsets: every upload after that
+    fails, however small its own data is.
+
+    The block is rebuilt from whatever the card already carries (see
+    ``datasets._get_updated_dataset_card``), so removing it after each push
+    bounds the card at ``configs:`` plus the block the next push adds for
+    itself.  Nothing reads it back — ``load_from_hub`` goes through
+    ``get_dataset_config_names`` / ``load_dataset``, both of which work off
+    ``configs:`` and the Parquet's own schema.  The cost is the row counts and
+    byte sizes the Hub shows on the card.
+
+    Concurrent uploads race here; the commit carries a ``parent_commit``
+    precondition and is retried, and losing the race is harmless anyway — the
+    next push strips whatever is left.
+    """
+    import yaml
+    from huggingface_hub import CommitOperationAdd, HfFileSystem
+    from huggingface_hub.errors import HfHubHTTPError
+
+    fs = HfFileSystem(token=api.token)
+    for attempt in range(attempts):
+        try:
+            parent = api.repo_info(repo_id, repo_type="dataset").sha
+            text = fs.read_text(f"datasets/{repo_id}/README.md", revision=parent)
+        except Exception:
+            return  # no card yet (or unreadable) — nothing to strip
+        if not text.startswith("---"):
+            return
+        _, front, body = text.split("---", 2)
+        meta = yaml.safe_load(front) or {}
+        if "dataset_info" not in meta:
+            return
+        meta.pop("dataset_info")
+        new = "---\n" + yaml.safe_dump(meta, sort_keys=False) + "---" + body
+        try:
+            api.create_commit(
+                repo_id=repo_id, repo_type="dataset",
+                operations=[CommitOperationAdd("README.md", new.encode())],
+                commit_message="strip dataset_info from card (keeps YAML under the Hub's 1 MB limit)",
+                parent_commit=parent,
+            )
+            return
+        except HfHubHTTPError as e:
+            if attempt == attempts - 1:
+                print(f"WARNING: could not strip dataset_info from the card: {e}")
+                return
+            import random, time
+            time.sleep((1 + attempt) * (1 + random.random()))
 
 
 def _delete_non_parquet(api, repo_id: str, config_name: str) -> None:
