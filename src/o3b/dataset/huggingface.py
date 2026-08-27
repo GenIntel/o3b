@@ -42,11 +42,15 @@ separate field because it is a *hub* name: it defaults to ``sharded_name`` but
 can be set to anything, and the local cache directory is always found under
 ``sharded_name`` regardless.
 
-Because the subsets share one repo, per-category uploads run concurrently
+Because the subsets share one repo, per-category uploads that run concurrently
 (``-a`` with ``--remote`` submits one sbatch job each) all rewrite the same
-README.  ``datasets.push_to_hub`` guards that with a ``parent_commit``
-precondition and retries the card commit on 409/412, re-reading the card each
-time, so concurrent pushes serialise instead of losing each other's entries.
+README, and two things bite that ``upload_sharded`` has to handle itself:
+
+* the card's ``dataset_info:`` block grows without bound and the Hub rejects
+  the front matter with 413 past ~1 MB — see ``_strip_dataset_info``;
+* the card commit carries a ``parent_commit`` precondition, so the losers of the
+  race get 412.  ``datasets`` looks like it retries that, but the check is dead
+  code against ``huggingface_hub`` 1.x — see ``_push_with_retry``.
 
 The Parquet round-trip is lossless — same Arrow schema, same nested tensor
 records — but the viewer renders the tensor blobs as (truncated) binary, since
@@ -249,8 +253,9 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
         # Before, so this push's card starts from a small one (see _strip_dataset_info),
         # and after, so the one block this push added does not accumulate for the next.
         _strip_dataset_info(api, repo_id)
-        load_from_disk(str(path)).push_to_hub(
-            repo_id, config_name=config_name, split=split,
+        _push_with_retry(
+            load_from_disk(str(path)), api, repo_id,
+            config_name=config_name, split=split,
             private=private, token=token,
             commit_message=f"{'update' if config_name in uploaded else 'add'} {config_name}",
         )
@@ -260,8 +265,9 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
         # item shards stay one clean table for the viewer.
         side = path / "meshes"
         if side.is_dir():
-            load_from_disk(str(side)).push_to_hub(
-                repo_id, config_name=_mesh_config(config_name), split=split,
+            _push_with_retry(
+                load_from_disk(str(side)), api, repo_id,
+                config_name=_mesh_config(config_name), split=split,
                 private=private, token=token,
                 commit_message=f"meshes for {config_name}",
             )
@@ -269,6 +275,48 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
     except Exception as e:
         _reraise_with_identity(e, api, platform, repo_id)
     print(f"Done. https://huggingface.co/datasets/{repo_id}/viewer/{config_name}")
+
+
+def _is_commit_conflict(exc: Exception) -> bool:
+    """True for the Hub's "someone else committed first" responses (409 / 412)."""
+    seen, e = set(), exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (409, 412) or "412" in str(e)[:200] or "409" in str(e)[:200]:
+            return True
+        e = e.__context__ or e.__cause__
+    return False
+
+
+def _push_with_retry(dset, api, repo_id: str, *, attempts: int = 10, **kwargs) -> None:
+    """``dset.push_to_hub(repo_id, **kwargs)``, retried on a commit conflict.
+
+    ``datasets`` has its own retry for this, but it is dead code against
+    ``huggingface_hub`` 1.x: it re-raises unless ``err.__context__`` is itself
+    an ``HfHubHTTPError``, and the hub now raises ``HfHubHTTPError`` *from* an
+    ``httpx.HTTPStatusError``, so the isinstance check never matches.  With one
+    shared repo and ~50 concurrent per-category uploads, the losers of that race
+    simply died with 412 — the Parquet already pushed, only the card commit lost.
+
+    Retrying re-reads the card and rebuilds the commit; the already-uploaded
+    Parquet is deduplicated by the Hub, so a retry is cheap.
+    """
+    import random
+    import time
+
+    for attempt in range(attempts):
+        try:
+            dset.push_to_hub(repo_id, **kwargs)
+            return
+        except Exception as e:
+            if attempt == attempts - 1 or not _is_commit_conflict(e):
+                raise
+            delay = min(2 ** attempt, 30) * (1 + random.random())
+            print(f"  commit conflict on {repo_id} — retrying in {delay:.0f}s "
+                  f"({attempt + 1}/{attempts - 1})")
+            time.sleep(delay)
+            _strip_dataset_info(api, repo_id)
 
 
 def _strip_dataset_info(api, repo_id: str, attempts: int = 8) -> None:
