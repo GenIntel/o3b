@@ -14,25 +14,36 @@ which ``save_to_disk`` writes nothing of.
 
 So the cache is converted on upload: ``Dataset.push_to_hub`` writes Parquet
 shards and maintains the README ``configs:`` block that the viewer reads.  Each
-cache becomes one *config* named after its ``sharded_name``, and
-``huggingface_name`` interpolates ``${category}``, so there is one repo per
-category:
+cache becomes one *config* — what the Hub UI calls a **subset** — of the
+``huggingface_name`` repo.  All hc3d caches share the single repo
+``GenIntelLab/HouseCorr3D`` and are told apart by ``huggingface_config_name``,
+which interpolates ``${category}``, so the repo holds one subset per
+split-variant and category:
 
-    <name>_cbackpack/
-      README.md                                             ← configs: block
-      hc3d_frame_object_test_n1000_b100_r512_mmc16_cbackpack/
-        test-00000-of-000NN.parquet …
-      hc3d_frame_object_test_n1000_b100_r512_mmc16_cbackpack_meshes/
-        test-00000-of-00001.parquet                          ← mesh sidecar
-    <name>_cbook/
+    GenIntelLab/HouseCorr3D/
+      README.md                    ← configs: block, one entry per subset
+      train_backpack/
+        train-00000-of-000NN.parquet …
+      train_backpack_meshes/
+        train-00000-of-00001.parquet          ← mesh sidecar
+      train_book/ …
+      test_pair_backpack/ …                   ← hc3d_frame_object_test_pair
+      test_real_pair_bread/ …                 ← hc3d_frame_object_test_real_pair
       …
 
 Uploading is one command per category (``-a "-c backpack,-c book"`` runs
-several, each into its own repo) and a consumer pulls only the category it
-needs.  Naming the config after ``sharded_name`` lets caches that differ only in
-shard parameters (item cap, shard size, resolution, mesh type) sit side by side
-in one repo instead of overwriting one another; re-pushing a config replaces
-exactly its own shards.
+several, each pushing its own subset into that repo) and a consumer pulls only
+the subset it needs.  ``huggingface_config_name`` deliberately drops the shard
+parameters (item cap, shard size, resolution, mesh type) that ``sharded_name``
+carries, so a rebuilt cache replaces its subset in place rather than adding a
+near-duplicate; a config that wants the old side-by-side behaviour just leaves
+``huggingface_config_name`` unset and is published under ``sharded_name``.
+
+Because the subsets share one repo, per-category uploads run concurrently
+(``-a`` with ``--remote`` submits one sbatch job each) all rewrite the same
+README.  ``datasets.push_to_hub`` guards that with a ``parent_commit``
+precondition and retries the card commit on 409/412, re-reading the card each
+time, so concurrent pushes serialise instead of losing each other's entries.
 
 The Parquet round-trip is lossless — same Arrow schema, same nested tensor
 records — but the viewer renders the tensor blobs as (truncated) binary, since
@@ -79,19 +90,30 @@ def _resolve_cfg(config_path: Path, platform: str, categories: str | None):
     return DatasetConfig.from_yaml(Path(config_path), overrides=overrides)
 
 
+def hub_config_name(cfg) -> str | None:
+    """The subset (hub config) this cache is published as.
+
+    ``huggingface_config_name`` when the config sets one — the hc3d configs do,
+    since they all share one repo and need short, stable subset names that do
+    not carry the local cache's shard parameters.  Otherwise the cache directory
+    name itself, which is what publishing a single-cache repo amounts to.
+    """
+    return cfg.huggingface_config_name or cfg.sharded_name
+
+
 def _require_hub_target(cfg, what: str) -> tuple[str, str]:
-    """(huggingface_name, sharded_name), or a clear error about what is missing."""
+    """(huggingface_name, hub config name), or a clear error about what is missing."""
     if not cfg.huggingface_name:
         raise ValueError(
             f"the dataset config has no 'huggingface_name' — there is no hub repo "
-            f"to {what}. Add e.g. 'huggingface_name: GenIntel/<repo>' to it."
+            f"to {what}. Add e.g. 'huggingface_name: GenIntelLab/HouseCorr3D' to it."
         )
     if not cfg.sharded_name:
         raise ValueError(
             f"the dataset config has no 'sharded_name' — only a sharded cache can "
             f"be {what}ed. Use a *_sharded config."
         )
-    return str(cfg.huggingface_name), str(cfg.sharded_name)
+    return str(cfg.huggingface_name), str(hub_config_name(cfg))
 
 
 def hf_token(platform: str = "default") -> str | None:
@@ -128,9 +150,9 @@ def load_from_hub(cfg, platform: str = "default"):
     configs = get_dataset_config_names(repo_id, token=token)
     if config_name not in configs:
         raise FileNotFoundError(
-            f"{repo_id} has no config '{config_name}' (it has: {configs}). Either "
+            f"{repo_id} has no subset '{config_name}' (it has: {configs}). Either "
             f"the cache for this category was never uploaded (o3b dataset hf-upload "
-            f"-d <config> -c <category>), or the config's sharded_name has changed."
+            f"-d <config> -c <category>), or huggingface_config_name has changed."
         )
 
     print(f"Loading {repo_id} (config {config_name}) from the HuggingFace Hub…")
@@ -181,7 +203,9 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
     if cfg.path_preprocess is None:
         raise ValueError(f"platform '{platform}' resolves no path_preprocess for {config_path}")
 
-    path = Path(cfg.path_preprocess) / _SHARDED_PARENT / config_name
+    # the cache directory is named after sharded_name; the *subset* it is
+    # published as is config_name, which the config may rename (see hub_config_name)
+    path = Path(cfg.path_preprocess) / _SHARDED_PARENT / cfg.sharded_name
     if not path.is_dir():
         raise FileNotFoundError(
             f"no sharded cache at {path} — build it first with\n"

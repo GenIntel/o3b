@@ -14,8 +14,9 @@ Usage:
                                          [--platform PLATFORM] [-c CATEGORIES]
                                          [--remote] [-a ABLATIONS]
   # pushes <path_preprocess>/sharded/<sharded_name> to the config's
-  # 'huggingface_name' repo, one folder per category; a config with
-  # 'use_huggingface: true' loads its shards from there instead of building them
+  # 'huggingface_name' repo as the subset 'huggingface_config_name', one per
+  # category; a config with 'use_huggingface: true' loads its shards from there
+  # instead of building them
   o3b dataset viz    -d dm_object_pair     [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
@@ -112,8 +113,9 @@ def _build_dataset_parser(sub):
     p_hf = ds_sub.add_parser(
         "hf-upload",
         help="Upload the built sharded cache to the config's 'huggingface_name' repo "
-             "on the HuggingFace Hub (one folder per ${category}); `use_huggingface: "
-             "true` then loads it from there instead of building it",
+             "on the HuggingFace Hub, as the subset 'huggingface_config_name' (one "
+             "per ${category}); `use_huggingface: true` then loads it from there "
+             "instead of building it",
     )
     _add_config(p_hf)
     p_hf.add_argument(

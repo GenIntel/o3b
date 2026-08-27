@@ -121,13 +121,17 @@ class DatasetConfig:
     # (0 = build sequentially in the main process)
     sharded_num_workers: int                = 0
 
-    # HuggingFace Hub repo holding this config's sharded cache, in a folder named
-    # after sharded_name.  Category-sharded configs interpolate ${category} into
-    # it (e.g. "GenIntel/hc3d_frame_object_train_cat_sharded_cbackpack"), giving
-    # one repo per category.  `o3b dataset hf-upload` pushes a built cache there;
-    # use_huggingface=True downloads it instead of building it from raw data
-    # (into the same <path_preprocess>/sharded/<sharded_name> a local build uses).
+    # HuggingFace Hub repo holding this config's sharded cache.  All hc3d configs
+    # share one repo ("GenIntelLab/HouseCorr3D") and become separate *subsets*
+    # (hub configs) of it, named by huggingface_config_name — which interpolates
+    # ${category}, so there is one subset per split-variant and category
+    # (e.g. "train_backpack").  It defaults to sharded_name when unset, which is
+    # what a config publishing its cache directory verbatim gets.
+    # `o3b dataset hf-upload` pushes a built cache there; use_huggingface=True
+    # downloads it instead of building it from raw data (into the same
+    # <path_preprocess>/sharded/<sharded_name> a local build uses).
     huggingface_name:  Optional[str]        = None
+    huggingface_config_name: Optional[str]  = None
     use_huggingface:   bool                 = False
 
     # extra per-dataset kwargs passed through to the implementation
@@ -168,6 +172,7 @@ class DatasetConfig:
             "sharded_shard_size": self.sharded_shard_size,
             "sharded_num_workers": self.sharded_num_workers,
             "huggingface_name":   self.huggingface_name,
+            "huggingface_config_name": self.huggingface_config_name,
             "use_huggingface":    self.use_huggingface,
             "extra":           self.extra,
         }
@@ -208,6 +213,7 @@ class DatasetConfig:
             sharded_shard_size   = int(d.get("sharded_shard_size", 1000)),
             sharded_num_workers  = int(d.get("sharded_num_workers", 0)),
             huggingface_name     = d.get("huggingface_name"),
+            huggingface_config_name = d.get("huggingface_config_name"),
             use_huggingface      = bool(d.get("use_huggingface", False)),
             extra           = d.get("extra", {}),
         )
@@ -676,8 +682,9 @@ class ConfigurableDataset(_TorchDataset):
         if getattr(dataset, "_sharded", None) is not None:
             local = dataset._sharded_dir()
             from_hub = cfg.use_huggingface and (local is None or not local.exists())
+            from o3b.dataset.huggingface import hub_config_name
             print(f"  sharded cache: "
-                  + (f"{cfg.huggingface_name} (config {cfg.sharded_name}) on the "
+                  + (f"{cfg.huggingface_name} (subset {hub_config_name(cfg)}) on the "
                      f"HuggingFace Hub" if from_hub else str(local)))
 
         if limit > 0 and n:
