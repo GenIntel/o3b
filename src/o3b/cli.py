@@ -1606,7 +1606,12 @@ def _fetch_jobs(ssh_host: str, username: str, hours: float = 2.0) -> list:
     """Return job list from sacct for the last *hours* hours as a list of dicts."""
     import subprocess
     fields      = ["JobID", "JobName", "State", "ExitCode", "Elapsed", "Start", "End", "Partition", "NodeList"]
-    start_expr  = f"$(date -d '{hours} hours ago' +'%Y-%m-%dT%H:%M:%S')"
+    # whole minutes, never "{hours} hours": GNU date rejects a fractional offset
+    # ("date: invalid date '24.0 hours ago'"), and the failure is silent —
+    # the substitution collapses to `sacct --starttime=`, which sacct accepts
+    # and answers with its own default window (midnight today) at rc 0.
+    minutes     = max(1, round(hours * 60))
+    start_expr  = f"$(date -d '{minutes} minutes ago' +'%Y-%m-%dT%H:%M:%S')"
     cmd = (
         f"sacct --starttime={start_expr}"
         f" --format={','.join(fields)!r}"
@@ -2486,6 +2491,27 @@ def _run_platform_run(args):
     _run_platform_run_cmd(args.platform, args.command)
 
 
+def _run_scancel(ssh_host: str, scancel_cmd: str) -> None:
+    """Run *scancel_cmd* over ssh, tolerating jobs that ended before it landed.
+
+    scancel exits non-zero as soon as one ID is unknown to slurm (e.g. a job that
+    finished between the squeue preview and the cancel), which is not a failure of
+    the cancel itself — report it instead of raising.
+    """
+    import subprocess
+
+    result = subprocess.run(["ssh", ssh_host, scancel_cmd], capture_output=True, text=True)
+    if result.stdout.strip():
+        print(result.stdout.strip())
+    if result.returncode != 0:
+        if result.stderr.strip():
+            print(result.stderr.strip())
+        print(
+            f"scancel exited with status {result.returncode} "
+            "(jobs that already finished cannot be cancelled)."
+        )
+
+
 def _run_platform_stop(args) -> None:
     import subprocess
 
@@ -2510,33 +2536,48 @@ def _run_platform_stop(args) -> None:
         except ValueError:
             raise ValueError(f"Invalid job range {job_range!r} — expected format A-B")
 
-        job_ids = list(range(id_start, id_end + 1))
-        ids_str = " ".join(str(j) for j in job_ids)
+        n_ids = id_end - id_start + 1
 
-        # Preview: query only those specific job IDs for this user
-        squeue_cmd = f"squeue -j {','.join(str(j) for j in job_ids)} --format='%.10i %.12P %.30j %.10T %.12M' 2>/dev/null"
+        # Preview: list the user's queued jobs and keep those inside the range.
+        # (`squeue -j <ids>` is not usable here — some slurm versions abort the
+        # whole query as soon as one of the listed IDs is unknown.)
+        squeue_cmd = "squeue --format='%.10i %.12P %.30j %.10T %.12M'"
         if username:
             squeue_cmd += f" -u {username}"
         result = subprocess.run(["ssh", ssh_host, squeue_cmd], capture_output=True, text=True)
         lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
-        n_found = max(0, len(lines) - 1)
 
-        if lines:
-            print(result.stdout.strip())
-        print(f"\n{n_found} job(s) found in range {id_start}–{id_end} ({len(job_ids)} IDs checked).")
+        def _in_range(line: str) -> bool:
+            jid = line.split()[0]
+            base = jid.split("_")[0]  # array jobs are reported as <id>_<task>
+            return base.isdigit() and id_start <= int(base) <= id_end
+
+        # Only cancel the IDs squeue still reports: passing an ID that no longer
+        # exists makes scancel print "Invalid job id specified" and exit 1.
+        matched = [l for l in lines[1:] if _in_range(l)]
+        live_ids = [l.split()[0] for l in matched]
+        n_found = len(live_ids)
+
+        if matched:
+            print("\n".join(lines[:1] + matched))
+        print(f"\n{n_found} job(s) found in range {id_start}–{id_end} ({n_ids} IDs checked).")
+
+        if not live_ids:
+            print("Nothing to cancel.")
+            return
 
         if not args.yes:
-            print(f"Cancel all {len(job_ids)} job IDs in range? [y/N] ", end="", flush=True)
+            print(f"Cancel these {n_found} job(s)? [y/N] ", end="", flush=True)
             if input().strip().lower() != "y":
                 print("Aborted.")
                 return
 
-        scancel_range_cmd = f"scancel {ids_str}"
+        scancel_range_cmd = "scancel " + " ".join(live_ids)
         if username:
             scancel_range_cmd += f" --user={username}"
-        print(f"Running: scancel {id_start}…{id_end}")
-        subprocess.run(["ssh", ssh_host, scancel_range_cmd], check=True)
-        print(f"Cancelled job IDs {id_start}–{id_end}.")
+        print(f"Running: scancel {id_start}…{id_end} ({n_found} live job(s))")
+        _run_scancel(ssh_host, scancel_range_cmd)
+        print(f"Cancelled {n_found} job(s) in range {id_start}–{id_end}.")
         return
 
     # ── default mode: cancel all jobs for user/partition ──────────────
@@ -2572,7 +2613,7 @@ def _run_platform_stop(args) -> None:
         scancel_cmd += f" -p {partition}"
 
     print(f"Running: {scancel_cmd}")
-    subprocess.run(["ssh", ssh_host, scancel_cmd], check=True)
+    _run_scancel(ssh_host, scancel_cmd)
     print(f"Cancelled {n_jobs} job(s).")
 
 
@@ -2786,6 +2827,12 @@ def _build_bench_parser(sub):
     p_rrun.add_argument(
         "--force", action="store_true",
         help="Submit jobs even if they are already running, pending, or recently completed.",
+    )
+    p_rrun.add_argument(
+        "--skip-hours", type=float, default=24.0, metavar="N",
+        help="How far back a COMPLETED job counts as already done (default: 24). "
+             "Jobs still running or pending are skipped whatever this is set to; "
+             "--force ignores both.",
     )
     p_rrun.add_argument(
         "--pull", action="store_true",
@@ -4240,8 +4287,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
     subprocess.run(["ssh", ssh_host, remote_submit], check=True)
 
 
-def _get_existing_jobs_on_platform(platform: str) -> set[str]:
-    """Return job names that are pending/running OR completed in the last 24 hours."""
+def _get_existing_jobs_on_platform(platform: str, hours: float = 24.0) -> set[str]:
+    """Return job names that are pending/running OR completed in the last *hours* hours."""
     import subprocess
 
     try:
@@ -4264,9 +4311,9 @@ def _get_existing_jobs_on_platform(platform: str) -> set[str]:
     if result.returncode == 0:
         names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
-    # completed jobs in the last 24 hours via sacct
+    # completed jobs in the last *hours* hours via sacct
     try:
-        completed = _fetch_jobs(ssh_host, username, hours=24.0)
+        completed = _fetch_jobs(ssh_host, username, hours=hours)
         names |= {j["JobName"] for j in completed if j.get("State", "").startswith("COMPLETED")}
     except Exception:
         pass
@@ -4399,9 +4446,11 @@ def _run_bench_rrun(args) -> None:
         combos = [()]
 
     force = getattr(args, "force", False)
+    skip_hours = float(getattr(args, "skip_hours", 24.0))
     n_total = len(combos)
-    print(f"Checking {n_total} job(s) on {platform}…")
-    existing_jobs = set() if force else _get_existing_jobs_on_platform(platform)
+    print(f"Checking {n_total} job(s) on {platform}"
+          + ("" if force else f" (queued, or completed in the last {skip_hours:g} h)") + "…")
+    existing_jobs = set() if force else _get_existing_jobs_on_platform(platform, hours=skip_hours)
 
     # build set of already-fetched ablation combos from the tables/ CSV
     fetched_combos: set[tuple] = set()
