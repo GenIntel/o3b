@@ -4,10 +4,6 @@ logger = logging.getLogger(__name__)
 from torch import nn
 from omegaconf import DictConfig
 import torch
-#from o3b.cv.transforms.sequential import SequentialTransform
-#from o3b.cv.transforms.rgb_uint8_to_float import RGB_UInt8ToFloat
-#from o3b.cv.transforms.rgb_normalize import RGB_Normalize
-# SequentialTransform, RGB_UInt8ToFloat, RGB_Normalize
 from o3b.model.model import OD3D_Model, register_model
 from o3b.data.ext_enum import ExtEnum
 from o3b.cv.visual.resize import resize
@@ -48,13 +44,6 @@ class DINOv2(OD3D_Model):
         self.normalize = normalize
         self.transform_rgb_uint8_to_float = transform_rgb_uint8_to_float
         self.transform_rgb_normalize = transform_rgb_normalize
-
-        #self.transform = SequentialTransform(
-        #    [
-        #        RGB_UInt8ToFloat(),
-        #        RGB_Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        #    ],
-        #)
 
         self.layers_returned = layers_returned # choose from [0, 1] start with deepest (1)
         self.layers_count = len(self.layers_returned)
@@ -135,79 +124,6 @@ class DINOv2(OD3D_Model):
             self.pca_enabled = False
 
         self.out_dim = self.out_dims[-1]
-
-    def set_pca(self, dataset, transform, batch_size, num_workers, pin_memory, device):
-        import copy
-        from tqdm import tqdm
-        from od3d.od3d_datasets.frame import OD3D_FRAME_MODALITIES
-        from od3d.cv.geometry.objects3d.objects3d import PROJECT_MODALITIES
-
-        self.pca_enabled = False
-        self.eval()
-        logger.info(f"Dataset contains {len(dataset)} frames.")
-
-        if OD3D_FRAME_MODALITIES.PCL in dataset.modalities:
-            dataset.modalities.remove(OD3D_FRAME_MODALITIES.PCL)
-            add_pcl = True
-        else:
-            add_pcl = False
-
-        dataset.transform = copy.deepcopy(transform)
-        dataloader_train = torch.utils.data.DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            collate_fn=dataset.collate_fn,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
-
-        if add_pcl:
-            dataset.modalities.append(OD3D_FRAME_MODALITIES.PCL)
-
-        net_feats_all = []
-        net_feats_all_count = 0
-        for i, batch in tqdm(enumerate(iter(dataloader_train))):
-            batch.to(device=device)
-            batch.cam_tform4x4_obj = batch.cam_tform4x4_obj.detach()
-            logger.info(batch.category_id)
-            with torch.no_grad():
-                # B x F+N x C
-                net_out = self(batch.rgb)
-
-                feats2d_net = net_out.featmaps[-1]
-                feats2d_net_mask = (
-                    1.0
-                    * resize(
-                        batch.mask,
-                        H_out=feats2d_net.shape[2],
-                        W_out=feats2d_net.shape[3],
-                    )
-                    > 0.5
-                )
-                net_feats_all.append(
-                    feats2d_net.permute(0, 2, 3, 1)[feats2d_net_mask[:, 0]],
-                )
-
-                net_feats_all_count += net_feats_all[-1].shape[0]
-
-                if net_feats_all_count > 500000:
-                    break
-        net_feats_all = torch.cat(net_feats_all, dim=0)
-
-        # feature_vector_mean = net_feats_all.mean(dim=0)
-        # logger.info(f"shape of mean feature vectors:{feature_vector_mean.shape}")
-        # self.mean_features = feature_vector_mean
-
-        # logger.info(
-        #    f"shape of accumulated feature vectors:{net_feats_all.shape}",
-        # )
-        from od3d.cv.cluster.embed import pca
-
-        pca_V = pca(net_feats_all, C=self.out_dims[-1], return_V=True)
-        self.pca_layer.weight.copy_(pca_V.T)
-        self.pca_enabled = True
-        del net_feats_all
 
     def forward(self, frames_gt, frames_pred=None):
         if frames_pred is None:
