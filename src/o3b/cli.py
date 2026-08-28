@@ -968,6 +968,19 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     partition       = cfg.get("partition", None)
     nodes_exclude   = cfg.get("nodes_exclude", None)
     restart         = cfg.get("restart_upon_fail", False)
+    # `--requeue` (restart_upon_fail) only covers node failure and preemption: a
+    # job whose GPU throws an uncorrectable ECC error exits non-zero like any
+    # ordinary failure and slurm leaves it dead.  That node then fails every job
+    # it is handed until an admin resets it, so the retry has to land somewhere
+    # else — see the epilogue below for how.  Off when the caller passes no
+    # `self_path`, since there is nothing to retry then (`o3b platform setup`
+    # takes that path).
+    resubmit        = bool(self_path) and str(cfg.get("resubmit_on_gpu_error", True)).lower() \
+                          in ("true", "1", "yes")
+    max_attempts    = int(cfg.get("resubmit_max_attempts", 3))
+    excl_node       = str(cfg.get("resubmit_exclude_node", True)).lower() in ("true", "1", "yes")
+    patterns        = [str(p) for p in (cfg.get("resubmit_error_patterns", None) or [])] \
+                          or _GPU_FAULT_PATTERNS
     # JSC (juwels/jupiter) rejects every job without a budget account; the LMB
     # cluster has no accounting and leaves this unset.
     account         = cfg.get("account", None)
@@ -980,7 +993,9 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
 
     optional = {
         "account":        f"#SBATCH --account={account}"          if account       else "",
-        "requeue":        "#SBATCH --requeue"                    if restart       else "",
+        # `resubmit` implies it: its retry path requeues this very job
+        "requeue":        "#SBATCH --requeue"                    if restart
+                                                                 or resubmit     else "",
         "partition":      f"#SBATCH --partition {partition}"     if partition     else "",
         "nodes_exclude":  f"#SBATCH --exclude {nodes_exclude}"   if nodes_exclude else "",
     }
@@ -1016,20 +1031,6 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     else:
         launch = f"bash {remote_setup_script}"
 
-    # `--requeue` above only covers node failure and preemption: a job whose GPU
-    # throws an uncorrectable ECC error exits non-zero like any other failure and
-    # slurm leaves it dead.  That node then fails every job it is handed until an
-    # admin resets it, so the retry has to land somewhere else — which rules out
-    # `scontrol requeue` (same allocation) and means a fresh sbatch with the node
-    # added to --exclude.  Off when the caller passes no `self_path`, since there
-    # is nothing to resubmit then (`o3b platform setup` takes that path).
-    resubmit     = bool(self_path) and str(cfg.get("resubmit_on_gpu_error", True)).lower() \
-                       in ("true", "1", "yes")
-    max_attempts = int(cfg.get("resubmit_max_attempts", 3))
-    excl_node    = str(cfg.get("resubmit_exclude_node", True)).lower() in ("true", "1", "yes")
-    patterns     = [str(p) for p in (cfg.get("resubmit_error_patterns", None) or [])] \
-                       or _GPU_FAULT_PATTERNS
-
     if not resubmit:
         lines += [
             "",
@@ -1044,9 +1045,6 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     # Scanned instead of a `tee` copy: `#SBATCH -o` already points the job's
     # stdout+stderr here, so the text is on disk by the time the command returns
     # and a long training run does not get its whole output duplicated to /tmp.
-    # Only the tail is read — with --open-mode=append a slurm-requeued attempt
-    # shares one file with its predecessor, and the older attempt's error must
-    # not re-trigger a resubmission.
     log_path = f"{path_home}/slurm_jobs/{job_name}_${{SLURM_JOB_ID}}.o"
     # `set -e` is dropped: the failure below has to be caught, not aborted on.
     lines += [
@@ -1055,45 +1053,89 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         "",
         env_block,
         "",
-        "# --- automatic resubmission on GPU hardware faults -------------------",
-        "# $1 is the attempt counter and $2 the exclude list accumulated over the",
-        "# chain; both are empty on the first submission, and the --exclude given",
-        "# on the resubmit command line overrides the #SBATCH header above.",
-        'O3B_ATTEMPT="${1:-1}"',
+        "# --- automatic retry on GPU hardware faults --------------------------",
+        "# The retry is a `scontrol requeue` of this very job, not a fresh sbatch:",
+        "# the LMB partitions carry AllocNodes=kis3bat[1-4], so sbatch from a",
+        "# compute node is refused with `Batch job submission failed:",
+        "# Access/permission denied`.  requeue is a job-update RPC by the job's",
+        "# owner and is not restricted that way.  sbatch is kept as the fallback",
+        "# for a platform whose jobs cannot be requeued.",
+        "#",
+        "# The attempt counter reaches the retry over whichever path it took:",
+        "# SLURM_RESTART_COUNT for a requeue (slurm increments it, the job id and",
+        "# the command line stay), $1 for the sbatch fallback (new job id, so it",
+        "# has to be passed on).  $2 carries the sbatch chain's exclude list, which",
+        "# overrides the --exclude of the #SBATCH header above.",
+        'O3B_ATTEMPT=$(( ${1:-1} + ${SLURM_RESTART_COUNT:-0} ))',
         f'O3B_EXCLUDE="${{2:-{nodes_exclude or ""}}}"',
         f'O3B_SELF="{self_path}"',
         f"O3B_MAX_ATTEMPTS={max_attempts}",
         f'O3B_LOG="{log_path}"',
         "O3B_PATTERNS=" + shlex.quote("|".join(patterns)),
+        "# A requeued attempt keeps the job id and so appends to this same log",
+        "# (--open-mode=append).  This marker is where the scan below starts: the",
+        "# previous attempt's fault is still in the file and must not re-trigger.",
+        'echo "=== o3b: attempt $O3B_ATTEMPT/$O3B_MAX_ATTEMPTS started on'
+        ' $(hostname -s) (job ${SLURM_JOB_ID:-?}) ==="',
         "",
         launch,
         "O3B_RC=$?",
         "",
+        "# tail bounds the read on a long run's log; tac/sed/tac then drops",
+        "# everything up to and including the last attempt marker.  With the marker",
+        "# pushed out of the tail the whole tail is this attempt's anyway.",
+        'O3B_TAIL="$(tail -n 5000 "$O3B_LOG" 2>/dev/null | tac'
+        ' | sed "/^=== o3b: attempt .* started on /q" | tac)"',
+        "",
         'if [ "$O3B_RC" -ne 0 ] && [ "$O3B_ATTEMPT" -lt "$O3B_MAX_ATTEMPTS" ] && '
-        'tail -n 5000 "$O3B_LOG" 2>/dev/null | grep -qE "$O3B_PATTERNS"; then',
+        'printf \'%s\\n\' "$O3B_TAIL" | grep -qE "$O3B_PATTERNS"; then',
         "    O3B_NEXT=$((O3B_ATTEMPT + 1))",
         # The batch script cannot tell which node of a multi-node allocation
         # raised the fault, so all of them are excluded.  Set
         # resubmit_exclude_node: false on a platform where that starves the queue.
         ('    O3B_BAD="$(scontrol show hostnames "${SLURM_JOB_NODELIST:-}" 2>/dev/null'
          ' | paste -sd, -)"') if excl_node else '    O3B_BAD=""',
+        "    # the job's own ExcNodeList carries the list down a requeue chain the",
+        "    # way $2 does down an sbatch chain — a requeue re-runs this script with",
+        "    # the original arguments, so O3B_EXCLUDE is back at the config default",
+        '    O3B_CUR="$(scontrol show job "${SLURM_JOB_ID:-0}" -o 2>/dev/null'
+        " | tr ' ' '\\n' | sed -n 's/^ExcNodeList=//p' | grep -v '^(null)$')\"",
         # deduplicated: two attempts can land on the same node before it is
         # excluded, and the list is otherwise passed on down the whole chain
-        '    O3B_NEW_EXCLUDE="$(printf \'%s\\n\' "$O3B_EXCLUDE" "$O3B_BAD" | tr \',\' \'\\n\''
-        " | grep -v '^$' | sort -u | paste -sd, -)\"",
+        '    O3B_NEW_EXCLUDE="$(printf \'%s\\n\' "$O3B_EXCLUDE" "$O3B_CUR" "$O3B_BAD"'
+        " | tr ',' '\\n' | grep -v '^$' | sort -u | paste -sd, -)\"",
         '    echo "=== o3b: GPU hardware fault on ${O3B_BAD:-?} (exit $O3B_RC) —'
-        ' resubmitting attempt $O3B_NEXT/$O3B_MAX_ATTEMPTS,'
+        ' retrying as attempt $O3B_NEXT/$O3B_MAX_ATTEMPTS,'
         ' excluding ${O3B_NEW_EXCLUDE:-<none>} ==="',
-        "    if command -v sbatch >/dev/null 2>&1; then",
+        "    # The requeue SIGTERMs this step; ignoring it buys the seconds needed",
+        "    # to set ExcNodeList, which slurm only accepts once the job is pending",
+        "    # again (`Job is no longer pending execution` while it runs).  A",
+        "    # requeued job stays ineligible for ~2 min, so losing that race would",
+        "    # take a KillWait shorter than the loop below.",
+        "    trap '' TERM",
+        '    if scontrol requeue "${SLURM_JOB_ID:-0}"; then',
+        '        if [ -n "$O3B_NEW_EXCLUDE" ]; then',
+        "            for _ in $(seq 1 30); do",
+        "                sleep 1",
+        '                scontrol update JobId="$SLURM_JOB_ID"'
+        ' ExcNodeList="$O3B_NEW_EXCLUDE" 2>/dev/null && break',
+        "            done",
+        "        fi",
+        '        echo "=== o3b: requeued job ${SLURM_JOB_ID:-?} as attempt $O3B_NEXT'
+        ' (ExcNodeList=$(scontrol show job "${SLURM_JOB_ID:-0}" -o 2>/dev/null'
+        " | tr ' ' '\\n' | sed -n 's/^ExcNodeList=//p')) ===\"",
+        "    elif command -v sbatch >/dev/null 2>&1; then",
         '        sbatch ${O3B_NEW_EXCLUDE:+--exclude="$O3B_NEW_EXCLUDE"}'
         ' "$O3B_SELF" "$O3B_NEXT" "$O3B_NEW_EXCLUDE"',
         "    else",
-        '        echo "=== o3b: sbatch unavailable on this node — cannot resubmit ==="',
+        '        echo "=== o3b: neither requeue nor sbatch worked here —'
+        ' cannot retry ==="',
         "    fi",
         "fi",
         # Exit with the real code even after queueing the retry: the attempt did
         # fail, and `o3b platform status` should show FAILED next to the new
-        # PENDING job rather than a COMPLETED that hides the fault.
+        # PENDING job rather than a COMPLETED that hides the fault.  (After a
+        # successful requeue slurm usually kills the step before this is reached.)
         'exit "$O3B_RC"',
     ]
     return "\n".join(lines) + "\n"

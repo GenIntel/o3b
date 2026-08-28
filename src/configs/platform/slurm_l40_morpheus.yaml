@@ -1,0 +1,34 @@
+defaults:
+  - slurm
+
+# o3b platform setup -p slurm_lmbl40_morpheus
+
+partition: alldlc2_gpu-l40s # addlc2_gpu-l40s alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmbdlc2_gpu-l40s alldlc2_gpu-l40s #  alldlc_gpu-rtx2080 # alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-1080ti, lmb_gpu-rtx2080, testdlc_gpu-rtx2080, alldlc_gpu-rtx3080, alldlc_gpu-rtx2080, lmbdlc_gpu-rtx2080
+gpu_count_per_node: 1
+cpu_count_per_gpu: 8 # of the 16/gpu the node has (128 threads / 8 gpus)
+ram_per_cpu: "16gb" # 8 cpu/gpu x 16gb = the partition's DefMemPerGPU (128gb);
+                    # was 24gb, which paired with the old cpu_count_per_gpu: 5.
+                    # Keep the product at 128gb/gpu when changing either: a
+                    # larger --mem does not get more RAM per gpu, it just
+                    # blocks the node for other jobs and lengthens the queue.
+
+
+# 1. lmb_gpu-rtx2080 : usually empty, only 3 slots
+# 2. lmbdlc_gpu-rtx2080 : often pending (but eventually it will work)
+# 3. alldlc_gpu-rtx3080 : usually empty (actually not anymore), but fewer gb?
+# 4. alldlc_gpu-rtx2080 : biggest cluster
+# 5. tflmb_gpu-rtx3090: lmb gpu (debugging)
+# 6. tflmb_gpu-1080ti: lmb gpu (debugging)
+# tflmb_gpu-rtx3090
+# tflmb_gpu-1080ti
+# alldlc2_gpu-l40s
+# lmbdlc2_gpu-l40s
+
+walltime: "24:00:00" #  "24:00:00"
+
+deps:
+  #- diff3f
+  - morpheus
+  #- geco
+  #- mrf3dtopo
+  # creates venv_py310_cu124_torch26_densematcher and installs deps there
