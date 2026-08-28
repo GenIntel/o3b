@@ -596,8 +596,25 @@ if [ "${INSTALL_MAGICPONY}" = "true" ] || [ "${INSTALL_MAGICPONY}" = "True" ]; t
     # od3d's third_party (not a git submodule, checked directly into od3d).
     # Provides `import magicpony` for MagicPonyMethod. nvdiffrast (its
     # renderer) and xatlas are already installed above / declared by o3b.
+    MAGICPONY_DIR="third_party/od3d/third_party/MagicPony"
+    # od3d is only the delivery vehicle for these sources -- no od3d code is
+    # imported at runtime -- so every platform lists third_party/od3d in
+    # skip_submodules and the checkout above leaves it empty. Pull it here, and
+    # only here: MagicPony is checked into od3d directly, so a NON-recursive
+    # init suffices and skips od3d's own 7 nested submodules (TRELLIS,
+    # Hunyuan3D-2, DROID-SLAM, ...), which are large and unused here.
+    if [ ! -d "${MAGICPONY_DIR}" ]; then
+        echo "--- git submodule update third_party/od3d (MagicPony sources) ---"
+        git submodule sync -- third_party/od3d
+        _git_retry git submodule update --init -- third_party/od3d
+    fi
+    if [ ! -d "${MAGICPONY_DIR}" ]; then
+        echo "ERROR: ${MAGICPONY_DIR} missing after submodule update." >&2
+        exit 1
+    fi
+    # editable, so third_party/od3d must stay checked out at runtime too
     echo "--- pip install magicpony deps ---"
-    pip install --no-build-isolation -e third_party/od3d/third_party/MagicPony
+    pip install --no-build-isolation -e "${MAGICPONY_DIR}"
 fi
 
 
