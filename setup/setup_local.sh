@@ -40,8 +40,7 @@ usage: bash ${BASH_SOURCE[0]} [options]
   --path-conda DIR  miniconda prefix for --conda (default: \$HOME/miniconda3)
   --pull            git pull the superproject first (off: your tree is not touched)
   --submodules      git submodule update --init --recursive first
-                    (skips third_party/od3d; override with SKIP_SUBMODULES=.
-                    --deps magicpony pulls it on demand regardless)
+                    (limit with SKIP_SUBMODULES=<paths>)
   -h, --help        this message
 
 Every option also has an environment-variable form -- DEPS, PYTHON_VERSION,
@@ -57,10 +56,7 @@ PULL_SUBMODULES="${PULL_SUBMODULES:-false}"
 USE_CONDA="${USE_CONDA:-false}"
 TORCH_VERSION="${TORCH_VERSION:-2.6.0}"
 BRANCH="${BRANCH:-main}"
-# od3d is a heavy, optional submodule; the cluster configs skip it too. The
-# magicpony dep group pulls it on its own (setup_slurm.sh), so skipping it here
-# costs nothing but the MagicPony sources when that group is not requested.
-SKIP_SUBMODULES="${SKIP_SUBMODULES-third_party/od3d}"
+SKIP_SUBMODULES="${SKIP_SUBMODULES-}"
 
 while [ $# -gt 0 ]; do
     case "$1" in

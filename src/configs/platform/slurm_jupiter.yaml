@@ -128,8 +128,6 @@ branch: main
 # So: re-run `o3b platform setup -p slurm_jupiter*` to pick up new commits.
 pull: True
 pull_submodules: True
-skip_submodules:
-  - third_party/od3d
 
 setup: False
 restart_upon_fail: False   # JSC accounting charges a requeued job again

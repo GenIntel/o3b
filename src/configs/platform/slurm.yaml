@@ -37,8 +37,6 @@ resubmit_exclude_node: True   # false = retry anywhere, including the faulty nod
 branch: main
 pull: True
 pull_submodules: True
-skip_submodules:
-  - third_party/od3d
 
 setup: False
 use_conda: True
