@@ -1,0 +1,30 @@
+# every9d_v7_train_max5_trainable — the train half against
+# every9d_v7_test_max5_trainable: every9d_v7 minus every one of its ids.
+#
+#   o3b dataset viz -d every9d_v7_train_max5_trainable -c chair
+#
+# 110882 sequences = 114533 (every9d_v7) - 3651 (every9d_v7_test_max5_trainable),
+# object granularity, in
+# <path_preprocess>/subset/every9d_v7_train_max5_trainable.yaml. The two
+# partition every9d_v7 exactly — disjoint, union is all of it — so no object
+# trained on here is tested there.
+#
+# This is every9d_v7_train_max5 plus the 146 objects the trainable test draw gave
+# back, and those are the whole point of the pair: they carry it from 832 to 895
+# of every9d_v7's 960 categories, and they guarantee at least T-1 train objects
+# for a category's T test ones. The remaining 65 categories have a single
+# sequence in every9d_v7, which the test half holds; there is no train object of
+# them to be had.
+#
+# Use this pair, not every9d_v7_train_max5 / every9d_v7_test_max5, when a run
+# needs every tested category to have been trained on. Both pairs are valid
+# splits; they differ in 146 objects and in that guarantee.
+#
+# Everything else — paths, mesh_type, tform_obj_type (every9d_v7), modalities,
+# transform, the frame/sequence caps — is inherited from every9d_v7.
+
+defaults:
+  - every9d_v7
+  - _self_
+
+subset_name: "every9d_v7_train_max5_trainable"

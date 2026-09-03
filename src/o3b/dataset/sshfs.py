@@ -38,7 +38,43 @@ _SSHFS_OPTIONS = [
     "entry_timeout=3600",
     "attr_timeout=3600",
     "compression=no",
+    # The bulk reads here are already-compressed video, and aes128-gcm is the
+    # cheapest cipher openssh offers on hardware with AES-NI.
+    "Ciphers=aes128-gcm@openssh.com",
 ]
+
+# Without this a mount carries every request over one ssh channel, so threads
+# gain nothing: eight cold 1 KB reads over the UCO3D mount measured 6.4 s
+# serially and 7.0 s across eight threads.  A cold page of the axes editors is
+# ~80 such round trips, and everything that fetches them — collect_frames'
+# read-ahead and decode pools, the prefetcher — is written to overlap.  N is
+# ssh connections, not FUSE threads: each is a real login, so this is also the
+# number the remote's MaxSessions and any per-user connection limit see.
+_SSHFS_CONNS = 8
+
+_PARALLEL_OPTION = "max_conns"
+
+
+def _sshfs_supports(option: str) -> bool:
+    """Does the installed sshfs know ``-o <option>``? (``max_conns`` is 3.0+)
+
+    Probed rather than assumed: an unknown -o makes sshfs refuse to mount at
+    all, which would trade a working slow mount for no mount.
+    """
+    try:
+        out = subprocess.run(["sshfs", "--help"], capture_output=True, text=True,
+                             timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return option in (out.stdout + out.stderr)
+
+
+def sshfs_options(read_only: bool = False, conns: int = _SSHFS_CONNS) -> list[str]:
+    """The -o list a mount is made with."""
+    options = list(_SSHFS_OPTIONS)
+    if conns > 1 and _sshfs_supports(_PARALLEL_OPTION):
+        options.append(f"{_PARALLEL_OPTION}={conns}")
+    return options + (["ro"] if read_only else [])
 
 
 def is_mounted(path: Path) -> bool:
@@ -84,7 +120,10 @@ def mount(cfg_local, cfg_remote, host: str, *, unmount: bool = False,
             cmd = ["fusermount", "-u", str(local)]
         else:
             if is_mounted(local):
-                print(f"  already mounted: {local}")
+                # A live mount keeps the options it was made with, so one from
+                # before max_conns is still serialising every request.
+                print(f"  already mounted: {local}"
+                      "  (--unmount and mount again to pick up option changes)")
                 continue
             if local.exists() and any(local.iterdir()):
                 # Mounting over a non-empty directory hides whatever is in it —
@@ -99,7 +138,7 @@ def mount(cfg_local, cfg_remote, host: str, *, unmount: bool = False,
                 continue
             if not dry_run:
                 local.mkdir(parents=True, exist_ok=True)
-            options = _SSHFS_OPTIONS + (["ro"] if read_only else [])
+            options = sshfs_options(read_only)
             cmd = ["sshfs", f"{host}:{remote}", str(local), "-o", ",".join(options)]
 
         print("  " + " ".join(cmd))

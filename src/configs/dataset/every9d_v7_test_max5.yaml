@@ -1,0 +1,27 @@
+# every9d_v7_test_max5 — every9d_v7_test, with the "at most 5 per category" cap
+# checked rather than assumed.
+#
+#   o3b dataset viz -d every9d_v7_test_max5 -c chair
+#
+# The selection lives in <path_preprocess>/subset/every9d_v7_test_max5.yaml and
+# is an id-for-id copy of subset every9d_v7_test as of 2026-09-01: 3797
+# sequences over 898 categories, no category contributing more than 5 (667 sit
+# at exactly 5, the rest have fewer because that is all they had). Object
+# granularity, like every9d_v7_test — every entry is `<category>/<sequence>`.
+#
+# It exists as its own file because the cap is the point: every9d_v7_test is
+# re-drawn from time to time and has held 6 in a category before, so a run that
+# needs the bound guaranteed names this one and gets a selection that was
+# checked when it was written. The copy does not track later re-draws of
+# every9d_v7_test — re-copy it deliberately, and re-check the cap, when that is
+# what you want.
+#
+# Everything else — paths, mesh_type, tform_obj_type (every9d_v7), modalities,
+# transform, the frame/sequence caps — is inherited from every9d_v7_test, hence
+# from every9d_v7.
+
+defaults:
+  - every9d_v7_test
+  - _self_
+
+subset_name: "every9d_v7_test_max5"

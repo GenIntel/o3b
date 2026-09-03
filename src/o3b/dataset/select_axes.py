@@ -71,7 +71,8 @@ def run_select_axes_editor(cls, cfg, subset_name: Optional[str] = None, *,
                            cols: int = GRID_COLS, prefetch: int = PREFETCH,
                            category: Optional[str] = None,
                            max_height: Optional[int] = None,
-                           max_count: Optional[int] = None) -> None:
+                           max_count: Optional[int] = None,
+                           no_index: bool = False) -> None:
     import tkinter as tk
     from tkinter import ttk
 
@@ -201,6 +202,9 @@ def run_select_axes_editor(cls, cfg, subset_name: Optional[str] = None, *,
         if max_count is not None:
             lines += [(f"max count {max_count} objects offered per category",
                        (200, 200, 120), 0.85)]
+        if no_index:
+            lines += [("--no-index: walking the tree, frames.db ignored",
+                       (200, 200, 120), 0.85)]
         lines += [("---", None, 1)]
         # The category's rules, in the config's frame and fixed there: they are
         # what the arrows are supposed to become, in both modes.
@@ -276,7 +280,8 @@ def run_select_axes_editor(cls, cfg, subset_name: Optional[str] = None, *,
         root.update()
         t0 = time.time()
         st["dataset"], order, st["by_obj"] = open_category(
-            cls, cfg, cat, n_views, max_objects=max_count, keep=selected)
+            cls, cfg, cat, n_views, max_objects=max_count, keep=selected,
+            no_index=no_index)
         st["oids"] = _ordered(order)
         st["axes_oids"] = []
         st["status"] = f"{cat}: {len(st['oids'])} objects in {time.time() - t0:.2f}s"
@@ -292,7 +297,8 @@ def run_select_axes_editor(cls, cfg, subset_name: Optional[str] = None, *,
         """
         cat = cats[st["idx"]]
         st["dataset"], order, st["by_obj"] = open_category(
-            cls, cfg, cat, n_views, max_objects=max_count, keep=selected)
+            cls, cfg, cat, n_views, max_objects=max_count, keep=selected,
+            no_index=no_index)
         st["oids"] = _ordered(order)
         still = set(order)
         st["axes_oids"] = [o for o in st["axes_oids"] if o in still]
@@ -331,7 +337,8 @@ def run_select_axes_editor(cls, cfg, subset_name: Optional[str] = None, *,
             # sel is the UI thread's snapshot — with --max-count it decides which
             # objects the cap must keep, and the live set belongs to that thread
             pf_cats[cat] = open_category(cls, cfg, cat, n_views,
-                                         max_objects=max_count, keep=sel)
+                                         max_objects=max_count, keep=sel,
+                                         no_index=no_index)
         return pf_cats[cat]
 
     def _pf_first_page(cat: str, sel: frozenset):

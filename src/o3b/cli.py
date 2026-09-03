@@ -380,6 +380,12 @@ def _build_dataset_parser(sub):
                             "(default: %(default)s)")
     p_sax.add_argument("--category", default=None, metavar="NAME",
                        help="Start on this category")
+    p_sax.add_argument("--no-index", action="store_true",
+                       help="Ignore <path_preprocess>/frames.db and walk the tree, "
+                            "for while that index is being built on the cluster: "
+                            "a category the indexer is in the middle of reads as "
+                            "empty or half there (default: use the index where it "
+                            "covers the category)")
     p_sax.add_argument("--max-count", type=int, default=None, metavar="N",
                        help="Offer at most N objects per category, which is what "
                             "makes opening a big one fast (the walk stops there). "
@@ -414,6 +420,12 @@ def _build_dataset_parser(sub):
                             "(default: %(default)s)")
     p_sel.add_argument("--category", default=None, metavar="NAME",
                        help="Start on this category")
+    p_sel.add_argument("--no-index", action="store_true",
+                       help="Ignore <path_preprocess>/frames.db and walk the tree, "
+                            "for while that index is being built on the cluster: "
+                            "a category the indexer is in the middle of reads as "
+                            "empty or half there (default: use the index where it "
+                            "covers the category)")
     p_sel.add_argument("--max-count", type=int, default=None, metavar="N",
                        help="Offer at most N objects per category, which is what "
                             "makes opening a big one fast (the walk stops there). "
@@ -728,7 +740,8 @@ def _run_dataset(args, parser=None, argv=None):
                                n_objects=args.objects, n_views=args.views,
                                cols=args.cols, prefetch=args.prefetch,
                                category=args.category, max_height=args.max_height,
-                               max_count=args.max_count)
+                               max_count=args.max_count,
+                               no_index=args.no_index)
         return
     elif args.dataset_command == "select-subset":
         from o3b.dataset.select_subset import run_subset_editor
@@ -738,7 +751,8 @@ def _run_dataset(args, parser=None, argv=None):
                           category=args.category, max_height=args.max_height,
                           target_count=args.target_count,
                           init_count=args.init_count,
-                          max_count=args.max_count)
+                          max_count=args.max_count,
+                          no_index=args.no_index)
         return
     elif args.dataset_command == "tform":
         from o3b.dataset.tform import run_tform_viewer

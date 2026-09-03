@@ -2,11 +2,19 @@
 #
 #   o3b dataset viz -d every9d_v7_train -c chair
 #
-# 110549 sequences = 114404 (every9d_v7) - 3855 (every9d_v7_test), object
-# granularity, in <path_preprocess>/subset/every9d_v7_train.yaml. Disjoint from
-# every9d_v7_test by construction, so nothing a model trains on here appears
-# there — the two were written in one pass and re-sampling either alone breaks
-# that.
+# 110882 sequences = 114533 (every9d_v7) - 3651 (every9d_v7_test), object
+# granularity, in <path_preprocess>/subset/every9d_v7_train.yaml. As of
+# 2026-09-01 it is an id-for-id copy of subset every9d_v7_train_max5_trainable.
+#
+# Disjoint from every9d_v7_test by construction, and together they are all of
+# every9d_v7 — nothing trained on here is tested there. The two are written in
+# one pass; re-sampling either alone breaks that, as it did before the
+# 2026-09-01 rebuild.
+#
+# 895 of every9d_v7's 960 categories appear here. The missing 65 hold a single
+# sequence each, which the test half has; there is no train object of them to be
+# had. Every other tested category has at least T-1 train objects for its T test
+# ones — that guarantee is what the split was rebuilt for.
 #
 # Everything else — paths, mesh_type, tform_obj_type (every9d_v7), modalities,
 # transform, the frame/sequence caps — is inherited from every9d_v7.

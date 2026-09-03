@@ -2,21 +2,34 @@
 #
 #   o3b dataset viz -d every9d_v7_test -c chair
 #
-# The selection lives in <path_preprocess>/subset/every9d_v7_test.yaml: at most
-# 5 sequences per category, drawn from subset every9d_v6_test — 3855 sequences
-# over its 911 categories (a category with 5 or fewer contributes all of them).
-# The draw is `random.Random(0).sample` over each category's sorted ids, so it
-# is reproducible but not biased towards alphabetically-first sequences.
+# The selection lives in <path_preprocess>/subset/every9d_v7_test.yaml: 3651
+# sequences over 898 categories. As of 2026-09-01 it is an id-for-id copy of
+# subset every9d_v7_test_max5_trainable, and carries that file's two guarantees:
+#
+#   at most 5 test objects per category   (630 categories sit at 5; the rest are
+#                                          short because every9d_v7 has no more)
+#   at least T-1 train objects left       (a category with T test objects leaves
+#                                          T-1 behind, so 5 tested implies 4
+#                                          trained)
+#
+# every9d_v7_test_max5_trainable stays as the named, checked source; this file is
+# the copy the default split reads, so a run naming every9d_v7_test gets it
+# without knowing that history.
 #
 # Object granularity, deliberately: every9d_v6_test names single *frames*, this
-# names the `<category>/<sequence>` they belong to, so a test object is seen
-# from up to frames_count_max_per_sequence views rather than one. Use
-# every9d_v6_test itself for the one-frame-per-object protocol.
+# names the `<category>/<sequence>` they belong to, so a test object is seen from
+# up to frames_count_max_per_sequence views rather than one. Use every9d_v6_test
+# itself for the one-frame-per-object protocol.
+#
+# NOTE: 65 categories have a single sequence in every9d_v7, which lands here, so
+# they are tested with no train object at all. The T-1 rule permits it (one test
+# object requires none) and nothing but dropping them from the test set changes
+# it.
 #
 # every9d_v7_train is every9d_v7 minus exactly these ids; the two partition
 # every9d_v7 and inherit its tform_obj_type (every9d_v7), so a relabelling round
-# reaches both. Re-sampling this file without rewriting every9d_v7_train breaks
-# the partition — they are written together.
+# reaches both. They are written together — re-drawing this file alone breaks the
+# partition, which is how the 2026-09-01 rebuild came about.
 
 defaults:
   - every9d_v7

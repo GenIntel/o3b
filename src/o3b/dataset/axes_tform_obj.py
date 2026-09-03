@@ -239,6 +239,79 @@ def view_modalities() -> set:
     return {"cam_intr4x4", "cam_bbox3d", "cam_tform4x4_obj_ncds", "obj_bbox3d", "mesh"}
 
 
+# How many files to pull off the mount at once.  These reads are latency, not
+# bandwidth — a cold 1 KB meta yaml over the UCO3D sshfs mount is ~0.8 s — so
+# the number that matters is the mount's `max_conns` (o3b/dataset/sshfs.py),
+# not this machine's core count.  Over a mount without it the reads serialise
+# and the read-ahead costs nothing but the threads.
+_IO_WORKERS = 8
+
+
+def _page_files(dataset, cfg, indices) -> list:
+    """The small files ``dataset[i]`` will open for *indices*.
+
+    Per frame its meta yaml, per sequence its mesh (and its tform_obj, where
+    that is still a file per sequence rather than a ``<type>.db``).  Best
+    effort: a dataset whose loader does not work this way simply gets nothing
+    warmed, which is what it had before.
+    """
+    rows_id = getattr(dataset, "_frame_rows_id", None)
+    rows    = getattr(dataset, "_frame_rows", None)
+    if rows is None or rows_id is None or cfg.path_preprocess is None:
+        return []
+    meta_dir = Path(cfg.path_preprocess) / "meta" / "frames"
+    paths, seqs = [], set()
+    for i in indices:
+        try:
+            row = rows[rows_id[i]]
+            cat, seq, frame = row["category"], row["sequence"], row["frame"]
+        except (IndexError, KeyError, TypeError):
+            continue
+        paths.append(meta_dir / cat / seq / f"{frame}.yaml")
+        if (cat, seq) in seqs:
+            continue
+        seqs.add((cat, seq))
+        for attr in ("path_mesh", "path_tform_obj"):
+            fn = getattr(dataset, attr, None)
+            if attr == "path_tform_obj" and (
+                    getattr(dataset, "_tform_obj_store", None) is not None
+                    or cfg.tform_obj_type == "raw"):
+                continue        # the table is already in memory, or unused
+            if callable(fn):
+                try:
+                    paths.append(fn(cat, seq))
+                except Exception:
+                    pass
+    return paths
+
+
+def _warm_files(paths, workers: int = _IO_WORKERS) -> None:
+    """Read *paths* in parallel so the serial loop that follows finds them cached.
+
+    The loop cannot itself be threaded — the loaders' mesh and tform caches are
+    unsynchronised dicts — but the *waiting* can be overlapped, and over sshfs
+    the waiting is the whole cost: the files are a kilobyte each and cost a
+    round trip each.  Failures are ignored on purpose; this only warms the page
+    cache, and a file that cannot be read here is the loader's to report.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not paths:
+        return
+
+    def _read(path):
+        try:
+            with open(path, "rb") as f:
+                f.read()
+        except OSError:
+            pass
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as pool:
+        list(pool.map(_read, paths))
+    logger.debug(f"warmed {len(paths)} files in {time.time() - t0:.2f}s")
+
+
 def collect_frames(dataset, cfg, indices=None) -> list:
     """``[(object_id, [frame, ...]), …]`` for *indices* of an already-built dataset.
 
@@ -246,9 +319,16 @@ def collect_frames(dataset, cfg, indices=None) -> list:
     reused VideoCapture per sequence, sequences in parallel.  Objects come back
     in the order their first frame was seen, so a caller that passed a page of
     indices gets that page back in the same order.
+
+    The geometry loop is serial but its files are fetched up front in parallel
+    (``_warm_files``), which is where a cold page over sshfs spends its time:
+    ~80 round trips of ~0.8 s each, against 0.01 s of arithmetic per item.
     """
+    indices = list(range(len(dataset)) if indices is None else indices)
+    _warm_files(_page_files(dataset, cfg, indices))
+
     jobs: dict = {}
-    for i in (range(len(dataset)) if indices is None else indices):
+    for i in indices:
         try:
             fo = dataset[i]
         except Exception as exc:
@@ -330,6 +410,26 @@ def cache_has(cfg, category: str, tag: str) -> bool:
     return _cache_key(cfg, category, tag).exists()
 
 
+# The crops are looked at, never measured, so they are stored as JPEG: a page of
+# 16 objects x 3 views is 9.3 MB of raw uint8 and 0.46 MB encoded, 20x, for
+# 0.04 s of encoding and a millisecond per frame to decode.  What that buys is
+# the cache actually holding a labelling session: at raw size CACHE_MAX_BYTES
+# fits ~300 pages against 965 categories, so first pages were being evicted
+# before they could be revisited — including ones the prefetcher had just built.
+_JPEG_QUALITY = 92
+
+
+def _decode_rgb(blob, k: int):
+    """One cached crop as a (3, H, W) float tensor, JPEG or legacy raw."""
+    import cv2
+
+    if f"jpg_{k}" in blob:
+        bgr = cv2.imdecode(blob[f"jpg_{k}"], cv2.IMREAD_COLOR)
+        chw = np.ascontiguousarray(bgr[..., ::-1].transpose(2, 0, 1))
+        return torch.from_numpy(chw).float() / 255.0
+    return torch.from_numpy(blob[f"rgb_{k}"]).float() / 255.0
+
+
 def _cache_load(cfg, category: str, tag: str):
     path = _cache_key(cfg, category, tag)
     if not path.exists():
@@ -342,7 +442,7 @@ def _cache_load(cfg, category: str, tag: str):
             frames = []
             for _ in range(int(cnt)):
                 frames.append({
-                    "rgb": torch.from_numpy(z[f"rgb_{k}"]).float() / 255.0,
+                    "rgb": _decode_rgb(z, k),
                     "intr": torch.from_numpy(z[f"intr_{k}"]),
                     "cam_bbox3d": torch.from_numpy(z[f"cbox_{k}"]),
                     "obj_bbox3d": torch.from_numpy(z[f"obox_{k}"]),
@@ -358,6 +458,8 @@ def _cache_load(cfg, category: str, tag: str):
 
 
 def _cache_store(cfg, category: str, tag: str, objects) -> None:
+    import cv2
+
     path = _cache_key(cfg, category, tag)
     path.parent.mkdir(parents=True, exist_ok=True)
     blob: dict = {"n_frames": np.array([len(f) for _s, f in objects], dtype=np.int32),
@@ -365,7 +467,14 @@ def _cache_store(cfg, category: str, tag: str, objects) -> None:
     k = 0
     for _seq, frames in objects:
         for f in frames:
-            blob[f"rgb_{k}"] = (f["rgb"].clamp(0, 1) * 255).to(torch.uint8).numpy()
+            chw = (f["rgb"].clamp(0, 1) * 255).to(torch.uint8).numpy()
+            bgr = np.ascontiguousarray(chw.transpose(1, 2, 0)[..., ::-1])
+            ok, buf = cv2.imencode(".jpg", bgr,
+                                   [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+            if ok:
+                blob[f"jpg_{k}"] = buf.reshape(-1)
+            else:                        # never seen; keep the page rather than lose it
+                blob[f"rgb_{k}"] = chw
             blob[f"intr_{k}"] = f["intr"].numpy()
             blob[f"cbox_{k}"] = f["cam_bbox3d"].numpy()
             blob[f"obox_{k}"] = (f["obj_bbox3d"] if f["obj_bbox3d"] is not None
@@ -383,11 +492,10 @@ def _cache_store(cfg, category: str, tag: str, objects) -> None:
 def _cache_prune(max_bytes: int = CACHE_MAX_BYTES, d: "Optional[Path]" = None) -> None:
     """Drop the least recently used crops once the cache outgrows its budget.
 
-    A page of 16 objects x 3 views is ~15 MB of uncompressed uint8, and the
-    prefetcher now fills pages the user may never open, so an unbounded cache
-    would reach tens of GB over a labelling session.  Least-recently-*used*, by
-    atime where the filesystem keeps one and mtime otherwise: a page revisited
-    all afternoon should outlive one seen once.
+    A page of 16 objects x 3 views is ~0.5 MB of JPEG, and the prefetcher fills
+    pages the user may never open, so an unbounded cache would still grow all
+    session.  Least-recently-*used*, by atime where the filesystem keeps one and
+    mtime otherwise: a page revisited all afternoon should outlive one seen once.
     """
     d = d or cache_dir()
     if not d.is_dir():

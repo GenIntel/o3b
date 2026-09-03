@@ -3,15 +3,23 @@
 #   o3b dataset viz -d every9d_v7 -c chair
 #
 # The selection lives in <path_preprocess>/subset/every9d_v7.yaml, outside this
-# repo. It is
+# repo. It started as
 #
 #   subset every9d_v3        114368 sequences   (the ones that have a tform_obj
 #                                                under all_canonical_poses_filtered_center3d_auto)
 #   ∪ subset every9d_v6_test   5314 sequences   (the hand-picked test selection)
 #   = 114404 sequences over 966 categories      (5278 of them were in both)
 #
-# so it is every9d_v3 plus the 36 sequences the v6 test selection added — the
-# review-filtered set, widened by whatever the test picking pulled back in.
+# i.e. every9d_v3 widened by whatever the test picking pulled back in, and is
+# since kept as the union of itself with its own halves — every9d_v7 ∪
+# every9d_v7_test ∪ every9d_v7_train — so an id added by re-picking a half
+# lands here too. Rewritten that way on 2026-09-01, after the test half was
+# re-drawn: 114533 sequences over 960 categories (+48 the new test brought in).
+#
+# every9d_v7_train / every9d_v7_test partition it again as of 2026-09-01: both
+# were rewritten from every9d_v7_{train,test}_max5_trainable, so they are
+# disjoint and their union is exactly this file. The overlap that rewrite
+# repaired is why the union above is now maintained rather than re-derived.
 #
 # Object granularity: every entry is `<category>/<sequence>`, so the whole
 # sequence is kept and each contributes up to frames_count_max_per_sequence

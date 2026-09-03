@@ -184,8 +184,15 @@ class UCO3D(ConfigurableDataset):
                 f"UCO3D supports item_type 'frame_object', got {self.cfg.item_type}"
             )
 
+        # extra.ignore_frames_db: walk the tree even where the index covers the
+        # category. What that is for is an index being *built* — the indexer
+        # deletes a category's rows before re-inserting them in batches, so a
+        # reader arriving mid-category sees it empty or half there, and the
+        # immutable=1 the read opens with promises a file that is in fact still
+        # growing. The editors expose it as --no-index.
         db_path = self.path_preprocess / "frames.db"
-        rows = self._rows_from_db(db_path) if db_path.exists() else None
+        use_db = not (self.cfg.extra or {}).get("ignore_frames_db")
+        rows = self._rows_from_db(db_path) if use_db and db_path.exists() else None
         if rows is None:
             rows = list(self._walk_rows())
         self._frame_rows = rows
@@ -196,25 +203,39 @@ class UCO3D(ConfigurableDataset):
 
         Returns None when the cache does not cover this config (a category that
         was never indexed), so the caller falls back to walking the tree.
+
+        Coverage is checked with one indexed probe per wanted category, never
+        with ``SELECT DISTINCT category``: SQLite has no loose index scan, so
+        that reads all 24.5M index entries — a few seconds once the file is in
+        the page cache, but minutes in 4 KB reads over sshfs on a fresh mount,
+        which is where every build of a one-category dataset (the grid editors
+        make four per navigation) was hanging.  A probe is a single seek.
         """
         cats = list(self.cfg.categories) if self.cfg.categories else None
         con = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True, timeout=30)
         con.row_factory = sqlite3.Row
         try:
             cur = con.cursor()
-            indexed = {r[0] for r in cur.execute(
-                "SELECT DISTINCT category FROM frames WHERE tform_obj_type = ?",
-                (self.cfg.tform_obj_type,),
-            ).fetchall()}
-            if not indexed:
-                return None
             # A cache covering only some of the wanted categories would silently
             # shrink the dataset, so fall back to the walk unless it covers all
             # of them.  With no `categories` set that means every category on
             # disk — one directory listing to check.
             wanted = set(cats) if cats is not None else set(self._iter_categories())
-            if not wanted.issubset(indexed):
-                missing = sorted(wanted - indexed)
+            missing = sorted(c for c in wanted if not cur.execute(
+                "SELECT 1 FROM frames WHERE tform_obj_type = ? AND category = ? LIMIT 1",
+                (self.cfg.tform_obj_type, c),
+            ).fetchone())
+            if wanted and len(missing) == len(wanted):
+                # nothing asked for is in there — an index built for another
+                # tform_obj_type, or never built at all, rather than one that
+                # has gaps, so this is not worth an info line per build
+                logger.debug(
+                    f"frames.db covers none of the {len(wanted)} requested "
+                    f"categor{'y' if len(wanted) == 1 else 'ies'} for "
+                    f"tform_obj_type={self.cfg.tform_obj_type}; walking the tree instead"
+                )
+                return None
+            if missing:
                 logger.info(
                     f"frames.db is missing {len(missing)} categor{'y' if len(missing) == 1 else 'ies'} "
                     f"({', '.join(missing[:5])}{'…' if len(missing) > 5 else ''}) for "

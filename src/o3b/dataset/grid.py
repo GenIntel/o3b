@@ -22,7 +22,9 @@ GRID_OBJECTS = GRID_COLS * 2
 # judging 48 thumbnails.
 PREFETCH = 3
 
-# Budget for ~/.o3b/cache/axes.  A page is ~15 MB of uncompressed uint8 and the
-# prefetcher fills pages that may never be opened, so the cache is pruned
-# (least recently used first) once it passes this.
+# Budget for ~/.o3b/cache/axes.  A page is ~0.5 MB of JPEG and the prefetcher
+# fills pages that may never be opened, so the cache is pruned (least recently
+# used first) once it passes this.  Room for every category's first page many
+# times over — at the raw uint8 the pages used to be stored as, ~15 MB each,
+# this held 300 of them against 965 categories and evicted what it had warmed.
 CACHE_MAX_BYTES = 4 * 1024 ** 3

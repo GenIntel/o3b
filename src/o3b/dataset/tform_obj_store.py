@@ -78,16 +78,43 @@ def decode(blob: bytes) -> torch.Tensor:
 
 # ── reading ───────────────────────────────────────────────────────────────────
 
+# The last few tables read, by (path, mtime, size).  A grid editor builds a
+# dataset per navigation and up to `prefetch` more on its background thread, and
+# each build read the whole table again — 13 MB over sshfs, seconds when the
+# file is cold.  Local writes clear this (see _forget), and a write from
+# elsewhere is picked up when the file's mtime or size changes, which is the
+# same guarantee a fresh read has over a mount held with kernel_cache and
+# attr_timeout: the kernel serves cached pages until the attributes change too.
+_TABLES: dict = {}
+_TABLES_MAX = 4
+
+
+def _forget(path: Path) -> None:
+    """Drop memoised copies of *path* — called by everything that writes it."""
+    for k in [k for k in _TABLES if k[0] == str(path)]:
+        _TABLES.pop(k, None)
+
+
 def load_all(path_preprocess, tform_obj_type: str) -> Optional[dict[str, torch.Tensor]]:
     """Whole table as ``{"category/sequence": (4, 4)}``, or None when there is no db.
 
     Read eagerly into a plain dict rather than holding a connection: it is 0.12 s
     for the full UCO3D table, and a dict survives the fork into DataLoader
     workers, which a sqlite3 connection does not.
+
+    The dict is memoised and shared between callers, so treat it as read-only —
+    every reader here only looks things up in it.
     """
     path = db_path(path_preprocess, tform_obj_type)
     if not path.exists():
         return None
+    try:
+        st = path.stat()
+        memo_key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        memo_key = None
+    if memo_key is not None and memo_key in _TABLES:
+        return _TABLES[memo_key]
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
     try:
         rows = con.execute("SELECT category, sequence, tform FROM tform_obj").fetchall()
@@ -105,7 +132,12 @@ def load_all(path_preprocess, tform_obj_type: str) -> Optional[dict[str, torch.T
                        f"Delete it, or rebuild with 'o3b dataset tform-obj-to-db "
                        f"--override'.")
         return None
-    return {key(c, s): decode(b) for c, s, b in rows}
+    table = {key(c, s): decode(b) for c, s, b in rows}
+    if memo_key is not None:
+        if len(_TABLES) >= _TABLES_MAX:
+            _TABLES.clear()
+        _TABLES[memo_key] = table
+    return table
 
 
 def read_one(path_preprocess, tform_obj_type: str,
@@ -139,6 +171,7 @@ def write_many(path_preprocess, tform_obj_type: str,
                meta: Optional[dict] = None) -> int:
     """Upsert ``(category, sequence, tform)`` rows. Returns the number written."""
     path = db_path(path_preprocess, tform_obj_type)
+    _forget(path)
     con = _connect_rw(path)
     n = 0
     try:
@@ -172,6 +205,7 @@ def delete_one(path_preprocess, tform_obj_type: str, category: str, sequence: st
     path = db_path(path_preprocess, tform_obj_type)
     if not path.exists():
         return False
+    _forget(path)
     con = sqlite3.connect(path, timeout=60)
     try:
         with con:

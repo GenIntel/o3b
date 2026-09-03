@@ -111,7 +111,8 @@ def _object_id(entry: str) -> str:
 # ── one category's objects ────────────────────────────────────────────────────
 
 def _view_cfg(cfg, category: str, n_views: int, *,
-              seqs_max: Optional[int] = None, subset_ids=None):
+              seqs_max: Optional[int] = None, subset_ids=None,
+              no_index: bool = False):
     """The config the editor walks a category with.
 
     Without the config's own ``subset_name``: the point of this tool is to decide
@@ -128,6 +129,8 @@ def _view_cfg(cfg, category: str, n_views: int, *,
         extra.pop("subset_ids", None)
     else:
         extra["subset_ids"] = list(subset_ids)
+    if no_index:
+        extra["ignore_frames_db"] = True
     return _r(
         cfg,
         categories=[category],
@@ -153,7 +156,7 @@ def _walk_object_ids(dataset) -> list[str]:
 
 
 def _capped_ids(cls, cfg, category: str, max_objects: int,
-                keep_here: list[str]) -> Optional[list[str]]:
+                keep_here: list[str], no_index: bool = False) -> Optional[list[str]]:
     """Which objects a capped category shows: *keep_here* plus the walk's first.
 
     Only needed when something in this category is already selected — the
@@ -168,7 +171,8 @@ def _capped_ids(cls, cfg, category: str, max_objects: int,
     cache, and only the selected ids beyond it cost a round trip.
     """
     try:
-        probe = cls(_view_cfg(cfg, category, 1, seqs_max=max_objects))
+        probe = cls(_view_cfg(cfg, category, 1, seqs_max=max_objects,
+                              no_index=no_index))
     except Exception as exc:
         print(f"  could not walk {category}: {exc}", file=sys.stderr)
         return None
@@ -184,7 +188,8 @@ def _capped_ids(cls, cfg, category: str, max_objects: int,
 
 
 def open_category(cls, cfg, category: str, n_views: int, *,
-                  max_objects: Optional[int] = None, keep=()):
+                  max_objects: Optional[int] = None, keep=(),
+                  no_index: bool = False):
     """(dataset, [object_id, …], {object_id: [item index, …]}) for a category.
 
     The walk only — no pixels.  One dataset serves every page of the category,
@@ -201,15 +206,15 @@ def open_category(cls, cfg, category: str, n_views: int, *,
     seqs_max = ids = None
     if max_objects is not None:
         if keep_here:
-            ids = _capped_ids(cls, cfg, category, max_objects, keep_here)
+            ids = _capped_ids(cls, cfg, category, max_objects, keep_here, no_index)
             if ids is None:
                 return None, [], {}
         else:
             # nothing to protect, so the cap is just the walk's own break
             seqs_max = max_objects
     try:
-        dataset = cls(_view_cfg(cfg, category, n_views,
-                                seqs_max=seqs_max, subset_ids=ids))
+        dataset = cls(_view_cfg(cfg, category, n_views, seqs_max=seqs_max,
+                                subset_ids=ids, no_index=no_index))
     except Exception as exc:
         print(f"  could not build dataset for {category}: {exc}", file=sys.stderr)
         return None, [], {}
@@ -315,7 +320,8 @@ def run_subset_editor(cls, cfg, subset_name: str, *, dataset_name: str = "",
                       max_height: Optional[int] = None,
                       target_count: Optional[int] = None,
                       init_count: Optional[int] = None,
-                      max_count: Optional[int] = None) -> None:
+                      max_count: Optional[int] = None,
+                      no_index: bool = False) -> None:
     import tkinter as tk
     from tkinter import ttk
 
@@ -474,6 +480,9 @@ def run_subset_editor(cls, cfg, subset_name: str, *, dataset_name: str = "",
         if max_count is not None:
             lines += [(f"max count {max_count} objects offered per category",
                        (200, 200, 120), 0.85)]
+        if no_index:
+            lines += [("--no-index: walking the tree, frames.db ignored",
+                       (200, 200, 120), 0.85)]
         lines += [
                   (f"category [{st['idx'] + 1}/{len(cats)}]   "
                    f"page [{st['page'] + 1}/{_n_pages()}]", (170, 170, 170), 0.9),
@@ -537,7 +546,8 @@ def run_subset_editor(cls, cfg, subset_name: str, *, dataset_name: str = "",
         root.update()
         t0 = time.time()
         st["dataset"], order, st["by_obj"] = open_category(
-            cls, cfg, cat, n_views, max_objects=max_count, keep=selected)
+            cls, cfg, cat, n_views, max_objects=max_count, keep=selected,
+            no_index=no_index)
         st["oids"] = _ordered(order)
         st["status"] = f"{cat}: {len(st['oids'])} objects in {time.time() - t0:.2f}s"
         _load_page()
@@ -577,7 +587,8 @@ def run_subset_editor(cls, cfg, subset_name: str, *, dataset_name: str = "",
             if len(pf_cats) > prefetch + 1:
                 pf_cats.clear()
             pf_cats[cat] = open_category(cls, cfg, cat, n_views,
-                                         max_objects=max_count, keep=sel)
+                                         max_objects=max_count, keep=sel,
+                                         no_index=no_index)
         return pf_cats[cat]
 
     def _pf_first_page(cat: str, sel: frozenset):

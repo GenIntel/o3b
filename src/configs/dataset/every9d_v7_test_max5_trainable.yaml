@@ -1,0 +1,35 @@
+# every9d_v7_test_max5_trainable — every9d_v7_test_max5, thinned until every
+# category it tests is also one the train half can teach.
+#
+#   o3b dataset viz -d every9d_v7_test_max5_trainable -c chair
+#
+# The rule: a category holding T test objects must leave at least T-1 train
+# objects behind. every9d_v7_test_max5 broke that in 117 of its 898 categories —
+# small categories where the ≤5 draw had taken most or all of what every9d_v7
+# has, down to 30 categories of 2 sequences with both on the test side and no
+# train object at all.
+#
+# Only removals fix it, and a removal *is* a move: the halves partition
+# every9d_v7, so an id dropped here lands in every9d_v7_train_max5_trainable.
+# Each category gives up the fewest ids that satisfy the rule — for a category
+# of M sequences that is T = floor((M+1)/2), so 5 test / 2 train becomes 4 test
+# / 3 train — picked by `random.Random(0).sample` over its sorted test ids, and
+# so reproducible without being biased towards alphabetically-first sequences.
+#
+# 3651 sequences = 3797 - 146 moved over 117 categories, still 898 categories
+# and still at most 5 per category (630 at 5). Object granularity, like every
+# every9d_v7 subset: an entry is `<category>/<sequence>`.
+#
+# NOTE: 65 categories have a single sequence in every9d_v7 and so are tested
+# with zero train objects. The rule permits it — one test object requires none —
+# but it is unavoidable rather than intended: nothing short of dropping those
+# categories from the test set can give them a train object they do not have.
+#
+# Everything else — paths, mesh_type, tform_obj_type (every9d_v7), modalities,
+# transform, the frame/sequence caps — is inherited from every9d_v7_test_max5.
+
+defaults:
+  - every9d_v7_test_max5
+  - _self_
+
+subset_name: "every9d_v7_test_max5_trainable"

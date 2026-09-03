@@ -1,0 +1,30 @@
+# every9d_v7_train_max5 — the train half against every9d_v7_test_max5:
+# every9d_v7 minus every one of that test selection's ids.
+#
+#   o3b dataset viz -d every9d_v7_train_max5 -c chair
+#
+# 110736 sequences = 114533 (every9d_v7) - 3797 (every9d_v7_test_max5), object
+# granularity, in <path_preprocess>/subset/every9d_v7_train_max5.yaml. The two
+# partition every9d_v7 exactly — disjoint, and their union is all of it — so no
+# object this trains on is tested on. Rebuild both together: re-drawing the test
+# half without re-deriving this one is what broke the older
+# every9d_v7_train / every9d_v7_test pair.
+#
+# Use this one, not every9d_v7_train, whenever the test set is
+# every9d_v7_test_max5: every9d_v7_train predates the 2026-09-01 re-draw and
+# still lists 751 ids that selection also holds.
+#
+# 832 of every9d_v7's 960 categories appear here. The missing 128 are categories
+# whose whole selection fits inside the capped test half — 65 of them have a
+# single sequence in every9d_v7, and none has more than 5 — so they are tested
+# but never trained. Cap the test draw below the category size, or drop those
+# categories from the benchmark, if that matters for a run.
+#
+# Everything else — paths, mesh_type, tform_obj_type (every9d_v7), modalities,
+# transform, the frame/sequence caps — is inherited from every9d_v7.
+
+defaults:
+  - every9d_v7
+  - _self_
+
+subset_name: "every9d_v7_train_max5"

@@ -50,6 +50,7 @@ class ORIENT_CONDITIONS_INTRINSIC(StrEnum):
     # NO USER INTERACTION (INTRINSIC)
     MOVE_BACKWARD = "move_backward" # natural moving direction is backwards
     MOVE_UPWARD = "move_upward" # natural moving direction is front (upward can be upward direction when moving or moving upwards)
+    MOVE_UPWARD_AND_DOWNWARD = "move_upward_and_downward" # natural moving direction is front (upward can be upward direction when moving or moving upwards)
     MOVE_BACKWARD_AND_FORWARD = "move_backward_and_forward" # natural moving direction is front
     CONTAIN_OR_SUPPORT_UPWARD = "contain_or_support_upward" #  e.g. table, tray, bowl, cup, bag # note there is also temporary containment
     CONTAIN_OR_SUPPORT_UPWARD_AND_DOWNWARD = "contain_or_support_upward_and_downward"
@@ -62,6 +63,7 @@ class ORIENT_CONDITIONS_INTRINSIC(StrEnum):
     SPROUT_UPWARD = "sprout_upward" # natural growing direction is top (only roots grow in bottom direction) # note: for mushroom it is the had.
     SPROUT_UPWARD_AND_DOWNWARD = "sprout_upward_and_downward" 
     STEM_UPWARD = "stem_upward" # natural growing direction is top (only roots grow in bottom direction)
+    STEM_UPWARD_AND_DOWNWARD = "stem_upward_and_downward" # natural growing direction is top (only roots grow in bottom direction)
     WINDING_AXIS = "winding_axis"
     FLOW_BACKWARD = "flow_backward" # back wind/bullets/arrows/electric signal/light
     FLOW_BACKWARD_AND_FORWARD = "flow_backward_and_forward" # back
@@ -89,6 +91,7 @@ class ORIENT_CONDITIONS_EXTRINSIC_USER_OBJECT(StrEnum):
     ALONG_GRAB_TWO_FINGERS_TOWARD_FUNCTION = "along_grab_two_fingers_toward_function" # top
     HAND_FINGERS = "hand_fingers" # top (glove)
     HAND_BACK = "hand_back" # back (glove)
+    HAND_BACKWARD_AND_FORWARD = "hand_backward_and_forward"
 
 class ORIENT_CONDITIONS_EXTRINSIC_USER_OBJECT_OBJECT(StrEnum):
     # USER-OBJECT-OBJECT INTERACTION (while human interaction)
@@ -103,6 +106,7 @@ MAP_CONDITION_TO_RULE = {
     # NO USER INTERACTION (INTRINSIC)
     ORIENT_CONDITIONS_INTRINSIC.MOVE_BACKWARD: ORIENT_AXIS_RULES.VEC_FRONT_BACK, # natural moving direction is backwards
     ORIENT_CONDITIONS_INTRINSIC.MOVE_UPWARD: ORIENT_AXIS_RULES.VEC_BOTTOM_TOP, # natural moving direction is front (upward can be upward direction when moving or moving upwards)
+    ORIENT_CONDITIONS_INTRINSIC.MOVE_UPWARD_AND_DOWNWARD: ORIENT_AXIS_RULES.AXIS_BOTTOM_TOP, # natural moving direction is front (upward can be upward direction when moving or moving upwards)
     ORIENT_CONDITIONS_INTRINSIC.MOVE_BACKWARD_AND_FORWARD: ORIENT_AXIS_RULES.AXIS_FRONT_BACK, # natural moving direction is front
     ORIENT_CONDITIONS_INTRINSIC.CONTAIN_OR_SUPPORT_UPWARD: ORIENT_AXIS_RULES.VEC_BOTTOM_TOP, #  e.g. table, tray, bowl, cup, bag # note there is also temporary containment
     ORIENT_CONDITIONS_INTRINSIC.CONTAIN_OR_SUPPORT_UPWARD_AND_DOWNWARD: ORIENT_AXIS_RULES.AXIS_BOTTOM_TOP,
@@ -115,6 +119,7 @@ MAP_CONDITION_TO_RULE = {
     ORIENT_CONDITIONS_INTRINSIC.SPROUT_UPWARD: ORIENT_AXIS_RULES.VEC_BOTTOM_TOP, # natural growing direction is top (only roots grow in bottom direction) # note: for mushroom it is the had.
     ORIENT_CONDITIONS_INTRINSIC.SPROUT_UPWARD_AND_DOWNWARD: ORIENT_AXIS_RULES.AXIS_BOTTOM_TOP,  
     ORIENT_CONDITIONS_INTRINSIC.STEM_UPWARD: ORIENT_AXIS_RULES.VEC_BOTTOM_TOP, # natural growing direction is top (only roots grow in bottom direction)
+    ORIENT_CONDITIONS_INTRINSIC.STEM_UPWARD_AND_DOWNWARD: ORIENT_AXIS_RULES.AXIS_BOTTOM_TOP, # natural growing direction is top (only roots grow in bottom direction)
     ORIENT_CONDITIONS_INTRINSIC.WINDING_AXIS: ORIENT_AXIS_RULES.AXIS_BOTTOM_TOP, 
     ORIENT_CONDITIONS_INTRINSIC.FLOW_BACKWARD: ORIENT_AXIS_RULES.VEC_FRONT_BACK, # back wind/bullets/arrows/electric signal/light
     ORIENT_CONDITIONS_INTRINSIC.FLOW_BACKWARD_AND_FORWARD: ORIENT_AXIS_RULES.AXIS_FRONT_BACK, # back-front
@@ -141,6 +146,7 @@ MAP_CONDITION_TO_RULE = {
     ORIENT_CONDITIONS_EXTRINSIC_USER_OBJECT.ALONG_GRAB_TWO_FINGERS_TOWARD_FUNCTION: ORIENT_AXIS_RULES.VEC_BOTTOM_TOP, # top
     ORIENT_CONDITIONS_EXTRINSIC_USER_OBJECT.HAND_FINGERS: ORIENT_AXIS_RULES.VEC_BOTTOM_TOP, # (glove)
     ORIENT_CONDITIONS_EXTRINSIC_USER_OBJECT.HAND_BACK: ORIENT_AXIS_RULES.VEC_FRONT_BACK, # (glove)
+    ORIENT_CONDITIONS_EXTRINSIC_USER_OBJECT.HAND_BACKWARD_AND_FORWARD: ORIENT_AXIS_RULES.AXIS_FRONT_BACK, # (glove)
 
     # USER-OBJECT-OBJECT INTERACTION (while human interaction)
     ORIENT_CONDITIONS_EXTRINSIC_USER_OBJECT_OBJECT.AWAY_FROM_OBJECT: ORIENT_AXIS_RULES.VEC_FRONT_BACK, # back 
