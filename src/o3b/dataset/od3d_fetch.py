@@ -86,6 +86,43 @@ def rsync(src: Path, dst: Path, *, dry_run: bool = False) -> None:
     subprocess.run(cmd, check=True)
 
 
+def rsync_files(src_root: Path, dst_root: Path, rel_paths, *, label: str = "",
+                dry_run: bool = False) -> int:
+    """Copy exactly `rel_paths` (relative to both roots) with one rsync.
+
+    For the case where the source tree is enormously larger than the part that
+    is wanted: Objectron's extracted rgb is 910,660 jpgs, of which the benchmark
+    samples 2,250.  ``--files-from`` moves that set in a single pass, where a
+    blanket directory sync would move hundreds of gigabytes to obtain ~900 MB.
+
+    Returns the number of paths requested (0 when nothing was missing).
+    """
+    import tempfile
+
+    rel = sorted({str(r) for r in rel_paths})
+    if not rel:
+        print(f"  {label or 'files'}: nothing to copy")
+        return 0
+
+    with tempfile.NamedTemporaryFile("w", suffix=".lst", delete=False) as fh:
+        fh.write("\n".join(rel) + "\n")
+        lst = Path(fh.name)
+    try:
+        cmd = [
+            "rsync", "-a", "--info=progress2", "--ignore-existing",
+            f"--files-from={lst}", str(src_root) + "/", str(dst_root),
+        ]
+        print(f"  {label or 'files'}: {len(rel)} path(s) from {src_root}")
+        if dry_run:
+            print("  (dry-run) " + " ".join(cmd))
+            return len(rel)
+        dst_root.mkdir(parents=True, exist_ok=True)
+        subprocess.run(cmd, check=True)
+    finally:
+        lst.unlink(missing_ok=True)
+    return len(rel)
+
+
 def download_zip(url: str, dst: Path, *, strip_top_level: Optional[str] = None) -> None:
     """Download a zip from `url` and extract it into `dst`.
 

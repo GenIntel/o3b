@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from o3b.dataset.dataset import ConfigurableDataset, ItemType, register_dataset
+from o3b.dataset.od3d_fetch import FetchSkipped
 from o3b.dataset.objectron.enum import (
     MAP_CATEGORIES_OBJECTRON_TO_UCO3D,
     OBJECTRON_CATEGORIES,
@@ -55,22 +56,50 @@ class Objectron(ConfigurableDataset):
         return Path(cfg.path_preprocess or cfg.root)
 
     @classmethod
+    def _sampled_frames(cls, path_pre: Path, mask_type: str, split: str):
+        """The (category, sequence, frame) triples the benchmark actually uses.
+
+        Read off the mask tree's filenames rather than parsed out of the metas:
+        ``mask/<mask_type>/<split>/<category>/<sequence>/<frame>.png`` *is* the
+        record of which 5 frames of which 50 sequences od3d drew, so no yaml
+        parsing (and no PosixPath-tagged unsafe_load) is needed just to find out
+        what to copy.
+        """
+        root = path_pre / "mask" / mask_type / split
+        if not root.is_dir():
+            return []
+        out = []
+        for cat in sorted(p for p in root.iterdir() if p.is_dir()):
+            for seq in sorted(p for p in cat.iterdir() if p.is_dir()):
+                for frame in sorted(seq.glob("*.png")):
+                    out.append((cat.name, seq.name, frame.stem))
+        return out
+
+    @classmethod
     def fetch(cls, cfg, *, url: Optional[str] = None, dry_run: bool = False) -> None:
-        """Secure the extracted frames and the od3d meta tree.
+        """Secure the od3d meta tree and exactly the rgb frames it references.
 
         Deliberately not a download.  od3d's own Objectron setup fetched from
         ``storage.googleapis.com/objectron`` and its comment records that the
         bucket stopped serving anonymous callers ("first call gcloud auth
         login").  Re-implementing that would produce a fetch that fails for
         anyone without credentials, to rebuild something the copy source already
-        holds in resolved form.  So both halves come from ``fetch_copy_from``,
-        and the hint names the manual route for a machine that has neither.
+        holds in resolved form.
+
+        The rgb copy is per-file, not per-directory.  ``<path_raw>/frames`` holds
+        910,660 jpgs across the nine categories; the benchmark samples 2,250 of
+        them.  Syncing the directory would move ~350 GB to obtain ~900 MB, so the
+        sampled set is derived from the mask tree and passed to rsync directly.
         """
-        from o3b.dataset.od3d_fetch import fetch_or_copy
+        from o3b.dataset.od3d_fetch import fetch_or_copy, rsync_files
 
         extra = dict(cfg.extra or {})
         copy_raw = extra.get("fetch_copy_from")
         copy_pre = extra.get("fetch_copy_from_preprocess")
+        mask_type = extra.get("mask_type", "sam_bbox")
+        depth_type = extra.get("depth_type", "depth_anything_v3")
+        mesh_type = extra.get("mesh_type", "cuboid500")
+        split = cfg.split or "test"
         path_raw = cls._path_raw(cfg)
         path_pre = cls._path_preprocess(cfg)
 
@@ -80,24 +109,42 @@ class Objectron(ConfigurableDataset):
             "extra.fetch_copy_from_preprocess at an existing tree instead."
         )
 
-        # rgb: <path_raw>/frames/<category>/<sequence>/<frame>.jpg
-        fetch_or_copy(
-            "Objectron (frames)",
-            path_raw,
-            expect=("frames",),
-            copy_from=Path(copy_raw) if copy_raw else None,
-            download=None,
-            download_hint=hint,
-            dry_run=dry_run,
-        )
+        # ── preprocessed subtrees, one at a time ─────────────────────────────
+        # Per-subtree rather than one sync of path_preprocess: that tree is 8 GB
+        # (it carries pcl/ and other od3d by-products this dataset never reads),
+        # and on the cluster only meta/frames is actually missing.
+        for sub in (
+            "meta/frames",                    # poses, intrinsics, 3-D box corners
+            f"mask/{mask_type}",
+            f"depth/{depth_type}",
+            f"mesh/{mesh_type}",
+        ):
+            fetch_or_copy(
+                f"Objectron ({sub})",
+                path_pre / sub,
+                copy_from=(Path(copy_pre) / sub) if copy_pre else None,
+                download=None,
+                download_hint=hint,
+                dry_run=dry_run,
+            )
 
-        # poses + intrinsics + the sampling itself
-        fetch_or_copy(
-            "Objectron (meta)",
-            path_pre,
-            expect=("meta/frames", "mask/sam_bbox", "depth/depth_anything_v3"),
-            copy_from=Path(copy_pre) if copy_pre else None,
-            download=None,
-            download_hint=hint,
-            dry_run=dry_run,
-        )
+        # ── rgb: only the sampled frames ─────────────────────────────────────
+        sampled = cls._sampled_frames(path_pre, mask_type, split)
+        if not sampled:
+            print("[Objectron (frames)] no mask tree to read the sampling from — "
+                  "skipping the rgb copy")
+            return
+
+        missing = [
+            f"frames/{cat}/{seq}/{frame}.jpg"
+            for cat, seq, frame in sampled
+            if not (path_raw / "frames" / cat / seq / f"{frame}.jpg").exists()
+        ]
+        print(f"[Objectron (frames)] {len(sampled)} sampled, {len(missing)} missing")
+        if missing and copy_raw:
+            rsync_files(Path(copy_raw), path_raw, missing,
+                        label="Objectron rgb", dry_run=dry_run)
+        elif missing:
+            raise FetchSkipped(f"Objectron: {len(missing)} rgb frames missing.\n{hint}")
+        else:
+            print("[Objectron (frames)] already present — nothing to do.")
