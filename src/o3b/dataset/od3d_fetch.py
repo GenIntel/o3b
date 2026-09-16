@@ -52,7 +52,12 @@ def _is_populated(path: Path, expect: Sequence[str] = ()) -> bool:
     """
     if not path.is_dir():
         return False
-    if not any(path.iterdir()):
+    # At least one *file* at any depth — not merely one directory entry. od3d
+    # leaves behind skeletons of empty directories (Objectron's
+    # meta/frames/test/<category>/ is 16 KB of nothing), and an any(iterdir())
+    # test calls those complete, which is how a dataset ends up "fetched" with
+    # no metadata in it at all.
+    if not _has_files(path):
         return False
     return all(_has_files(path / sub) for sub in expect)
 
@@ -78,7 +83,7 @@ def rsync(src: Path, dst: Path, *, dry_run: bool = False) -> None:
     another run may be reading.
     """
     src_arg = f"{src}/"
-    cmd = ["rsync", "-a", "--info=progress2", "--ignore-existing", src_arg, str(dst)]
+    cmd = ["rsync", "-a", "--info=stats1", "--ignore-existing", src_arg, str(dst)]
     if dry_run:
         print("  (dry-run) " + " ".join(cmd))
         return
@@ -109,7 +114,7 @@ def rsync_files(src_root: Path, dst_root: Path, rel_paths, *, label: str = "",
         lst = Path(fh.name)
     try:
         cmd = [
-            "rsync", "-a", "--info=progress2", "--ignore-existing",
+            "rsync", "-a", "--info=stats1", "--ignore-existing",
             f"--files-from={lst}", str(src_root) + "/", str(dst_root),
         ]
         print(f"  {label or 'files'}: {len(rel)} path(s) from {src_root}")
