@@ -52,10 +52,21 @@ modalities:
   - category
   - mesh                   # cuboid500 — the annotated 3-D box, not a scan
 
+# 256, matching the resolution od3d sharded these at (maskzoom256) — the
+# resolution the published numbers were measured at. hc3d notes 256->512 was
+# worth ~1% on tooth_brush, so raising it is an improvement to make as a
+# deliberate ablation once the reproduction lines up, not a silent difference.
+img_size: 256
+
 transform:
   class_name: CropCamBBox2D
-  H: 512
-  W: 512
+  H: ${img_size}
+  W: ${img_size}
+  # od3d's maskzoom is the same operation as this: both centre on the mask's
+  # bbox, square it on the longer side, and resize. Its scale_with_mask: 0.75
+  # is commented "1. / 1.3 = 0.75" — i.e. it meant this 1.3 (= 1 + 2*0.15) and
+  # rounded. Keeping 0.15, so the crop is what od3d intended; the 2.6% zoom
+  # difference against what it literally wrote is well inside run-to-run noise.
   bbox_overlap: 0.15
   crop_type: "crop_large_side"
 
