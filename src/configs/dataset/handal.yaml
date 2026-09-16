@@ -1,0 +1,69 @@
+# HANDAL — frame-object items from the od3d-preprocessed tree.
+#
+#   o3b dataset fetch -d handal -p slurm_lmbl40 --remote
+#   o3b dataset index -d handal -p slurm_lmbl40 --remote
+#
+# 277,016 frame metas — the largest of the four migrated sets, which is why the
+# sharded configs over it carry a per-sequence cap. Masks are
+# mask_visib/<frame>_<object>.png, so the meta is already one object per frame.
+# Depth is real (the _with_depth archives + od3d's depth_nerf renders).
+
+class_name: HANDAL
+
+path_datasets_raw: /data/lmbraid19/sommerl/datasets
+path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
+
+# Where fetch() looks for an existing tree when path_raw is missing or partial.
+# Separate from path_datasets_raw because a platform overrides *that* to its own
+# dataset root: the fallback has to keep naming a different machine's copy, or a
+# fetch on the cluster would "fall back" to the very tree it just found empty.
+# Override it (here or with -p) to point somewhere else.
+path_datasets_fallback: /data/lmbraid19/sommerl/datasets
+
+path_raw:        ${path_datasets_raw}/HANDAL
+path_preprocess: ${path_datasets_preprocess}/HANDAL_Preprocess
+
+item_type: frame_object
+split: test
+
+cam_tform4x4_cam_raw:
+  - [ 1.00000,  0.00000,  0.00000,  0.00000]
+  - [ 0.00000, -1.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000, -1.00000,  0.00000]
+  - [ 0.00000,  0.00000,  0.00000,  1.00000]
+
+modalities:
+  - rgb
+  - depth
+  - depth_mask
+  - fo_mask
+  - cam_intr4x4
+  - cam_tform4x4_obj
+  - cam_tform4x4_obj_ncds
+  - cam_bbox2d
+  - cam_bbox3d
+  - obj_syms
+  - category
+  - mesh
+
+transform:
+  class_name: CropCamBBox2D
+  H: 512
+  W: 512
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+categories:            # null = all 17
+filter_count_max:
+
+extra:
+  depth_type: depth_nerf
+  map_to_uco3d: true
+  # HANDAL's own poses are metric millimetres; o3b works in metres.
+  scale_to_m: 0.001
+  # NOTE: the lmbraid19 copy has four EMPTY category directories
+  # (fixed_joint_pliers, ladles, locking_pliers, measuring_cups); the
+  # cluster's own /work tree is the complete one. fetch() checks each
+  # expected category directory for files, so an incomplete source is
+  # reported rather than silently accepted.
+  fetch_copy_from: ${path_datasets_fallback}/HANDAL

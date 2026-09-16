@@ -1,0 +1,68 @@
+# ImageNet3D — frame-object items from the od3d-preprocessed tree.
+#
+#   o3b dataset fetch -d imagenet3d -p slurm_lmbl40 --remote
+#   o3b dataset index -d imagenet3d -p slurm_lmbl40 --remote
+#
+# 82,216 frame metas. One object per frame *literally*: od3d wrote
+# <image>_<obj_id>.yaml for every annotated object, so nothing is dropped.
+
+class_name: ImageNet3D
+
+path_datasets_raw: /data/lmbraid19/sommerl/datasets
+path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
+
+# Where fetch() looks for an existing tree when path_raw is missing or partial.
+# Separate from path_datasets_raw because a platform overrides *that* to its own
+# dataset root: the fallback has to keep naming a different machine's copy, or a
+# fetch on the cluster would "fall back" to the very tree it just found empty.
+# Override it (here or with -p) to point somewhere else.
+path_datasets_fallback: /data/lmbraid19/sommerl/datasets
+
+path_raw:        ${path_datasets_raw}/ImageNet3D
+path_preprocess: ${path_datasets_preprocess}/ImageNet3D_Preprocess
+
+item_type: frame_object
+split: val
+
+cam_tform4x4_cam_raw:
+  - [ 1.00000,  0.00000,  0.00000,  0.00000]
+  - [ 0.00000, -1.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000, -1.00000,  0.00000]
+  - [ 0.00000,  0.00000,  0.00000,  1.00000]
+
+modalities:
+  - rgb
+  - depth
+  - depth_mask
+  - fo_mask
+  - cam_intr4x4
+  - cam_tform4x4_obj
+  - cam_tform4x4_obj_ncds
+  - cam_bbox2d
+  - cam_bbox3d
+  - obj_syms
+  - category
+  - mesh
+
+transform:
+  class_name: CropCamBBox2D
+  H: 512
+  W: 512
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+categories:            # null = all 189
+filter_count_max:
+
+extra:
+  depth_type: mesh
+  mask_type: sam_kpts2d_bbox
+  map_to_uco3d: true
+  # Annotation quality tiers. od3d's default allows all four; narrowing this is
+  # the one knob that changes how many items a category yields.
+  object_status_allow:
+    - status_good
+    - status_partially
+    - status_barely
+    - status_bad
+  fetch_copy_from: ${path_datasets_fallback}/ImageNet3D

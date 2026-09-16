@@ -241,6 +241,11 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "DenseMatcher": "o3b.dataset.densematcher.dataset",
     "OpenTT":       "o3b.dataset.opentt.dataset",
     "UCO3D":        "o3b.dataset.uco3d.dataset",
+    # migrated from od3d; all four are frame_object (one object per frame)
+    "Pascal3D":     "o3b.dataset.pascal3d.dataset",
+    "ImageNet3D":   "o3b.dataset.imagenet3d.dataset",
+    "HANDAL":       "o3b.dataset.handal.dataset",
+    "Objectron":    "o3b.dataset.objectron.dataset",
 }
 
 

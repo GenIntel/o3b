@@ -1,0 +1,80 @@
+# PASCAL3D+ — frame-object items from the od3d-preprocessed tree.
+#
+#   o3b dataset fetch -d pascal3d -p slurm_lmbl40 --remote -n   # preview
+#   o3b dataset fetch -d pascal3d -p slurm_lmbl40 --remote
+#   o3b dataset index -d pascal3d -p slurm_lmbl40 --remote
+#   o3b dataset init  -d pascal3d_test_sharded -p slurm_lmbl40 --remote
+#
+# 21,805 frame metas under meta/frames/<subset>/<category>/<name>.yaml.
+#
+# One object per frame — but by truncation: od3d kept objects[0] of each PASCAL3D
+# annotation and dropped the rest. Reproduced deliberately (the published numbers
+# were measured on this set); see o3b/dataset/pascal3d/dataset.py.
+
+class_name: Pascal3D
+
+path_datasets_raw: /data/lmbraid19/sommerl/datasets
+path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
+
+# Where fetch() looks for an existing tree when path_raw is missing or partial.
+# Separate from path_datasets_raw because a platform overrides *that* to its own
+# dataset root: the fallback has to keep naming a different machine's copy, or a
+# fetch on the cluster would "fall back" to the very tree it just found empty.
+# Override it (here or with -p) to point somewhere else.
+path_datasets_fallback: /data/lmbraid19/sommerl/datasets
+
+path_raw:        ${path_datasets_raw}/PASCAL3D+_release1.1
+path_preprocess: ${path_datasets_preprocess}/PASCAL3D_Preprocess
+
+item_type: frame_object
+
+# PASCAL3D's own split names. "val" is what the benchmark evaluates on;
+# od3d's pascal3d_test config is this val split under another name.
+split: val
+
+# od3d stores cam<-obj in an OpenCV-style camera frame (+Y down, +Z forward);
+# o3b is OpenGL (+Y up, -Z forward).
+cam_tform4x4_cam_raw:
+  - [ 1.00000,  0.00000,  0.00000,  0.00000]
+  - [ 0.00000, -1.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000, -1.00000,  0.00000]
+  - [ 0.00000,  0.00000,  0.00000,  1.00000]
+
+modalities:
+  - rgb
+  - depth                  # rendered from the CAD mesh (see extra.depth_type)
+  - depth_mask
+  - fo_mask                # SAM mask, keypoint+bbox prompted
+  - cam_intr4x4
+  - cam_tform4x4_obj
+  - cam_tform4x4_obj_ncds
+  - cam_bbox2d
+  - cam_bbox3d
+  - obj_syms               # via the UCO3D orientation tree (see extra.map_to_uco3d)
+  - category
+  - mesh
+
+transform:
+  class_name: CropCamBBox2D
+  H: 512
+  W: 512
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+categories:            # null = all 12
+filter_count_max:      # null = no cap
+
+extra:
+  # which depth tree under <path_preprocess>/depth/ to read.
+  #   mesh              CAD-rendered (what od3d's benchmark used)
+  #   depth_anything_v3 monocular estimate
+  #   depth_pro         monocular estimate
+  depth_type: mesh
+  # which mask tree under <path_preprocess>/mask/
+  mask_type: sam_kpts2d_bbox
+  # re-express the object frame and symmetry in UCO3D's canonical convention, so
+  # a model trained on Every9D is judged on the axes it was trained for
+  map_to_uco3d: true
+  # fetch(): preferred source when the raw tree is absent; tried before the
+  # (slow, often firewalled) ftp download
+  fetch_copy_from: ${path_datasets_fallback}/PASCAL3D+_release1.1
