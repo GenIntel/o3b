@@ -19,7 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from o3b.dataset.dataset import ConfigurableDataset, ItemType, register_dataset
+from o3b.dataset.dataset import ItemType, register_dataset
+from o3b.dataset.od3d_frames import Od3dFrameDataset
 from o3b.dataset.handal.enum import (
     HANDAL_CATEGORIES,
     MAP_CATEGORIES_HANDAL_TO_RPATH,
@@ -31,19 +32,15 @@ _GDRIVE_FOLDER = "https://drive.google.com/drive/folders/10mDNZnYrg55ZiP9GV4upKW
 
 
 @register_dataset("HANDAL")
-class HANDAL(ConfigurableDataset):
+class HANDAL(Od3dFrameDataset):
     """HANDAL as ``frame_object`` items."""
 
     all_categories = tuple(c.value for c in HANDAL_CATEGORIES)
     map_categories_to_uco3d = MAP_CATEGORIES_HANDAL_TO_UCO3D
     map_categories_obj_orient_to_uco3d = MAP_CATEGORIES_OBJ_ORIENT_HANDAL_TO_UCO3D
 
-    def __init__(self, cfg):
-        if cfg.item_type != ItemType.FRAME_OBJECT:
-            raise ValueError(
-                f"HANDAL supports item_type 'frame_object', got {cfg.item_type}"
-            )
-        super().__init__(cfg)
+    # sequenced meta tree — see Od3dFrameDataset
+    has_sequence_level = True
 
     @classmethod
     def _path_raw(cls, cfg) -> Path:

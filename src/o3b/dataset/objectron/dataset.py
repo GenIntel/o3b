@@ -22,7 +22,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from o3b.dataset.dataset import ConfigurableDataset, ItemType, register_dataset
+from o3b.dataset.dataset import ItemType, register_dataset
+from o3b.dataset.od3d_frames import Od3dFrameDataset
 from o3b.dataset.od3d_fetch import FetchSkipped
 from o3b.dataset.objectron.enum import (
     MAP_CATEGORIES_OBJECTRON_TO_UCO3D,
@@ -31,7 +32,7 @@ from o3b.dataset.objectron.enum import (
 
 
 @register_dataset("Objectron")
-class Objectron(ConfigurableDataset):
+class Objectron(Od3dFrameDataset):
     """Objectron as ``frame_object`` items."""
 
     all_categories = tuple(c.value for c in OBJECTRON_CATEGORIES)
@@ -40,12 +41,8 @@ class Objectron(ConfigurableDataset):
     # consistent right/up/front frame across its nine categories.
     map_categories_obj_orient_to_uco3d = None
 
-    def __init__(self, cfg):
-        if cfg.item_type != ItemType.FRAME_OBJECT:
-            raise ValueError(
-                f"Objectron supports item_type 'frame_object', got {cfg.item_type}"
-            )
-        super().__init__(cfg)
+    # sequenced meta tree — see Od3dFrameDataset
+    has_sequence_level = True
 
     @classmethod
     def _path_raw(cls, cfg) -> Path:

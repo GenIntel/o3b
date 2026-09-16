@@ -17,7 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from o3b.dataset.dataset import ConfigurableDataset, ItemType, register_dataset
+from o3b.dataset.dataset import ItemType, register_dataset
+from o3b.dataset.od3d_frames import Od3dFrameDataset
 from o3b.dataset.imagenet3d.enum import (
     IMAGENET3D_CATEGORIES,
     MAP_CATEGORIES_IMAGENET3D_TO_UCO3D,
@@ -28,7 +29,7 @@ _DEFAULT_URL = "https://huggingface.co/datasets/ccvl/ImageNet3D/resolve/main/ima
 
 
 @register_dataset("ImageNet3D")
-class ImageNet3D(ConfigurableDataset):
+class ImageNet3D(Od3dFrameDataset):
     """ImageNet3D as ``frame_object`` items."""
 
     all_categories = tuple(c.value for c in IMAGENET3D_CATEGORIES)
@@ -38,12 +39,8 @@ class ImageNet3D(ConfigurableDataset):
     # convention per category and scores near chance on the ones that differ.
     map_categories_obj_orient_to_uco3d = MAP_CATEGORIES_OBJ_ORIENT_IMAGENET3D_TO_UCO3D
 
-    def __init__(self, cfg):
-        if cfg.item_type != ItemType.FRAME_OBJECT:
-            raise ValueError(
-                f"ImageNet3D supports item_type 'frame_object', got {cfg.item_type}"
-            )
-        super().__init__(cfg)
+    # flat meta tree — see Od3dFrameDataset
+    has_sequence_level = False
 
     @classmethod
     def _path_raw(cls, cfg) -> Path:
