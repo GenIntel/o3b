@@ -189,7 +189,10 @@ def fetch_or_copy(
 
     if path.is_dir() and any(path.iterdir()):
         missing = [s for s in expect if not _has_files(path / s)]
-        print(f"[{name}] present but incomplete (missing: {', '.join(missing)})")
+        # With no `expect`, the tree failed the has-a-file test itself, so
+        # naming an empty list of missing subpaths would just read as a bug.
+        detail = f" (missing: {', '.join(missing)})" if missing else " (no files in it)"
+        print(f"[{name}] present but incomplete{detail}")
 
     if copy_from is not None:
         if _is_populated(Path(copy_from), expect):
