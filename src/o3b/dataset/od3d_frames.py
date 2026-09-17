@@ -934,23 +934,35 @@ class Od3dFrameDataset(ConfigurableDataset):
 
     @staticmethod
     def _renderer_available() -> bool:
-        """Can the EGL rasteriser actually start here?
+        """Can the EGL rasteriser start here? Probed in a SEPARATE PROCESS.
 
-        Probed with a single triangle rather than inferred from the environment:
-        the failure mode on a submit node is that pyrender prints ctypes noise
-        and returns nothing, which no exception or env var reports.
+        Out-of-process is the whole point. Creating an EGL context in this
+        process and then forking — which is what mp_start_method: fork does for
+        the shard-build DataLoader — hands every worker a GL state it cannot use,
+        and they die with SIGABRT before producing a single record. The first
+        version of this guard did exactly that and broke the build it was meant
+        to protect: 0/250 items, with the real cause buried under a secondary
+        "Directory not empty" from HuggingFace's cleanup.
+
+        A worker that initialises EGL for itself is fine (HouseCorr3D shards with
+        fo_mask_amodal at sharded_num_workers: 4), so the parent must simply
+        never touch it.
         """
-        import torch
+        import subprocess
+        import sys
 
-        from o3b.dataset.housecorr3d.frame_dataset import render_scene_depth
-
-        verts = torch.tensor([[-0.1, -0.1, -1.0], [0.1, -0.1, -1.0], [0.0, 0.1, -1.0]])
-        faces = torch.tensor([[0, 1, 2]])
-        intr = torch.eye(4)
-        intr[0, 0] = intr[1, 1] = 100.0
-        intr[0, 2], intr[1, 2] = 32.0, 32.0
+        code = (
+            "import torch;"
+            "from o3b.dataset.housecorr3d.frame_dataset import render_scene_depth;"
+            "v=torch.tensor([[-0.1,-0.1,-1.],[0.1,-0.1,-1.],[0.,0.1,-1.]]);"
+            "f=torch.tensor([[0,1,2]]);"
+            "i=torch.eye(4);i[0,0]=i[1,1]=100.;i[0,2]=i[1,2]=32.;"
+            "print('OK' if render_scene_depth([(v,f)],i,64,64) is not None else 'NO')"
+        )
         try:
-            return render_scene_depth([(verts, faces)], intr, 64, 64) is not None
+            r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                               text=True, timeout=180)
+            return "OK" in r.stdout
         except Exception:
             return False
 
