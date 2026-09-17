@@ -10,7 +10,8 @@ Each meta additionally carries ``object_status`` (``status_good`` /
 allows all four; ``extra.object_status_allow`` narrows it, which is the only
 knob that changes how many items a category yields.
 
-Depth is rendered from the CAD mesh (``depth/mesh/``), not sensed.
+Depth is ``depth_anything_v3``, a monocular estimate — the only depth this
+tree has; unlike PASCAL3D there is no CAD-mesh render to fall back on.
 """
 from __future__ import annotations
 

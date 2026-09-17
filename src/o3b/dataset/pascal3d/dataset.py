@@ -13,9 +13,12 @@ purpose — the published numbers were measured on exactly this set — and the
 index carries an ``object_idx`` column so emitting every annotated object later
 is a walk change rather than a schema change.
 
-Depth is *rendered from the CAD mesh* (``depth/mesh/``), not sensed; the tree
-also holds ``depth_anything_v3`` and ``depth_pro`` estimates.  Which one is used
-matters for an RGB-D method, so it is a config key rather than a constant.
+Depth defaults to ``depth_anything_v3`` — a monocular estimate.  The tree also
+holds a CAD-mesh render (``depth/mesh/<mesh_type>/``) and ``depth_pro``, and
+``extra.depth_type`` selects between them.  The estimate is the default because
+ImageNet3D has no mesh-rendered depth at all, and a benchmark whose two
+image-only columns disagreed about where depth came from would not be comparing
+like with like.
 """
 from __future__ import annotations
 

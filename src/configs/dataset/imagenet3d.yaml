@@ -66,8 +66,16 @@ categories:            # null = all 189
 filter_count_max:
 
 extra:
-  depth_type: mesh
-  depth_mesh_type: meta
+  # DepthAnything-V3 monocular estimate, at
+  # depth/depth_anything_v3/<split>/<category>/<name>.png (no <mesh_type> level;
+  # the mesh-rendered tree has one because it is indexed by which mesh produced
+  # it). This is the default rather than the CAD render: ImageNet3D has no
+  # mesh-rendered depth at all, so "mesh" silently yielded no depth for it, and
+  # a single depth provenance across both keeps the two columns comparable.
+  # depth/mesh/<mesh_type>/ still exists for PASCAL3D if it is wanted back:
+  #   depth_type: mesh
+  #   depth_mesh_type: meta
+  depth_type: depth_anything_v3
   mask_type: sam_kpts2d_bbox
   map_to_uco3d: true
   # Annotation quality tiers. od3d's default allows all four; narrowing this is
