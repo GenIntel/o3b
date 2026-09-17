@@ -403,3 +403,43 @@ class Od3dFrameDataset(ConfigurableDataset):
         # build does not come through here (see the note above), so what is
         # written to disk stays in the dataset's own object frame.
         return self._apply_uco3d_alignment(super().__getitem__(idx))
+
+    # ── viz ──────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def visualize(cls, cfg, *, db: Optional[Path] = None, limit: int = 20,
+                  object_id: Optional[str] = None, render: bool = False,
+                  debug: bool = False, obj_centric: bool = False, **_) -> None:
+        """Browse items in viser: mesh, frustum, rgb panel, depth cloud, axes.
+
+        Shares HouseCorr3D's frame-object viewer, so all six evaluation sets are
+        inspected through one tool and a pose convention that disagrees between
+        them is visible side by side rather than inferred from a metric.
+
+        Worth doing before sharding rather than after: an object frame that is
+        wrong by a rotation indexes and shards perfectly happily, and only shows
+        up as a disappointing number several phases later.
+        """
+        from dataclasses import replace as _r
+
+        from o3b.dataset.housecorr3d.frame_dataset import _visualize_frame_objects_viser
+
+        path_preprocess = cls._path_preprocess(cfg)
+        if not (path_preprocess / "meta" / "frames").is_dir():
+            print(
+                f"No meta tree at {path_preprocess / 'meta' / 'frames'}.\n"
+                f"  Fetch it:              o3b dataset fetch -d <config> -p slurm_lmbl40\n"
+                f"  or run on the cluster: o3b dataset viz -d <config> -p slurm_lmbl40 --remote",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # modalities=None so the viewer gets everything the loader can produce,
+        # not just what a training config asked for.
+        viz_cfg = _r(cfg, modalities=None, filter_count_max=limit)
+        dataset = cls(viz_cfg)
+        if len(dataset) == 0:
+            print("No frames found matching the current config filters.")
+            return
+        print(f"Showing up to {limit} of {len(dataset)} frames  {path_preprocess}\n")
+        _visualize_frame_objects_viser(dataset, debug=debug, obj_centric=obj_centric)
