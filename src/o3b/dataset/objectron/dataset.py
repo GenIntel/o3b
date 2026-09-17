@@ -154,8 +154,18 @@ class Objectron(Od3dFrameDataset):
         Objectron the way ``meta_mask/meta`` is for UCO3D. The mesh is a cuboid
         fitted to the 3-D box annotation rather than a scan — Objectron has no
         object geometry beyond that box — so it carries no more information than
-        l_kpts3d does, but it is a *surface*, which is what lets the silhouette
-        be rendered and checked against the annotated mask.
+        l_kpts3d does, but it is a *surface*, which is what lets a silhouette be
+        rendered at all.
+
+        CAVEAT: because it is the box and not the object, Objectron's
+        fo_mask_amodal is the silhouette of the *bounding box* — measured at
+        28.9% of the frame against 15.5% for the annotated chair mask, i.e. the
+        chair fills about half its box. For the other three datasets the mesh is
+        the object, the two agree to a few percent, and that agreement is a
+        useful check on the pose. Here it is not: a wrong pose and a correct one
+        both give a box larger than the object. Do not read Objectron's amodal
+        mask as an occlusion-completed object mask, and do not use it to
+        validate its poses.
         """
         mesh_type = (self.cfg.extra or {}).get("mesh_type", "cuboid500")
         return (self.path_preprocess / "mesh" / mesh_type / "keypoints" / "meta"
