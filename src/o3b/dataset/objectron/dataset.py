@@ -145,3 +145,18 @@ class Objectron(Od3dFrameDataset):
             raise FetchSkipped(f"Objectron: {len(missing)} rgb frames missing.\n{hint}")
         else:
             print("[Objectron (frames)] already present — nothing to do.")
+
+    def _mesh_path(self, row, meta) -> Optional[Path]:
+        """The annotated cuboid, at
+        mesh/<mesh_type>/keypoints/meta/<split>/<category>/<sequence>/mesh.ply.
+
+        ``keypoints/meta`` is od3d's <pcl_type>/<sfm_type> pair, fixed for
+        Objectron the way ``meta_mask/meta`` is for UCO3D. The mesh is a cuboid
+        fitted to the 3-D box annotation rather than a scan — Objectron has no
+        object geometry beyond that box — so it carries no more information than
+        l_kpts3d does, but it is a *surface*, which is what lets the silhouette
+        be rendered and checked against the annotated mask.
+        """
+        mesh_type = (self.cfg.extra or {}).get("mesh_type", "cuboid500")
+        return (self.path_preprocess / "mesh" / mesh_type / "keypoints" / "meta"
+                / row["split"] / row["category"] / row["sequence"] / "mesh.ply")

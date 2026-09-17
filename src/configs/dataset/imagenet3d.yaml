@@ -83,11 +83,12 @@ extra:
   depth_type: depth_anything_v3
   mask_type: sam_kpts2d_bbox
   map_to_uco3d: true
-  # Annotation quality tiers. od3d's default allows all four; narrowing this is
-  # the one knob that changes how many items a category yields.
-  object_status_allow:
-    - status_good
-    - status_partially
-    - status_barely
-    - status_bad
+  # NOTE: ImageNet3D's metas carry an `object_status` tier (status_good /
+  # _partially / _barely / _bad) and od3d could filter on it at extract-meta
+  # time. o3b does NOT implement that filter, so no key for it is offered here
+  # rather than one that silently does nothing. Every status is kept — which is
+  # also od3d's default, and what the published numbers were measured with.
+  # Implementing it means carrying object_status into frames.db during the walk
+  # (the walk currently lists filenames and never opens a meta) and filtering on
+  # the column, so that __len__ stays exact.
   fetch_copy_from: ${path_datasets_fallback}/ImageNet3D

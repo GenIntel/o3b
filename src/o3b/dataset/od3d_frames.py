@@ -916,5 +916,16 @@ class Od3dFrameDataset(ConfigurableDataset):
             logger.warning(f"could not render mesh mask: {e}")
             return None
         if depth is None:
+            # Warned once: the rasteriser is EGL-based and returns nothing on a
+            # host without a GPU (a cluster submit node, say), where it prints
+            # its own ctypes noise and no explanation. Without this the amodal
+            # mask is simply absent and looks like a dataset that has none.
+            if not getattr(self, "_warned_render", False):
+                self._warned_render = True
+                logger.warning(
+                    "mesh rasterisation returned nothing — fo_mask_amodal will be "
+                    "absent. The renderer needs EGL and a GPU; on a submit node "
+                    "it cannot initialise. Run on a compute node (srun/sbatch)."
+                )
             return None
         return depth > 0        # 0 = no hit = background
