@@ -391,7 +391,13 @@ class Od3dFrameDataset(ConfigurableDataset):
             if item.obj_size3d is not None:
                 item.obj_size3d = (item.obj_size3d[..., None, :] * R_abs).sum(dim=-1)
             if item.mesh is not None:
-                item.mesh.transf3d(T)
+                # replace, never mutate: _object_geometry hands out a fresh Mesh
+                # that still SHARES the cached verts tensor, so rotating in place
+                # would turn the cache entry too and every later frame of the
+                # object would be rotated again.
+                from dataclasses import replace as _r_mesh
+                item.mesh = _r_mesh(
+                    item.mesh, verts=item.mesh.verts.float() @ T[:3, :3].T)
             if item.obj_kpts3d is not None:
                 item.obj_kpts3d = item.obj_kpts3d @ T[:3, :3].T
             if item.obj_bbox3d is not None:
