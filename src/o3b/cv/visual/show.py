@@ -348,6 +348,15 @@ def plotly_fig_2_tensor(fig, width=None, height=None):
 
 
 _offscreen_renderers: dict = {}
+# Bounded, because each entry holds an EGL context + framebuffer that pyrender
+# only frees on .delete(). Unbounded it is a GPU resource leak keyed by image
+# size: a dataset of fixed-size frames creates one renderer, but one of
+# arbitrarily-sized photographs creates a renderer per distinct (W, H) — and
+# building one costs ~135 ms against ~4 ms to render. Baking fo_mask_amodal
+# over ImageNet3D (40,527 photos, sizes all different) drove the shard build to
+# 3.74 s/item, degrading as the cache grew, while fixed-size HANDAL and
+# Objectron built at 20-100 item/s.
+_OFFSCREEN_RENDERER_MAX = 8
 # The cached renderer's GL context may only be current in one thread at a time,
 # and pyrender never hands it back (EGLPlatform.make_uncurrent is a no-op stub),
 # so a second thread's eglMakeCurrent fails with EGL_BAD_ACCESS on drivers that
@@ -403,6 +412,16 @@ def _offscreen_renderer(width: int, height: int):
     if key not in _offscreen_renderers:
         if "DISPLAY" not in os.environ:
             os.environ["PYOPENGL_PLATFORM"] = "egl"
+        # Evict oldest first, and actually delete it: dropping the reference
+        # alone leaves the context alive until pyrender is garbage-collected,
+        # which is what makes this a leak rather than a cache.
+        while len(_offscreen_renderers) >= _OFFSCREEN_RENDERER_MAX:
+            oldest_key = next(iter(_offscreen_renderers))
+            old = _offscreen_renderers.pop(oldest_key)
+            try:
+                old.delete()
+            except Exception:                 # a dead context must not stop us
+                pass
         _offscreen_renderers[key] = pyrender.OffscreenRenderer(*key[1:])
     return _offscreen_renderers[key]
 
