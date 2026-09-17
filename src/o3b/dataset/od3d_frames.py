@@ -50,6 +50,25 @@ from o3b.dataset.dataset import ConfigurableDataset, ItemType
 
 logger = logging.getLogger(__name__)
 
+def _corners_canonical(v_min, v_max):
+    """The 8 box corners in the order o3b's box drawing requires.
+
+    _corners8_to_size_tform documents it as 0-3 bottom, 4-7 top with 0->1 = +x,
+    0->3 = +y, 0->4 = +z, and draw_bbox3d_corners walks (0,1),(1,2),(2,3),(3,0)
+    then (4,5),(5,6),(6,7),(7,4) then the four verticals. A plain x/y/z triple
+    loop yields a different permutation, and the wireframe is then drawn across
+    the diagonals — right size, right place, visibly not a box.
+    """
+    import torch
+
+    x0, y0, z0 = v_min.tolist()
+    x1, y1, z1 = v_max.tolist()
+    return torch.tensor([
+        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],   # bottom
+        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],   # top
+    ], dtype=torch.float32)
+
+
 #: read_depth_image decodes uint16 millimetres, so this is the largest value the
 #: encoding can represent; anything at it was clipped, not measured.
 _DEPTH_U16_CEILING_M = 65.535
@@ -376,8 +395,23 @@ class Od3dFrameDataset(ConfigurableDataset):
             if item.obj_kpts3d is not None:
                 item.obj_kpts3d = item.obj_kpts3d @ T[:3, :3].T
             if item.obj_bbox3d is not None:
-                # a point field like the others, so it turns with them
-                item.obj_bbox3d = item.obj_bbox3d @ T[:3, :3].T
+                # Rotate the corners, then REBUILD them in canonical order from
+                # the rotated bounds. Rotating alone would keep the box in the
+                # right place while permuting which corner is index 0..7, and the
+                # ordering is exactly what draw_bbox3d_corners and
+                # _corners8_to_size_tform rely on — so the box would go back to
+                # being drawn across its own diagonals, but only for the
+                # categories that carry a re-orientation.
+                rot = item.obj_bbox3d @ T[:3, :3].T
+                lo, hi = rot.min(dim=0).values, rot.max(dim=0).values
+                item.obj_bbox3d = _corners_canonical(lo, hi)
+            if item.cam_bbox3d is not None and item.cam_tform4x4_obj is not None:
+                # cam_bbox3d is camera-space and so unmoved by an object-frame
+                # rotation, but its corner order followed obj_bbox3d's, so it is
+                # rebuilt from the new object box through the (already rotated)
+                # pose.
+                R2, t2 = item.cam_tform4x4_obj[:3, :3], item.cam_tform4x4_obj[:3, 3]
+                item.cam_bbox3d = item.obj_bbox3d.float() @ R2.t() + t2
             if item.cam_tform4x4_obj is not None and item.obj_ncds0c_tform4x4_obj is not None:
                 item.cam_tform4x4_obj_ncds = (
                     item.cam_tform4x4_obj @ inv_tform4x4(item.obj_ncds0c_tform4x4_obj)
@@ -677,8 +711,8 @@ class Od3dFrameDataset(ConfigurableDataset):
         # box silently never appears.
         cam_bbox3d = None
         if (_want("cam_bbox3d", mods) and obj_bbox3d is not None
-                and cam_tform4x4_obj_ncds is not None):
-            R, tr = cam_tform4x4_obj_ncds[:3, :3], cam_tform4x4_obj_ncds[:3, 3]
+                and cam_tform4x4_obj is not None):
+            R, tr = cam_tform4x4_obj[:3, :3], cam_tform4x4_obj[:3, 3]
             cam_bbox3d = obj_bbox3d.float() @ R.t() + tr
         if not _want("obj_bbox3d", mods):
             obj_bbox3d = None
@@ -811,23 +845,22 @@ class Od3dFrameDataset(ConfigurableDataset):
         tform[:3, :3] = torch.eye(3) * half_scale
         tform[:3, 3] = center
 
-        # The 8 corners in NCDS space, NOT metric object space.
+        # The 8 corners in METRIC OBJECT space, in the order o3b's box drawing
+        # requires. Both halves of that matter:
         #
-        # Object.transform maps obj_bbox3d with the *same* transform as
-        # mesh.verts and obj_kpts3d, and every consumer that transforms an object
-        # (the viser viewer above all) hands it cam_tform4x4_obj_ncds. A metric
-        # box fed through that comes out scaled by half_scale relative to the
-        # mesh and to cam_bbox3d — measured at exactly 0.3803x on a PASCAL3D
-        # aeroplane whose half_scale is 0.3803. So all four point fields
-        # (verts, kpts, bbox, pts3d) share one space, and obj_size3d carries the
-        # metric extent instead.
-        bbox3d = torch.stack([
-            torch.tensor([x, y, z], dtype=torch.float32)
-            for x in (v_min[0], v_max[0])
-            for y in (v_min[1], v_max[1])
-            for z in (v_min[2], v_max[2])
-        ])
-        bbox3d = (bbox3d - center) / half_scale
+        # Space: viz_viser's projected-box panel draws obj_bbox3d with the actual
+        # cam_tform4x4_obj and takes its size from bmin/bmax, so the corners have
+        # to be metric object-space — the same convention HouseCorr3D stores.
+        # (Object.transform will also map obj_bbox3d as a point field, but the
+        # 3-D scene draws its box from cam_bbox3d and never uses that path.)
+        #
+        # Order: _corners8_to_size_tform documents it as 0-3 bottom, 4-7 top with
+        # 0->1 = +x, 0->3 = +y, 0->4 = +z, and draw_bbox3d_corners walks
+        # (0,1),(1,2),(2,3),(3,0) then (4,5),(5,6),(6,7),(7,4) then the verticals.
+        # A plain x/y/z triple loop produces a different permutation, and the
+        # wireframe is then drawn across the diagonals — the box is the right size
+        # and in the right place, but visibly not a box.
+        bbox3d = _corners_canonical(v_min, v_max)
 
         mesh = None
         if verts is not None and faces is not None:
