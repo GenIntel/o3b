@@ -214,10 +214,10 @@ def _build_dataset_parser(sub):
                              "objects — keep it finite over an sshfs mount without "
                              "frames.db, where the walk is a round trip per "
                              "sequence (default: the whole category)")
-    p_vcat.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True,
+    p_vcat.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=False,
                         help="Draw the 3-D box and the object axes over each crop "
                              "(--no-overlay leaves the images alone)")
-    p_vcat.add_argument("--labels", action=argparse.BooleanOptionalAction, default=True,
+    p_vcat.add_argument("--labels", action=argparse.BooleanOptionalAction, default=False,
                         help="Write each object's sequence name into its row")
     p_vcat.add_argument("--cell", type=int, default=SHEET_CELL, metavar="PX",
                         help=f"Pixels per frame (default: {SHEET_CELL}, which is "
@@ -230,6 +230,9 @@ def _build_dataset_parser(sub):
                              f"(default: {SHEET_MARGIN}; the grid editors use 0.45)")
     p_vcat.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True,
                         help="Use (and fill) the crop cache under ~/.o3b/cache/axes")
+    p_vcat.add_argument("--show", action=argparse.BooleanOptionalAction, default=None,
+                        help="Open a window for each sheet (--no-show for a headless "
+                             "run; defaults to on unless -o is given)")
     p_vcat.add_argument("-o", "--out", type=Path, default=None, metavar="PATH",
                         help="Write the sheet to this PNG; a directory (or a path "
                              "without a suffix) collects one file per category")
@@ -758,7 +761,9 @@ def _run_dataset(args, parser=None, argv=None):
             overlay=args.overlay, labels=args.labels,
             margin=args.margin, cell=args.cell, gap=args.gap,
             seed=args.seed, pool=args.pool,
-            out=args.out, show=args.out is None, cache=args.cache,
+            out=args.out,
+            show=(args.out is None) if args.show is None else args.show,
+            cache=args.cache,
         )
     elif args.dataset_command == "viz":
         if args.filter_has_kpts:

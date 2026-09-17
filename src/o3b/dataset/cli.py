@@ -362,12 +362,15 @@ def main(argv=None) -> None:
     p_vcat.add_argument("-f", "--frames", type=int, default=SHEET_FRAMES, metavar="F")
     p_vcat.add_argument("--seed", type=int, default=None, metavar="SEED")
     p_vcat.add_argument("--pool", type=int, default=None, metavar="N")
-    p_vcat.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True)
-    p_vcat.add_argument("--labels", action=argparse.BooleanOptionalAction, default=True)
+    p_vcat.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=False)
+    p_vcat.add_argument("--labels", action=argparse.BooleanOptionalAction, default=False)
     p_vcat.add_argument("--cell", type=int, default=SHEET_CELL, metavar="PX")
     p_vcat.add_argument("--gap", type=int, default=SHEET_GAP, metavar="PX")
     p_vcat.add_argument("--margin", type=float, default=SHEET_MARGIN, metavar="F")
     p_vcat.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True)
+    p_vcat.add_argument("--show", action=argparse.BooleanOptionalAction, default=None,
+                        help="Open a window for each sheet (--no-show for a headless "
+                             "run; defaults to on unless -o is given)")
     p_vcat.add_argument("-o", "--out", type=Path, default=None, metavar="PATH")
 
     p_vis = sub.add_parser("viz", help="Show dataset summary and optionally render meshes")
@@ -471,7 +474,9 @@ def main(argv=None) -> None:
             overlay=args.overlay, labels=args.labels,
             margin=args.margin, cell=args.cell, gap=args.gap,
             seed=args.seed, pool=args.pool,
-            out=args.out, show=args.out is None, cache=args.cache,
+            out=args.out,
+            show=(args.out is None) if args.show is None else args.show,
+            cache=args.cache,
         )
     elif args.command == "viz":
         if args.filter_has_kpts:
