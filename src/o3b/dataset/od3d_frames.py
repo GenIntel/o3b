@@ -292,3 +292,114 @@ class Od3dFrameDataset(ConfigurableDataset):
         con.close()
         print(f"Done. {total} rows walked; {n_rows} rows over {n_cats} categories "
               f"now in {db_path}")
+
+    # ── UCO3D axis alignment ─────────────────────────────────────────────────
+    # Applied on *read*, never baked into the shards — matching od3d, whose
+    # shard build saves use_map_obj_orient_uco3d / use_map_obj_syms_uco3d, sets
+    # both False for the duration, and restores them afterwards (see
+    # OD3D_Dataset around the save_to_sharded_dataset_path call).
+    #
+    # The split matters. The crop *is* baked in, because it is expensive and
+    # fixed; the alignment is not, because it is a labelling. Re-deriving a
+    # category's canonical axes then costs nothing, where baking it in would
+    # mean rebuilding every shard of every dataset that category appears in.
+    #
+    # o3b's two paths already separate exactly here: the shard build calls
+    # _load_sharded_item -> _load_item + sharded_transform, while reads go
+    # through __getitem__. So overriding __getitem__ covers items loaded raw and
+    # items read back from a cache, and is unreachable from the build.
+
+    def _uco3d_category(self, category: Optional[str]) -> Optional[str]:
+        """This dataset's category name in UCO3D's vocabulary."""
+        if category is None:
+            return None
+        m = self.map_categories_to_uco3d
+        if not m:
+            return category
+        mapped = m.get(category)
+        return str(mapped) if mapped is not None else None
+
+    def _obj_orient_tform(self, category: Optional[str]):
+        """(4, 4) rotation taking this category's object axes onto UCO3D's.
+
+        None when the dataset needs no re-orientation (PASCAL3D, Objectron) or
+        the category is unmapped.
+        """
+        import torch
+
+        from o3b.cv.geometry.transform import transf4x4_from_rot3x3
+
+        m = self.map_categories_obj_orient_to_uco3d
+        if not m or category is None:
+            return None
+        rot = m.get(category)
+        if rot is None:
+            return None
+        return transf4x4_from_rot3x3(torch.tensor(rot, dtype=torch.float32))
+
+    def _apply_uco3d_alignment(self, item):
+        """Re-express one item's object frame and symmetry in UCO3D's convention.
+
+        Mirrors od3d's OD3D_Dataset.get_frames bookkeeping: the object frame is
+        rotated by T, so the pose is post-multiplied by inv(T) and the mesh and
+        the NCDS transform follow, leaving the object projecting onto exactly the
+        same pixels. obj_size3d is permuted by |R| because rotating the axes
+        permutes which side length belongs to which.
+        """
+        import torch
+
+        from o3b.cv.geometry.transform import inv_tform4x4
+
+        if item is None or not (self.cfg.extra or {}).get("map_to_uco3d"):
+            return item
+
+        category = getattr(item, "category", None)
+        if isinstance(category, (list, tuple)):      # defensive: never batched here
+            return item
+        uco3d_cat = self._uco3d_category(category)
+        T = self._obj_orient_tform(category)
+
+        if T is not None:
+            R_abs = T[:3, :3].abs()
+            if item.cam_tform4x4_obj is not None:
+                item.cam_tform4x4_obj = item.cam_tform4x4_obj @ inv_tform4x4(T)
+            if item.obj_ncds0c_tform4x4_obj is not None:
+                item.obj_ncds0c_tform4x4_obj = T @ item.obj_ncds0c_tform4x4_obj @ inv_tform4x4(T)
+            if item.obj_size3d is not None:
+                item.obj_size3d = (item.obj_size3d[..., None, :] * R_abs).sum(dim=-1)
+            if item.mesh is not None:
+                item.mesh.transf3d(T)
+            if item.obj_kpts3d is not None:
+                item.obj_kpts3d = item.obj_kpts3d @ T[:3, :3].T
+            if item.cam_tform4x4_obj is not None and item.obj_ncds0c_tform4x4_obj is not None:
+                item.cam_tform4x4_obj_ncds = (
+                    item.cam_tform4x4_obj @ inv_tform4x4(item.obj_ncds0c_tform4x4_obj)
+                )
+
+        # Symmetry comes from UCO3D's orientation tree, which is stated in
+        # UCO3D's axes. With T applied the item is already in those axes; without
+        # it (an unmapped category, or a dataset with no orientation table) the
+        # code has to be rotated back into the item's own frame, or the pose
+        # metric would quotient out the wrong axis.
+        if uco3d_cat is not None:
+            from o3b.dataset.uco3d.obj_syms import obj_syms_for_category
+
+            try:
+                syms = obj_syms_for_category(uco3d_cat)
+            except KeyError:
+                syms = None
+            if syms is not None:
+                if T is None:
+                    T_back = self._obj_orient_tform(category)
+                    if T_back is not None:
+                        R_abs = inv_tform4x4(T_back)[:3, :3].abs()
+                        syms = (syms[..., None, :].float() * R_abs).sum(dim=-1).long()
+                item.obj_syms = syms
+        return item
+
+    def __getitem__(self, idx: int):
+        # super() serves either a shard record or a freshly loaded item, then
+        # applies cfg.transform; the alignment goes on top of both. The shard
+        # build does not come through here (see the note above), so what is
+        # written to disk stays in the dataset's own object frame.
+        return self._apply_uco3d_alignment(super().__getitem__(idx))
