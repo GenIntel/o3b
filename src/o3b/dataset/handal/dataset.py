@@ -153,3 +153,41 @@ class HANDAL(Od3dFrameDataset):
         if not rpath or obj_id is None:
             return None
         return self.path_raw / rpath / "models" / f"obj_{obj_id:06d}.ply"
+
+    # ── bbox correction ──────────────────────────────────────────────────────
+
+    def _cam_bbox2d_from_meta(self, meta):
+        """HANDAL's ``l_bbox`` is mislabelled at the source; reorder it here.
+
+        od3d's extract_meta wrote
+
+            l_bbox = [bbox_visib[2], bbox_visib[3], bbox_visib[0], bbox_visib[1]]
+            ...
+            l_bbox=l_bbox,   # x0, y0, x1, y1
+
+        but BOP's ``bbox_visib`` is ``[x, y, w, h]``, so what is stored is
+        ``[w, h, x, y]`` while the comment claims xyxy. Verified against the
+        source JSON: bbox_visib [925, 496, 199, 258] is stored as
+        [199.0, 258.0, 925.0, 496.0].
+
+        Read as xyxy that gives width ``x - w`` and height ``y - h``, which is
+        negative whenever the box is wider than its left offset — 41% of a
+        1,646-meta sample, and those frames were dropped outright by
+        CropCamBBox2D (2,962 of 8,320 in the first whole-dataset build). The
+        other 59% were *worse*: a plausible-looking box in the wrong place, which
+        crops to the wrong pixels and reports nothing.
+
+        Corrected rather than re-extracted because the fix is exact and local;
+        re-running od3d's extract_meta over 277k frames to rewrite the same
+        numbers would be slower and would leave the loader trusting a field it
+        has been shown cannot be trusted.
+        """
+        import torch
+
+        b = meta.get("l_bbox")
+        if not b or len(b) != 4:
+            return None
+        w, h, x, y = (float(v) for v in b)
+        if w <= 0 or h <= 0:
+            return None
+        return torch.tensor([x, y, x + w, y + h], dtype=torch.float32)

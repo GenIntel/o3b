@@ -706,7 +706,10 @@ class Od3dFrameDataset(ConfigurableDataset):
 
         cam_bbox2d = None
         if _want("cam_bbox2d", mods):
-            if meta.get("l_bbox"):
+            # Subclasses whose stored bbox needs correcting override this
+            # (HANDAL's is [w, h, x, y] under an xyxy comment).
+            cam_bbox2d = self._cam_bbox2d_from_meta(meta)
+            if cam_bbox2d is None and meta.get("l_bbox"):
                 cam_bbox2d = torch.tensor(meta["l_bbox"], dtype=torch.float32)
             elif fo_mask is not None and bool(fo_mask.any()):
                 from o3b.cv.visual.draw import get_bboxs_from_masks
@@ -806,6 +809,10 @@ class Od3dFrameDataset(ConfigurableDataset):
     # degree for both.
 
     _MESH_CACHE_MAX = 64
+
+    def _cam_bbox2d_from_meta(self, meta):
+        """Dataset-specific 2-D box from the meta, or None to use ``l_bbox``."""
+        return None
 
     def _mesh_path(self, row, meta) -> Optional[Path]:
         """Where this row's object mesh lives; None when the dataset has none.
