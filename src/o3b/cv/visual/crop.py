@@ -110,9 +110,13 @@ def crop_with_bbox(
     align_corners=False,
     crop_type="crop_large_side",
     scale_bbox=1.3,
+    pad_value=0.0,
 ):
     """
     Args:
+        pad_value: what fills the part of the crop that lies outside the image,
+            in the image's own units (0.0 = black, and 1.0 = white for a float
+            image / 255 for uint8). Default black, as it has always been.
         crop_type: how to square the bbox before resizing to (H_out, W_out):
             "crop_large_side": pad the shorter bbox side up to the longer one
                 (crop region contains the full original bbox).
@@ -169,6 +173,7 @@ def crop_with_bbox(
         ctx=ctx,
         mode=mode,
         align_corners=align_corners,
+        pad_value=pad_value,
     )
 
 
@@ -181,6 +186,7 @@ def crop(
     ctx=None,
     mode="bilinear",
     align_corners=False,
+    pad_value=0.0,
 ):
     device = img.device
     dtype = img.dtype
@@ -239,7 +245,8 @@ def crop(
     # a) first crop then resize (preferred if scale > 1. -> pad on lower-resolution image)
     if scale_avg >= 1.0:
         # img = torch.nn.functional.pad(img, pad=pad)
-        img_padded = torch.zeros(
+        img_padded = torch.full(
+            fill_value=pad_value,
             size=img.shape[:-2]
             + torch.Size(
                 [
@@ -291,7 +298,8 @@ def crop(
         pad_in_res = ((pad_in.reshape(2, 2) * scale_WH[:, None]).flatten()).to(
             torch.long,
         )
-        img_padded = torch.zeros(
+        img_padded = torch.full(
+            fill_value=pad_value,
             size=img_res.shape[:-2]
             + torch.Size(
                 [
