@@ -1,0 +1,36 @@
+# omni6dpose_sope_train — the synthetic (SOPE) train half of Omni6DPose, ALL categories.
+#
+# 1) re-index (required: the existing frames.db was written by the housecorr3d
+#    configs, so it holds only their categories — ROPE 5 of 149, SOPE test 99
+#    and train 50 of 153. Indexing filters on cfg.categories and
+#    filter_count_max, so those caps are baked into what was written.)
+#      o3b dataset index -d omni6dpose_sope_train -p slurm_lmbl40 --remote
+#
+# 2) shard
+#      o3b dataset init -d omni6dpose_sope_train_sharded -p slurm_lmbl40 --remote
+#
+# Distinct from the hc3d_* configs, which are the 50-category keypoint-annotated
+# correspondence subset. This is the whole dataset for the pose benchmark:
+#   categories: null        all of them, not the housecorr50 list
+#   filter_has_kpts: false  keypoints exist for a minority; requiring them is
+#                           what reduced SOPE test to 50 categories
+#
+# Indexing unfiltered is additive, not destructive: frames is keyed by frame_id
+# and the hc3d configs filter on categories and has_kpts at *read* time, so they
+# keep seeing exactly what they see now.
+
+defaults:
+  - hc3d_frame_object_train
+  - _self_
+
+item_type: frame_object
+split: train
+filter_is_real: false
+filter_has_kpts: false
+categories:
+filter_count_max:
+
+# od3d capped ROPE at 16 frames per sequence; without a cap ROPE alone is
+# ~332k frames x ~4.7 objects = ~1.55M object-frames.
+extra:
+  frames_count_max_per_sequence: 16

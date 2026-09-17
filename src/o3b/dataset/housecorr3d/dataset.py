@@ -317,9 +317,35 @@ class HouseCorr3D(ConfigurableDataset):
                         if subset.has_item(self._frame_rows[i].get("object_id"),
                                            self._frame_rows[i].get("frame_id"))
                     ]
+                # extra.frames_count_max_per_sequence: keep at most N rows per
+                # scene, the thinning od3d applied to ROPE (16). Without it ROPE
+                # is ~332k frames x ~4.7 objects = ~1.55M object-frames, which is
+                # neither shardable at a sensible size nor what the published
+                # numbers were measured on.
+                #
+                # Opt-in: no hc3d config sets the key, so their row lists are
+                # unchanged. Applied before filter_count_max so the cap counts
+                # what the thinning left, matching how subset/filter_frames
+                # compose with it above.
+                per_seq = (self.cfg.extra or {}).get("frames_count_max_per_sequence")
+                if per_seq and self.cfg.item_type == ItemType.FRAME_OBJECT:
+                    n_before = len(self._frame_rows_id)
+                    seen: dict = {}
+                    kept = []
+                    for rid in self._frame_rows_id:
+                        key = self._frame_rows[rid].get("scene_name")
+                        if seen.get(key, 0) >= per_seq:
+                            continue
+                        seen[key] = seen.get(key, 0) + 1
+                        kept.append(rid)
+                    self._frame_rows_id = kept
+                    print(f"frames_count_max_per_sequence={per_seq}: kept "
+                          f"{len(kept)} / {n_before} frame rows "
+                          f"over {len(seen)} scenes")
+
                 # Either filter moved the cap out of SQL, so spend it here on what
                 # they left; pairs cap their own count in _build_frame_pairs.
-                if (limit and (frame_groups is not None or subset is not None)
+                if (limit and (frame_groups is not None or subset is not None or per_seq)
                         and self.cfg.item_type == ItemType.FRAME_OBJECT):
                     self._frame_rows_id = self._frame_rows_id[:limit]
             finally:
