@@ -1,0 +1,46 @@
+# every9d_v7_train_max5_sharded — every9d_v7_train_max5 materialised into ONE Arrow cache over every category.
+#
+#   o3b dataset index -d every9d_v7 -p slurm_lmbl40 --remote   # once, if absent
+#   o3b dataset init  -d every9d_v7_train_max5_sharded -p slurm_lmbl40 --remote
+#
+# Whole-dataset rather than per-category: o3b resolves one sharded_name per
+# config, so a per-category cache cannot be read back as a dataset, and training
+# needs every category in one shuffled set. (every9d_v7_*_cat_sharded does not
+# exist for that reason — add one only if a per-category ablation wants it.)
+#
+# The crop is baked in; the UCO3D axis alignment is NOT. Every9D IS the uCO3D
+# canonical-pose labelling, and it is still being revised category by category,
+# so a shard that froze the axes would have to be rebuilt after every relabelling
+# round. UCO3D applies obj_gl_tform4x4_obj_raw at load time, which the shards
+# inherit rather than bake.
+#
+# MUST run on a compute node: fo_mask_amodal is rasterised at build time.
+
+defaults:
+  - every9d_v7_train_max5
+  - _self_
+
+categories:            # null = every category the subset covers
+filter_count_max:
+
+img_size: 256
+
+# Frames per sequence. every9d_v7 inherits 16 from uco3d.yaml; kept explicit
+# here because it is what bounds the cache size.
+extra:
+  frames_count_max_per_sequence: 16
+
+sharded_shard_size: 500
+sharded_num_workers: 8
+
+sharded_transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}
+  W: ${img_size}
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+transform:
+
+sharded_name: every9d_v7_train_max5_r${img_size}_all
+sharded_override: false
