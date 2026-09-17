@@ -808,7 +808,10 @@ class Od3dFrameDataset(ConfigurableDataset):
     # measurable there, which is why the published table reports only 30/10
     # degree for both.
 
-    _MESH_CACHE_MAX = 64
+    # Sized for the widest working set rather than for one category: PASCAL3D's
+    # aeroplane mesh is 58k verts ~ 700 KB, so 512 entries is ~350 MB, which is
+    # cheap against re-reading a CAD model per frame.
+    _MESH_CACHE_MAX = 512
 
     def _cam_bbox2d_from_meta(self, meta):
         """Dataset-specific 2-D box from the meta, or None to use ``l_bbox``."""
@@ -859,8 +862,14 @@ class Od3dFrameDataset(ConfigurableDataset):
             mesh, size3d, bbox3d, tform = cached
             return (_r(mesh) if mesh is not None else None), size3d, bbox3d, tform
 
-        if len(cache) >= self._MESH_CACHE_MAX:
-            cache.clear()
+        # Evict the OLDEST entry, not the whole cache. Clearing wholesale is
+        # pathological once the working set exceeds the cap: ImageNet3D's 189
+        # categories carry far more than _MESH_CACHE_MAX distinct CAD models, so
+        # the cache emptied on nearly every miss and the build ran at 1.44
+        # item/s — 74% done after 2h50 — having started at 101 item/s while the
+        # first 64 meshes still fitted.
+        while len(cache) >= self._MESH_CACHE_MAX:
+            cache.pop(next(iter(cache)))
 
         verts, faces = None, None
         if path is not None and path.exists():
