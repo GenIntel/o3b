@@ -312,7 +312,8 @@ def _warm_files(paths, workers: int = _IO_WORKERS) -> None:
     logger.debug(f"warmed {len(paths)} files in {time.time() - t0:.2f}s")
 
 
-def collect_frames(dataset, cfg, indices=None) -> list:
+def collect_frames(dataset, cfg, indices=None, margin: float = 0.45,
+                   pad: float = 0.0) -> list:
     """``[(object_id, [frame, ...]), …]`` for *indices* of an already-built dataset.
 
     Geometry comes from the dataset (rgb switched off), the pixels from one
@@ -323,6 +324,10 @@ def collect_frames(dataset, cfg, indices=None) -> list:
     The geometry loop is serial but its files are fetched up front in parallel
     (``_warm_files``), which is where a cold page over sshfs spends its time:
     ~80 round trips of ~0.8 s each, against 0.01 s of arithmetic per item.
+
+    *margin* and *pad* go through to ``_crop_frame``: the editors crop loose
+    (0.45) on black, a contact sheet crops tight on white. Both are baked into
+    the cached pixels, so a caller that changes either needs its own cache tag.
     """
     indices = list(range(len(dataset)) if indices is None else indices)
     _warm_files(_page_files(dataset, cfg, indices))
@@ -348,13 +353,15 @@ def collect_frames(dataset, cfg, indices=None) -> list:
         jobs[fo.object_id]["frames"].append((float(meta.get("timestamp", 0.0)), fo))
 
     from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(jobs)))) as pool:
-        results = list(pool.map(_read_sequence, jobs.items()))
+        results = list(pool.map(partial(_read_sequence, margin=margin, pad=pad),
+                                jobs.items()))
 
     return [(seq, frames) for seq, frames in results if frames]
 
 
-def _read_sequence(item):
+def _read_sequence(item, margin: float = 0.45, pad: float = 0.0):
     """(object_id, [frame, ...]) — one VideoCapture for all of a sequence's frames."""
     import cv2
 
@@ -373,7 +380,7 @@ def _read_sequence(item):
             rgb = torch.from_numpy(bgr[..., ::-1].copy()).permute(2, 0, 1).float() / 255.0
             fo.rgb = rgb[:3]
             try:
-                frame = _crop_frame(fo)
+                frame = _crop_frame(fo, margin=margin, pad=pad)
             except Exception as exc:      # one bad frame must not lose the page
                 print(f"  {object_id}: {exc}", file=sys.stderr)
                 continue
@@ -534,7 +541,7 @@ def _cache_drop(cfg, category: str) -> None:
 _CROP_HALF_MAX = 4.0
 
 
-def _crop_frame(fo, margin: float = 0.45, cell: int = 320):
+def _crop_frame(fo, margin: float = 0.45, cell: int = 320, pad: float = 0.0):
     """Crop the rgb around the projected 3-D box and adjust the intrinsics to match.
 
     The pad-crop-resize is ``o3b.cv.visual.crop.crop_with_bbox``: a rect wider
@@ -574,9 +581,15 @@ def _crop_frame(fo, margin: float = 0.45, cell: int = 320):
     img = fo.rgb.float()
     if img.max() > 1.5:
         img = img / 255.0
+    # `pad` fills whatever of the rect fell outside the image. It goes down into
+    # crop_with_bbox rather than being painted on afterwards: the resize blends
+    # the padding with the pixels beside it, so a crop patched after the fact
+    # keeps a seam of the old fill along the edge. Black (0.0) for the editors,
+    # white (1.0) for a contact sheet, where padding should read as nothing
+    # there rather than as a black border.
     crop, cam_crop_tform_cam = crop_with_bbox(
         img, [x0i, y0i, x0i + src - 1, y0i + src - 1],
-        H_out=cell, W_out=cell, scale_bbox=1.0)
+        H_out=cell, W_out=cell, scale_bbox=1.0, pad_value=pad)
     crop = crop.clamp(0, 1)
 
     # intrinsics for the cropped-and-resized image, straight from the crop, so
