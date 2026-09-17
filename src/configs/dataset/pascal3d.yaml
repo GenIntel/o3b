@@ -45,6 +45,9 @@ modalities:
   - depth                  # rendered from the CAD mesh (see extra.depth_type)
   - depth_mask
   - fo_mask                # SAM mask, keypoint+bbox prompted
+  - fo_mask_amodal         # the mesh rasterised under the GT pose — overlay it
+                           # on the rgb to see whether pose and object frame
+                           # actually agree with the image
   - cam_intr4x4
   - cam_tform4x4_obj
   - cam_tform4x4_obj_ncds

@@ -646,15 +646,44 @@ class Od3dFrameDataset(ConfigurableDataset):
                 from o3b.cv.visual.draw import get_bboxs_from_masks
                 cam_bbox2d = get_bboxs_from_masks(fo_mask[None])[0].float()
 
+        mesh, obj_size3d, obj_bbox3d, obj_ncds0c = self._object_geometry(row, meta)
+
+        # obj_kpts3d must be in the SAME space as mesh.verts, i.e. NCDS: the
+        # viewer (and o3b's Object.transform) map the whole item by
+        # cam_tform4x4_obj_ncds and use that one transform for mesh and
+        # keypoints alike. The metas store them in raw object space — PASCAL3D's
+        # l_kpts3d is its CAD bounding-box corners — so leaving them unnormalised
+        # projects them onto the wrong pixels while the mesh looks correct.
         obj_kpts3d = None
         if meta.get("l_kpts3d") and _want("obj_kpts3d", mods):
             obj_kpts3d = torch.tensor(meta["l_kpts3d"], dtype=torch.float32)
-
-        mesh, obj_size3d, obj_bbox3d, obj_ncds0c = self._object_geometry(row, meta)
+            if obj_ncds0c is not None:
+                from o3b.cv.geometry.transform import inv_tform4x4
+                inv = inv_tform4x4(obj_ncds0c)
+                obj_kpts3d = obj_kpts3d @ inv[:3, :3].T + inv[:3, 3]
 
         cam_tform4x4_obj_ncds = None
         if cam_tform4x4_obj is not None and obj_ncds0c is not None:
             cam_tform4x4_obj_ncds = cam_tform4x4_obj @ obj_ncds0c
+
+        # The mesh rasterised under the GT pose. Worth having as a modality
+        # rather than only in a viewer: overlaid on the rgb it shows directly
+        # whether the pose and the object frame agree with the image, which is
+        # the check the whole cross-dataset comparison rests on and which no
+        # scalar metric makes visible.
+        fo_mask_amodal, fo_mask_amodal_dt = None, None
+        if (_want("fo_mask_amodal", mods) or _want("fo_mask_amodal_dt", mods)) \
+                and mesh is not None and cam_tform4x4_obj_ncds is not None \
+                and cam_intr4x4 is not None and rgb is not None:
+            fo_mask_amodal = self._render_mesh_mask(
+                mesh, cam_tform4x4_obj_ncds, cam_intr4x4,
+                H=rgb.shape[-2], W=rgb.shape[-1])
+            if fo_mask_amodal is not None and _want("fo_mask_amodal_dt", mods):
+                from o3b.cv.visual.mask import get_mask_distance_transform_norm
+                fo_mask_amodal_dt = get_mask_distance_transform_norm(
+                    fo_mask_amodal.cpu()).float()
+            if not _want("fo_mask_amodal", mods):
+                fo_mask_amodal = None
 
         from o3b.data.datatypes.frame_object import FrameObject
 
@@ -677,6 +706,8 @@ class Od3dFrameDataset(ConfigurableDataset):
             obj_bbox3d=obj_bbox3d,
             obj_ncds0c_tform4x4_obj=obj_ncds0c,
             cam_tform4x4_obj_ncds=cam_tform4x4_obj_ncds,
+            fo_mask_amodal=fo_mask_amodal,
+            fo_mask_amodal_dt=fo_mask_amodal_dt,
         )
 
     # ── object geometry ──────────────────────────────────────────────────────
@@ -777,3 +808,26 @@ class Od3dFrameDataset(ConfigurableDataset):
         cache[key] = (mesh, size3d, bbox3d, tform)
         from dataclasses import replace as _r
         return (_r(mesh) if mesh is not None else None), size3d, bbox3d, tform
+
+    def _render_mesh_mask(self, mesh, cam_tform4x4_obj_ncds, cam_intr4x4, H: int, W: int):
+        """(H, W) bool silhouette of `mesh` rasterised under the given pose.
+
+        Shares HouseCorr3D's rasteriser, so the silhouette lands on the same
+        pixels its fo_mask_amodal would. Only this object is drawn, so occluders
+        leave no hole: the result is the full silhouette, cut off only by the
+        image border.
+        """
+        import torch
+
+        from o3b.dataset.housecorr3d.frame_dataset import render_scene_depth
+
+        try:
+            M = cam_tform4x4_obj_ncds.float()
+            verts_cam = (M[:3, :3] @ mesh.verts.float().t()).t() + M[:3, 3]
+            depth = render_scene_depth([(verts_cam, mesh.faces)], cam_intr4x4.float(), H, W)
+        except Exception as e:                       # a bad mesh must not kill the item
+            logger.warning(f"could not render mesh mask: {e}")
+            return None
+        if depth is None:
+            return None
+        return depth > 0        # 0 = no hit = background
