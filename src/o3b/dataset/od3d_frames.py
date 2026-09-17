@@ -929,3 +929,57 @@ class Od3dFrameDataset(ConfigurableDataset):
                 )
             return None
         return depth > 0        # 0 = no hit = background
+
+    # ── shard build ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _renderer_available() -> bool:
+        """Can the EGL rasteriser actually start here?
+
+        Probed with a single triangle rather than inferred from the environment:
+        the failure mode on a submit node is that pyrender prints ctypes noise
+        and returns nothing, which no exception or env var reports.
+        """
+        import torch
+
+        from o3b.dataset.housecorr3d.frame_dataset import render_scene_depth
+
+        verts = torch.tensor([[-0.1, -0.1, -1.0], [0.1, -0.1, -1.0], [0.0, 0.1, -1.0]])
+        faces = torch.tensor([[0, 1, 2]])
+        intr = torch.eye(4)
+        intr[0, 0] = intr[1, 1] = 100.0
+        intr[0, 2], intr[1, 2] = 32.0, 32.0
+        try:
+            return render_scene_depth([(verts, faces)], intr, 64, 64) is not None
+        except Exception:
+            return False
+
+    def _setup_sharded(self) -> None:
+        """Build/load the shard cache, refusing a build that would lose a modality.
+
+        fo_mask_amodal is rasterised at build time and baked into the shards, so
+        a build on a host without EGL writes a cache that is silently missing it
+        — and nothing downstream can tell that cache from one whose dataset
+        genuinely has no meshes. Cheaper to refuse here than to discover it after
+        a multi-hour build, or worse, after training on it.
+
+        Only checked when a build is actually about to happen: reading an
+        existing cache needs no renderer, which is what makes shards worth having
+        on a machine that cannot render at all.
+        """
+        cache_dir = self._sharded_dir()
+        building = self.cfg.sharded_override or cache_dir is None or not cache_dir.exists()
+        mods = self.cfg.modalities
+        from o3b.dataset.utils import want as _want
+
+        if building and (_want("fo_mask_amodal", mods) or _want("fo_mask_amodal_dt", mods)):
+            if not self._renderer_available():
+                raise RuntimeError(
+                    "Refusing to build shards: fo_mask_amodal is a requested modality "
+                    "but the EGL rasteriser cannot start here, so every item would be "
+                    "cached without it.\n"
+                    "  Build on a compute node:  o3b dataset init -d <config> "
+                    "-p <platform> --remote\n"
+                    "  or drop fo_mask_amodal / fo_mask_amodal_dt from `modalities`."
+                )
+        super()._setup_sharded()

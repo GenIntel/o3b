@@ -1,0 +1,49 @@
+# handal_train_cat_sharded — handal_train materialised into an Arrow cache, one category at a time.
+#
+# 1) index (once per dataset, reads the meta tree, never a cache)
+#    o3b dataset index -d handal_train -p slurm_lmbl40 --remote
+#
+# 2) build one category
+#    o3b dataset init -d handal_train_cat_sharded -p slurm_lmbl40 --remote -c mug
+#
+# 3) build every category — one sbatch job each
+#    o3b dataset init -d handal_train_cat_sharded -p slurm_lmbl40 --remote -a "-c mug"
+#
+# MUST run on a compute node: fo_mask_amodal is rasterised at build time and
+# baked in, and the EGL renderer cannot start on the submit host. The build
+# refuses rather than writing a cache that is quietly missing it.
+#
+# The UCO3D axis alignment is deliberately NOT baked in — it is applied on read,
+# so re-deriving a category's canonical axes costs nothing instead of
+# invalidating every shard that category appears in. Matches od3d, whose shard
+# build disables use_map_obj_orient_uco3d for the duration.
+
+defaults:
+  - handal_train
+  - _self_
+
+category: mug
+categories:
+  - ${category}
+
+# Per-sequence cap, matching od3d's frames_count_max_per_sequence: 16.
+extra:
+  frames_count_max_per_sequence: 16
+
+filter_count_max: 50000
+
+sharded_shard_size: 100
+sharded_num_workers: 4
+
+# The crop IS baked in (expensive and fixed), unlike the alignment above.
+sharded_transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}
+  W: ${img_size}
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+transform:
+
+sharded_name: handal_train_n${filter_count_max}_b${sharded_shard_size}_r${img_size}_c${category}
+sharded_override: false
