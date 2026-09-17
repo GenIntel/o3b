@@ -375,6 +375,9 @@ class Od3dFrameDataset(ConfigurableDataset):
                 item.mesh.transf3d(T)
             if item.obj_kpts3d is not None:
                 item.obj_kpts3d = item.obj_kpts3d @ T[:3, :3].T
+            if item.obj_bbox3d is not None:
+                # a point field like the others, so it turns with them
+                item.obj_bbox3d = item.obj_bbox3d @ T[:3, :3].T
             if item.cam_tform4x4_obj is not None and item.obj_ncds0c_tform4x4_obj is not None:
                 item.cam_tform4x4_obj_ncds = (
                     item.cam_tform4x4_obj @ inv_tform4x4(item.obj_ncds0c_tform4x4_obj)
@@ -674,8 +677,8 @@ class Od3dFrameDataset(ConfigurableDataset):
         # box silently never appears.
         cam_bbox3d = None
         if (_want("cam_bbox3d", mods) and obj_bbox3d is not None
-                and cam_tform4x4_obj is not None):
-            R, tr = cam_tform4x4_obj[:3, :3], cam_tform4x4_obj[:3, 3]
+                and cam_tform4x4_obj_ncds is not None):
+            R, tr = cam_tform4x4_obj_ncds[:3, :3], cam_tform4x4_obj_ncds[:3, 3]
             cam_bbox3d = obj_bbox3d.float() @ R.t() + tr
         if not _want("obj_bbox3d", mods):
             obj_bbox3d = None
@@ -808,13 +811,23 @@ class Od3dFrameDataset(ConfigurableDataset):
         tform[:3, :3] = torch.eye(3) * half_scale
         tform[:3, 3] = center
 
-        # the 8 corners, in object space
+        # The 8 corners in NCDS space, NOT metric object space.
+        #
+        # Object.transform maps obj_bbox3d with the *same* transform as
+        # mesh.verts and obj_kpts3d, and every consumer that transforms an object
+        # (the viser viewer above all) hands it cam_tform4x4_obj_ncds. A metric
+        # box fed through that comes out scaled by half_scale relative to the
+        # mesh and to cam_bbox3d — measured at exactly 0.3803x on a PASCAL3D
+        # aeroplane whose half_scale is 0.3803. So all four point fields
+        # (verts, kpts, bbox, pts3d) share one space, and obj_size3d carries the
+        # metric extent instead.
         bbox3d = torch.stack([
             torch.tensor([x, y, z], dtype=torch.float32)
             for x in (v_min[0], v_max[0])
             for y in (v_min[1], v_max[1])
             for z in (v_min[2], v_max[2])
         ])
+        bbox3d = (bbox3d - center) / half_scale
 
         mesh = None
         if verts is not None and faces is not None:
