@@ -1,0 +1,13 @@
+# pascal3d_train — the train split of pascal3d.
+#
+#   o3b dataset index -d pascal3d_train -p slurm_lmbl40
+#   o3b dataset viz   -d pascal3d_train -p slurm_lmbl40 --remote -c aeroplane
+#
+# Everything else — paths, modalities, transform, the UCO3D alignment — is
+# inherited from pascal3d.yaml; this file only pins the split.
+
+defaults:
+  - pascal3d
+  - _self_
+
+split: train

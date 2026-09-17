@@ -1,0 +1,17 @@
+# objectron_test — Objectron's evaluation split.
+#
+#   o3b dataset viz -d objectron_test -c chair
+#
+# There is deliberately no objectron_train: the od3d preprocessing only ever
+# resolved the test split (meta/frames holds `test` and nothing else), so a
+# train config would name an empty tree. The raw videos for the other sequences
+# do exist, so one could be produced — it would mean re-running od3d's
+# extract-meta over them, not just adding a config.
+#
+# Everything else is inherited from objectron.yaml.
+
+defaults:
+  - objectron
+  - _self_
+
+split: test

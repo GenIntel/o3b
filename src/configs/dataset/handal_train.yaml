@@ -1,0 +1,13 @@
+# handal_train — the train split of handal.
+#
+#   o3b dataset index -d handal_train -p slurm_lmbl40
+#   o3b dataset viz   -d handal_train -p slurm_lmbl40 --remote -c mug
+#
+# Everything else — paths, modalities, transform, the UCO3D alignment — is
+# inherited from handal.yaml; this file only pins the split.
+
+defaults:
+  - handal
+  - _self_
+
+split: train

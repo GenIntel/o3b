@@ -1,0 +1,18 @@
+# imagenet3d_test — the evaluation split of imagenet3d.
+#
+#   o3b dataset index -d imagenet3d_test -p slurm_lmbl40
+#   o3b dataset viz   -d imagenet3d_test -p slurm_lmbl40 --remote -c chair
+#
+# Everything else — paths, modalities, transform, the UCO3D alignment — is
+# inherited from imagenet3d.yaml; this file only pins the split.
+#
+# NOTE the split is named "val" on disk, not "test": PASCAL3D+ and ImageNet3D
+# ship train/val, and their val split is what the literature (and od3d's own
+# pascal3d_test.yaml) evaluates on. The config is named _test so the six
+# evaluation sets can be referred to uniformly.
+
+defaults:
+  - imagenet3d
+  - _self_
+
+split: val
