@@ -1,0 +1,46 @@
+# handal_train_sharded — handal_train materialised into ONE Arrow cache covering every category.
+#
+#   o3b dataset index -d handal_train -p slurm_lmbl40 --remote     # once
+#   o3b dataset init  -d handal_train_sharded -p slurm_lmbl40 --remote
+#
+# Whole-dataset, not per-category, because that is what the benchmark reads and
+# what the published numbers are: o3b resolves exactly one sharded_name per
+# config (read_sharded_dataset is load_from_disk of a single directory), and
+# od3d's own *_test_sharded configs carry `categories: null` with no category in
+# the cache name. Their figures are therefore ONE frame-weighted pass over every
+# category. Evaluating per category and averaging instead gives a
+# category-weighted mean — a different number, and one that would differ
+# silently.
+#
+# handal_train_cat_sharded still exists alongside this and is the right thing for
+# per-category ablations, the way hc3d uses its own. It is not a substitute for
+# this one.
+#
+# MUST run on a compute node: fo_mask_amodal is rasterised at build time and the
+# EGL renderer cannot start on the submit host.
+
+defaults:
+  - handal_train
+  - _self_
+
+categories:            # null = every category
+
+extra:
+  frames_count_max_per_sequence: 16
+
+filter_count_max:      # null = no cap
+
+sharded_shard_size: 500
+sharded_num_workers: 8
+
+sharded_transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}
+  W: ${img_size}
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+transform:
+
+sharded_name: handal_train_r${img_size}_all
+sharded_override: false
