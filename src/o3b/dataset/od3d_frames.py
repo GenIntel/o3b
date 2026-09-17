@@ -839,7 +839,15 @@ class Od3dFrameDataset(ConfigurableDataset):
 
         from o3b.data.datatypes.mesh import Mesh
 
-        key = f"{row['category']}/{row['sequence']}"
+        # Keyed by the MESH, not by the object. For a sequenced dataset those
+        # coincide, but a flat one (PASCAL3D, ImageNet3D) has sequence == frame,
+        # so an object-keyed cache is unique per item: it never hits, and it
+        # clears wholesale every _MESH_CACHE_MAX misses. ImageNet3D's 40,527
+        # frames share far fewer CAD models than that, and re-reading one per
+        # frame took the shard build from 153 item/s to 1.19 — a 5-minute job
+        # turning into nine hours.
+        path = self._mesh_path(row, meta)
+        key = str(path) if path is not None else f"{row['category']}/{row['sequence']}"
         cache = getattr(self, "_mesh_cache", None)
         if cache is None:
             cache = self._mesh_cache = {}
@@ -855,7 +863,6 @@ class Od3dFrameDataset(ConfigurableDataset):
             cache.clear()
 
         verts, faces = None, None
-        path = self._mesh_path(row, meta)
         if path is not None and path.exists():
             try:
                 import trimesh
