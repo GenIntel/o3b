@@ -641,6 +641,20 @@ class Od3dFrameDataset(ConfigurableDataset):
         depth, depth_mask = None, None
         if _want("depth", mods) or _want("depth_mask", mods):
             p = self._depth_path(row, meta)
+            # A configured modality whose tree is absent must say so. Returning
+            # None quietly is how `depth_type: mesh` went unnoticed on ImageNet3D
+            # (which has no mesh-rendered depth at all), and how a machine
+            # holding only some of the preprocessed trees looks like a dataset
+            # with no depth rather than like a missing directory. Warned once per
+            # dataset instance, not per item.
+            if p is not None and not p.exists() and not getattr(self, "_warned_depth", False):
+                self._warned_depth = True
+                logger.warning(
+                    f"depth_type={(self.cfg.extra or {}).get('depth_type')!r}: no file at "
+                    f"{p} — depth and depth_mask will be None for this dataset. "
+                    f"Available under {self.path_preprocess / 'depth'}: "
+                    f"{sorted(q.name for q in (self.path_preprocess / 'depth').iterdir()) if (self.path_preprocess / 'depth').is_dir() else 'nothing'}"
+                )
             if p is not None and p.exists():
                 d = read_depth_image(p, factor=float(meta.get("depth_scale", 1000.0)))
                 if d is not None:
