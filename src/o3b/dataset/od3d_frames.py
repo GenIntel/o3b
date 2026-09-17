@@ -666,6 +666,20 @@ class Od3dFrameDataset(ConfigurableDataset):
         if cam_tform4x4_obj is not None and obj_ncds0c is not None:
             cam_tform4x4_obj_ncds = cam_tform4x4_obj @ obj_ncds0c
 
+        # Two different boxes, exactly as HouseCorr3D distinguishes them:
+        #   obj_bbox3d  (8, 3) corners in OBJECT space — a property of the object
+        #   cam_bbox3d  (8, 3) the same corners in CAMERA space, i.e. per frame
+        # FrameObject.viz draws its 3-D box overlay from cam_bbox3d, so a loader
+        # that fills only obj_bbox3d leaves the viewer nothing to draw and the
+        # box silently never appears.
+        cam_bbox3d = None
+        if (_want("cam_bbox3d", mods) and obj_bbox3d is not None
+                and cam_tform4x4_obj is not None):
+            R, tr = cam_tform4x4_obj[:3, :3], cam_tform4x4_obj[:3, 3]
+            cam_bbox3d = obj_bbox3d.float() @ R.t() + tr
+        if not _want("obj_bbox3d", mods):
+            obj_bbox3d = None
+
         # The mesh rasterised under the GT pose. Worth having as a modality
         # rather than only in a viewer: overlaid on the rgb it shows directly
         # whether the pose and the object frame agree with the image, which is
@@ -704,6 +718,7 @@ class Od3dFrameDataset(ConfigurableDataset):
             mesh=mesh,
             obj_size3d=obj_size3d,
             obj_bbox3d=obj_bbox3d,
+            cam_bbox3d=cam_bbox3d,
             obj_ncds0c_tform4x4_obj=obj_ncds0c,
             cam_tform4x4_obj_ncds=cam_tform4x4_obj_ncds,
             fo_mask_amodal=fo_mask_amodal,

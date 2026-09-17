@@ -50,7 +50,9 @@ modalities:
   - cam_tform4x4_obj
   - cam_tform4x4_obj_ncds
   - cam_bbox2d
-  - cam_bbox3d
+  - cam_bbox3d             # (8,3) box corners in CAMERA space — what
+                           #   FrameObject.viz draws its 3-D box from
+  - obj_bbox3d             # (8,3) the same corners in OBJECT space
   - obj_syms
   - category
   - mesh                   # cuboid500 — the annotated 3-D box, not a scan
