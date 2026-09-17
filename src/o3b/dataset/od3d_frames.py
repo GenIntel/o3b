@@ -843,6 +843,12 @@ class Od3dFrameDataset(ConfigurableDataset):
             except Exception as e:
                 logger.warning(f"could not read mesh {path}: {e}")
 
+        # HANDAL's BOP models are in millimetres, like its poses; extra.scale_to_m
+        # converts both, so the mesh and the pose stay in one unit.
+        scale_to_m = float((self.cfg.extra or {}).get("scale_to_m") or 1.0)
+        if verts is not None and scale_to_m != 1.0:
+            verts = verts * scale_to_m
+
         pts = verts
         if pts is None and meta.get("l_kpts3d"):
             pts = torch.tensor(meta["l_kpts3d"], dtype=torch.float32)

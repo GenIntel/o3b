@@ -21,12 +21,17 @@ from typing import Optional
 
 from o3b.dataset.dataset import ItemType, register_dataset
 from o3b.dataset.od3d_frames import Od3dFrameDataset
+import json
+import logging
+
 from o3b.dataset.handal.enum import (
     HANDAL_CATEGORIES,
     MAP_CATEGORIES_HANDAL_TO_RPATH,
     MAP_CATEGORIES_HANDAL_TO_UCO3D,
     MAP_CATEGORIES_OBJ_ORIENT_HANDAL_TO_UCO3D,
 )
+
+logger = logging.getLogger(__name__)
 
 _GDRIVE_FOLDER = "https://drive.google.com/drive/folders/10mDNZnYrg55ZiP9GV4upKWnxlxay1OwM"
 
@@ -95,3 +100,56 @@ class HANDAL(Od3dFrameDataset):
             ),
             dry_run=dry_run,
         )
+
+    # ── object geometry ──────────────────────────────────────────────────────
+
+    def _obj_id(self, row) -> Optional[int]:
+        """BOP object id for this sequence, from its scene_gt.json.
+
+        Every HANDAL sequence holds exactly one object (verified across 90
+        sequences of three categories: no frame has more than one), so the id is
+        a property of the sequence rather than of the frame.
+
+        The sequence name encodes it — `004001` is object 4 — and that held on
+        every sequence checked, but scene_gt.json is the authority and the name
+        is only the fallback for a sequence that has none.
+        """
+        cache = getattr(self, "_obj_id_cache", None)
+        if cache is None:
+            cache = self._obj_id_cache = {}
+        key = (row["category"], row["sequence"])
+        if key in cache:
+            return cache[key]
+
+        rpath = MAP_CATEGORIES_HANDAL_TO_RPATH.get(row["category"])
+        obj_id = None
+        if rpath:
+            gt = self.path_raw / rpath / row["split"] / row["sequence"] / "scene_gt.json"
+            if gt.exists():
+                try:
+                    d = json.loads(gt.read_text())
+                    first = d[sorted(d, key=lambda k: int(k))[0]]
+                    obj_id = int(first[0]["obj_id"])
+                except Exception as e:
+                    logger.warning(f"could not read {gt}: {e}")
+        if obj_id is None:
+            try:
+                obj_id = int(str(row["sequence"])[:3])
+            except ValueError:
+                obj_id = None
+        cache[key] = obj_id
+        return obj_id
+
+    def _mesh_path(self, row, meta) -> Optional[Path]:
+        """BOP model for this sequence: <raw>/<rpath>/models/obj_NNNNNN.ply.
+
+        HANDAL names no mesh in its meta — unlike PASCAL3D and ImageNet3D, whose
+        metas carry rfpath_mesh — so it is resolved from the scene's object id.
+        The models are in millimetres, which extra.scale_to_m converts along with
+        the poses.
+        """
+        rpath = MAP_CATEGORIES_HANDAL_TO_RPATH.get(row["category"])
+        obj_id = self._obj_id(row)
+        if not rpath or obj_id is None:
+            return None
+        return self.path_raw / rpath / "models" / f"obj_{obj_id:06d}.ply"
