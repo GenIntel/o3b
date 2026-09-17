@@ -28,7 +28,10 @@ import sys
 from pathlib import Path
 
 from o3b.dataset.dataset import DatasetConfig, _REGISTRY_DATASETS, _ensure_dataset_imported
-from o3b.dataset.grid import GRID_COLS, GRID_OBJECTS, GRID_VIEWS, PREFETCH
+from o3b.dataset.grid import (
+    GRID_COLS, GRID_OBJECTS, GRID_VIEWS, PREFETCH,
+    SHEET_CELL, SHEET_FRAMES, SHEET_GAP, SHEET_MARGIN, SHEET_OBJECTS,
+)
 
 
 def _resolve_dataset_config(name_or_path: str) -> Path:
@@ -349,6 +352,24 @@ def main(argv=None) -> None:
                        help="Scale the grid to at most this many pixels tall "
                             "(default: the screen height)")
 
+    p_vcat = sub.add_parser(
+        "viz-cat",
+        help="Contact sheet for a category: one object per row, its frames left "
+             "to right in time",
+    )
+    _add_config(p_vcat)
+    p_vcat.add_argument("-n", "--objects", type=int, default=SHEET_OBJECTS, metavar="N")
+    p_vcat.add_argument("-f", "--frames", type=int, default=SHEET_FRAMES, metavar="F")
+    p_vcat.add_argument("--seed", type=int, default=None, metavar="SEED")
+    p_vcat.add_argument("--pool", type=int, default=None, metavar="N")
+    p_vcat.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True)
+    p_vcat.add_argument("--labels", action=argparse.BooleanOptionalAction, default=True)
+    p_vcat.add_argument("--cell", type=int, default=SHEET_CELL, metavar="PX")
+    p_vcat.add_argument("--gap", type=int, default=SHEET_GAP, metavar="PX")
+    p_vcat.add_argument("--margin", type=float, default=SHEET_MARGIN, metavar="F")
+    p_vcat.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True)
+    p_vcat.add_argument("-o", "--out", type=Path, default=None, metavar="PATH")
+
     p_vis = sub.add_parser("viz", help="Show dataset summary and optionally render meshes")
     _add_config(p_vis)
     p_vis.add_argument(
@@ -440,6 +461,18 @@ def main(argv=None) -> None:
         cls.index(cfg, db=args.db)
     elif args.command == "init":
         cls.init(cfg, limit=args.limit, override=args.override)
+    elif args.command == "viz-cat":
+        from o3b.dataset.viz_category import run_category_sheet
+        run_category_sheet(
+            cls, cfg,
+            dataset_name=args.config.stem,
+            categories=[c for c in (getattr(args, "categories", None) or "").split(",") if c],
+            n_objects=args.objects, n_frames=args.frames,
+            overlay=args.overlay, labels=args.labels,
+            margin=args.margin, cell=args.cell, gap=args.gap,
+            seed=args.seed, pool=args.pool,
+            out=args.out, show=args.out is None, cache=args.cache,
+        )
     elif args.command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True

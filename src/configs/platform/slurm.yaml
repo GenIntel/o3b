@@ -68,6 +68,14 @@ path_datasets_sshfs: ${.path_datasets_raw}
 # safely, and /tmp would re-download every category on every job.
 path_hf_home: ${.path_ws}/hf
 
+# Same reasoning for torch.hub, which otherwise caches into ~/.cache/torch. The
+# KI-cluster home migration (Sep 2026) made that concrete: the new home is 49 GB
+# total and started empty, so every backbone the old cache held (vitb14/vitl14/
+# vitg14, dinov3, resnet50 — 8.7 GB) is re-downloaded through tfproxy, once per
+# concurrent job, into the quota. On /work it is downloaded once and shared, and
+# survives the next home migration.
+path_torch_home: ${.path_ws}/torch_home
+
 partition:  alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-1080ti, lmb_gpu-rtx2080, testdlc_gpu-rtx2080, alldlc_gpu-rtx3080, alldlc_gpu-rtx2080, lmbdlc_gpu-rtx2080
 
 # 1. lmb_gpu-rtx2080 : usually empty, only 3 slots

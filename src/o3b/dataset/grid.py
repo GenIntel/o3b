@@ -28,3 +28,22 @@ PREFETCH = 3
 # times over — at the raw uint8 the pages used to be stored as, ~15 MB each,
 # this held 300 of them against 965 categories and evicted what it had warmed.
 CACHE_MAX_BYTES = 4 * 1024 ** 3
+
+# ── contact sheet (o3b dataset viz-cat, see o3b/dataset/viz_category.py) ──────
+# A sheet is one category: SHEET_OBJECTS objects down, SHEET_FRAMES frames of
+# each across, in timestamp order. Here rather than in viz_category.py for the
+# same reason the grid constants are: o3b/cli.py names them as argparse
+# defaults, and must be able to import them without pulling in torch.
+#
+# RECONSTRUCTED after an accidental `git checkout -- .` discarded the working
+# tree. SHEET_OBJECTS / SHEET_FRAMES / SHEET_CELL are recovered exactly, from
+# run_category_sheet's own defaults (n_objects=8, n_frames=8) and its _CELL=320.
+# SHEET_GAP and SHEET_MARGIN are NOT recovered values — only their roles are
+# known (gap = pixels of white ground between cells; margin = the crop, "tight"
+# against the editors' 0.45). Check these two against what the sheets should
+# look like.
+SHEET_OBJECTS = 8
+SHEET_FRAMES = 8
+SHEET_CELL = 320        # what _crop_frame renders; --cell only scales it down
+SHEET_GAP = 8           # reconstructed
+SHEET_MARGIN = 0.05     # reconstructed; the editors use 0.45

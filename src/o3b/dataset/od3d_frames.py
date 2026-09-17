@@ -553,8 +553,17 @@ class Od3dFrameDataset(ConfigurableDataset):
             wanted = set(cats) if cats is not None else set(self._iter_categories())
             if not wanted:
                 return None
+            # Probe (split, category), not category alone. frames.db is written
+            # per config, so a db built from pascal3d (split val) holds no train
+            # rows — yet every category IS present in it, so a category-only
+            # probe is satisfied and the query below then returns nothing. The
+            # dataset came back empty instead of falling back to the walk, and a
+            # shard built from it would have been an empty cache indistinguishable
+            # from a correct one (measured: pascal3d_train 0 items vs 11,018).
+            placeholders = ", ".join("?" * len(splits))
             missing = [c for c in wanted if not cur.execute(
-                "SELECT 1 FROM frames WHERE category = ? LIMIT 1", (c,)).fetchone()]
+                f"SELECT 1 FROM frames WHERE category = ? AND split IN ({placeholders}) LIMIT 1",
+                (c, *splits)).fetchone()]
             if missing:
                 logger.info(
                     f"frames.db is missing {len(missing)}/{len(wanted)} requested "

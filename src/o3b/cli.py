@@ -44,7 +44,10 @@ from pathlib import Path
 # ── dataset sub-parser ────────────────────────────────────────────────────────
 
 def _build_dataset_parser(sub):
-    from o3b.dataset.grid import GRID_COLS, GRID_OBJECTS, GRID_VIEWS, PREFETCH
+    from o3b.dataset.grid import (
+        GRID_COLS, GRID_OBJECTS, GRID_VIEWS, PREFETCH,
+        SHEET_CELL, SHEET_FRAMES, SHEET_GAP, SHEET_MARGIN, SHEET_OBJECTS,
+    )
 
     p = sub.add_parser("dataset", help="Dataset commands (fetch, index, init, viz)")
     ds_sub = p.add_subparsers(dest="dataset_command", required=True)
@@ -189,6 +192,47 @@ def _build_dataset_parser(sub):
         help="Comma-separated ablations, each a fragment of extra arguments "
              '(e.g. -a "-c backpack,-c book"); one sync runs per ablation',
     )
+
+    p_vcat = ds_sub.add_parser(
+        "viz-cat",
+        help="Contact sheet for a category: one object per row, its frames left "
+             "to right in time (e.g. o3b dataset viz-cat -d every9d_v7_test -c chair)",
+    )
+    _add_config(p_vcat)
+    p_vcat.add_argument("-n", "--objects", type=int, default=SHEET_OBJECTS, metavar="N",
+                        help=f"Objects sampled per category, one per row "
+                             f"(default: {SHEET_OBJECTS})")
+    p_vcat.add_argument("-f", "--frames", type=int, default=SHEET_FRAMES, metavar="F",
+                        help=f"Frames per object, evenly spaced over the sequence "
+                             f"and shown in time order (default: {SHEET_FRAMES})")
+    p_vcat.add_argument("--seed", type=int, default=None, metavar="SEED",
+                        help="Sample the objects at random with this seed instead "
+                             "of taking the walk's first N. Needs the category "
+                             "walked to --pool first (default: walk order)")
+    p_vcat.add_argument("--pool", type=int, default=None, metavar="N",
+                        help="With --seed, sample out of the category's first N "
+                             "objects — keep it finite over an sshfs mount without "
+                             "frames.db, where the walk is a round trip per "
+                             "sequence (default: the whole category)")
+    p_vcat.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True,
+                        help="Draw the 3-D box and the object axes over each crop "
+                             "(--no-overlay leaves the images alone)")
+    p_vcat.add_argument("--labels", action=argparse.BooleanOptionalAction, default=True,
+                        help="Write each object's sequence name into its row")
+    p_vcat.add_argument("--cell", type=int, default=SHEET_CELL, metavar="PX",
+                        help=f"Pixels per frame (default: {SHEET_CELL}, which is "
+                             f"what the crops are rendered at — larger only upscales)")
+    p_vcat.add_argument("--gap", type=int, default=SHEET_GAP, metavar="PX",
+                        help=f"White ground between cells (default: {SHEET_GAP}; "
+                             f"--gap 0 closes it up)")
+    p_vcat.add_argument("--margin", type=float, default=SHEET_MARGIN, metavar="F",
+                        help=f"Crop margin around the projected 3-D box "
+                             f"(default: {SHEET_MARGIN}; the grid editors use 0.45)")
+    p_vcat.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use (and fill) the crop cache under ~/.o3b/cache/axes")
+    p_vcat.add_argument("-o", "--out", type=Path, default=None, metavar="PATH",
+                        help="Write the sheet to this PNG; a directory (or a path "
+                             "without a suffix) collects one file per category")
 
     p_vis = ds_sub.add_parser("viz", help="Summarize and optionally render dataset objects")
     _add_config(p_vis)
@@ -704,6 +748,18 @@ def _run_dataset(args, parser=None, argv=None):
         cls.index(cfg, db=args.db, remove=args.remove, max_index=getattr(args, "max_index", None))
     elif args.dataset_command == "init":
         cls.init(cfg, limit=args.limit, override=args.override)
+    elif args.dataset_command == "viz-cat":
+        from o3b.dataset.viz_category import run_category_sheet
+        run_category_sheet(
+            cls, cfg,
+            dataset_name=args.config.stem,
+            categories=_parse_categories(args.categories),
+            n_objects=args.objects, n_frames=args.frames,
+            overlay=args.overlay, labels=args.labels,
+            margin=args.margin, cell=args.cell, gap=args.gap,
+            seed=args.seed, pool=args.pool,
+            out=args.out, show=args.out is None, cache=args.cache,
+        )
     elif args.dataset_command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True
