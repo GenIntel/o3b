@@ -50,6 +50,10 @@ from o3b.dataset.dataset import ConfigurableDataset, ItemType
 
 logger = logging.getLogger(__name__)
 
+#: read_depth_image decodes uint16 millimetres, so this is the largest value the
+#: encoding can represent; anything at it was clipped, not measured.
+_DEPTH_U16_CEILING_M = 65.535
+
 
 def load_meta_yaml(path: Path) -> Optional[dict]:
     """Read one od3d meta YAML (re-exported from the UCO3D loader).
@@ -604,7 +608,16 @@ class Od3dFrameDataset(ConfigurableDataset):
                 d = read_depth_image(p, factor=float(meta.get("depth_scale", 1000.0)))
                 if d is not None:
                     depth = d[0] if d.dim() == 3 else d
-                    depth_mask = (depth > 0) if _want("depth_mask", mods) else None
+                    # Depth is stored as uint16 millimetres, so anything past
+                    # 65.535 m saturates at exactly that value rather than
+                    # clipping to something obviously wrong. Monocular estimates
+                    # run past it on open scenes — 42% of the in-mask pixels of a
+                    # PASCAL3D aeroplane sit on the ceiling — and a saturated
+                    # pixel lifted as a real 65 m point would drag the encoder's
+                    # point cloud with it. Excluded from depth_mask so nothing
+                    # downstream treats it as a measurement.
+                    valid = (depth > 0) & (depth < _DEPTH_U16_CEILING_M)
+                    depth_mask = valid if _want("depth_mask", mods) else None
                     if not _want("depth", mods):
                         depth = None
 
@@ -637,6 +650,12 @@ class Od3dFrameDataset(ConfigurableDataset):
         if meta.get("l_kpts3d") and _want("obj_kpts3d", mods):
             obj_kpts3d = torch.tensor(meta["l_kpts3d"], dtype=torch.float32)
 
+        mesh, obj_size3d, obj_bbox3d, obj_ncds0c = self._object_geometry(row, meta)
+
+        cam_tform4x4_obj_ncds = None
+        if cam_tform4x4_obj is not None and obj_ncds0c is not None:
+            cam_tform4x4_obj_ncds = cam_tform4x4_obj @ obj_ncds0c
+
         from o3b.data.datatypes.frame_object import FrameObject
 
         object_id = f"{row['category']}/{row['sequence']}"
@@ -653,4 +672,108 @@ class Od3dFrameDataset(ConfigurableDataset):
             cam_tform4x4_obj=cam_tform4x4_obj,
             cam_bbox2d=cam_bbox2d,
             obj_kpts3d=obj_kpts3d,
+            mesh=mesh,
+            obj_size3d=obj_size3d,
+            obj_bbox3d=obj_bbox3d,
+            obj_ncds0c_tform4x4_obj=obj_ncds0c,
+            cam_tform4x4_obj_ncds=cam_tform4x4_obj_ncds,
         )
+
+    # ── object geometry ──────────────────────────────────────────────────────
+    # obj_ncds0c_tform4x4_obj follows UCO3D's convention exactly: the mesh verts
+    # are centred and divided by half their longest extent (so they span [-1, 1]
+    # on that axis), and the transform maps NCDS coordinates back into object
+    # space.  The benchmark compares cam_tform4x4_obj_ncds, so a dataset that
+    # normalised differently would be scored against a differently-shaped target.
+    #
+    # Note for PASCAL3D / ImageNet3D: their poses are in normalised CAD units,
+    # not metres, and no per-category table recovers that reliably.  NCDS is
+    # scale-free by construction, so the rotation metrics those two datasets are
+    # evaluated on are unaffected; metric translation and 3-D IoU are simply not
+    # measurable there, which is why the published table reports only 30/10
+    # degree for both.
+
+    _MESH_CACHE_MAX = 64
+
+    def _mesh_path(self, row, meta) -> Optional[Path]:
+        """Where this row's object mesh lives; None when the dataset has none.
+
+        PASCAL3D and ImageNet3D name a CAD model in the meta, relative to
+        path_raw.  Subclasses with another arrangement override this.
+        """
+        if meta.get("rfpath_mesh"):
+            return self.path_raw / meta["rfpath_mesh"]
+        return None
+
+    def _object_geometry(self, row, meta):
+        """``(mesh, obj_size3d, obj_bbox3d, obj_ncds0c_tform4x4_obj)``.
+
+        Geometry comes from the mesh where there is one, and otherwise from the
+        meta's 3-D box corners — which is what Objectron has instead of a scan,
+        its "mesh" being a cuboid fitted to the annotation anyway.
+
+        Cached per object: the frames of one object arrive together, so a small
+        cache turns N mesh reads into one, while keeping every object would grow
+        without bound across an epoch.
+        """
+        import torch
+
+        from o3b.data.datatypes.mesh import Mesh
+
+        key = f"{row['category']}/{row['sequence']}"
+        cache = getattr(self, "_mesh_cache", None)
+        if cache is None:
+            cache = self._mesh_cache = {}
+        if key in cache:
+            cached = cache[key]
+            if cached is None:
+                return None, None, None, None
+            from dataclasses import replace as _r
+            mesh, size3d, bbox3d, tform = cached
+            return (_r(mesh) if mesh is not None else None), size3d, bbox3d, tform
+
+        if len(cache) >= self._MESH_CACHE_MAX:
+            cache.clear()
+
+        verts, faces = None, None
+        path = self._mesh_path(row, meta)
+        if path is not None and path.exists():
+            try:
+                import trimesh
+                loaded = trimesh.load(path, process=False)
+                verts = torch.tensor(loaded.vertices, dtype=torch.float32)
+                faces = torch.tensor(loaded.faces, dtype=torch.int64)
+            except Exception as e:
+                logger.warning(f"could not read mesh {path}: {e}")
+
+        pts = verts
+        if pts is None and meta.get("l_kpts3d"):
+            pts = torch.tensor(meta["l_kpts3d"], dtype=torch.float32)
+        if pts is None or pts.numel() == 0:
+            cache[key] = None
+            return None, None, None, None
+
+        v_min, v_max = pts.min(dim=0).values, pts.max(dim=0).values
+        center = (v_min + v_max) * 0.5
+        size3d = (v_max - v_min)
+        half_scale = float(size3d.max().clamp(min=1e-8)) * 0.5
+
+        tform = torch.eye(4, dtype=torch.float32)
+        tform[:3, :3] = torch.eye(3) * half_scale
+        tform[:3, 3] = center
+
+        # the 8 corners, in object space
+        bbox3d = torch.stack([
+            torch.tensor([x, y, z], dtype=torch.float32)
+            for x in (v_min[0], v_max[0])
+            for y in (v_min[1], v_max[1])
+            for z in (v_min[2], v_max[2])
+        ])
+
+        mesh = None
+        if verts is not None and faces is not None:
+            mesh = Mesh(verts=(verts - center) / half_scale, faces=faces)
+
+        cache[key] = (mesh, size3d, bbox3d, tform)
+        from dataclasses import replace as _r
+        return (_r(mesh) if mesh is not None else None), size3d, bbox3d, tform
