@@ -81,6 +81,9 @@ extra:
   #   depth_anything_v3 monocular estimate
   #   depth_pro         monocular estimate
   depth_type: mesh
+  # depth is rendered from a mesh, so the tree carries a further <mesh_type>
+  # level: depth/mesh/meta/<split>/<cat>/<name>.png
+  depth_mesh_type: meta
   # which mask tree under <path_preprocess>/mask/
   mask_type: sam_kpts2d_bbox
   # re-express the object frame and symmetry in UCO3D's canonical convention, so

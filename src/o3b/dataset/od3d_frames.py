@@ -443,3 +443,214 @@ class Od3dFrameDataset(ConfigurableDataset):
             return
         print(f"Showing up to {limit} of {len(dataset)} frames  {path_preprocess}\n")
         _visualize_frame_objects_viser(dataset, debug=debug, obj_centric=obj_centric)
+
+    # ── item loading ─────────────────────────────────────────────────────────
+
+    def _setup(self) -> None:
+        self._init_fields()
+        db_path = self.path_preprocess / self._DB_NAME
+        rows = None
+        if db_path.exists() and not (self.cfg.extra or {}).get("ignore_frames_db"):
+            rows = self._rows_from_db(db_path)
+        if rows is None:
+            rows = list(self._walk_rows())
+
+        # Caps are applied here, on read, never at index time — frames.db holds
+        # the unthinned walk so every config sharing it sees all of it.
+        sub = self.subset()
+        if sub is not None:
+            rows = [r for r in rows
+                    if self.in_subset(object_id=f"{r['category']}/{r['sequence']}",
+                                      frame_id=r["frame_id"])]
+        per_seq = (self.cfg.extra or {}).get("frames_count_max_per_sequence")
+        if per_seq:
+            seen: dict = {}
+            kept = []
+            for r in rows:
+                key = (r["category"], r["sequence"])
+                if seen.get(key, 0) >= per_seq:
+                    continue
+                seen[key] = seen.get(key, 0) + 1
+                kept.append(r)
+            rows = kept
+        if self.cfg.filter_count_max:
+            if self.cfg.categories:
+                # per category, so a rare one is not starved by a common one
+                seen = {}
+                kept = []
+                for r in rows:
+                    c = r["category"]
+                    if seen.get(c, 0) >= self.cfg.filter_count_max:
+                        continue
+                    seen[c] = seen.get(c, 0) + 1
+                    kept.append(r)
+                rows = kept
+            else:
+                rows = rows[: self.cfg.filter_count_max]
+        self._frame_rows = rows
+
+    def _rows_from_db(self, db_path: Path) -> Optional[list[dict]]:
+        """Read the cached walk, or None when it does not cover this config.
+
+        Returning None rather than a partial answer is deliberate: a cache
+        missing some of the requested categories would silently shrink the
+        dataset, which is the failure that looks like a bad result rather than
+        like a bug.
+        """
+        cats = list(self.cfg.categories) if self.cfg.categories else None
+        splits = self._splits()
+        con = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True, timeout=30)
+        con.row_factory = sqlite3.Row
+        try:
+            cur = con.cursor()
+            wanted = set(cats) if cats is not None else set(self._iter_categories())
+            if not wanted:
+                return None
+            missing = [c for c in wanted if not cur.execute(
+                "SELECT 1 FROM frames WHERE category = ? LIMIT 1", (c,)).fetchone()]
+            if missing:
+                logger.info(
+                    f"frames.db is missing {len(missing)}/{len(wanted)} requested "
+                    f"categor{'y' if len(missing) == 1 else 'ies'} "
+                    f"({', '.join(sorted(missing)[:5])}"
+                    f"{'…' if len(missing) > 5 else ''}); walking the tree instead")
+                return None
+            q = "SELECT * FROM frames WHERE split IN ({})".format(
+                ", ".join("?" * len(splits)))
+            params = list(splits)
+            if cats is not None:
+                q += " AND category IN ({})".format(", ".join("?" * len(cats)))
+                params += cats
+            q += " ORDER BY category, sequence, frame"
+            return [dict(r) for r in cur.execute(q, params)]
+        finally:
+            con.close()
+
+    def __len__(self) -> int:
+        if self._sharded is not None:
+            return len(self._sharded)
+        return len(getattr(self, "_frame_rows", ()))
+
+    # ── per-dataset path hooks ───────────────────────────────────────────────
+
+    def _rel_key(self, row) -> str:
+        """``<split>/<category>[/<sequence>]/<frame>`` — the parallel trees' key."""
+        base = f"{row['split']}/{row['category']}"
+        if self.has_sequence_level:
+            base += f"/{row['sequence']}"
+        return f"{base}/{row['frame']}"
+
+    def _mask_path(self, row, meta) -> Optional[Path]:
+        """Where this row's instance mask lives.
+
+        Two conventions among the four: HANDAL names it in the meta (relative to
+        path_raw), the others keep parallel trees under path_preprocess.
+        """
+        if meta.get("rfpath_mask"):
+            return self.path_raw / meta["rfpath_mask"]
+        mask_type = (self.cfg.extra or {}).get("mask_type")
+        if not mask_type:
+            return None
+        return self.path_preprocess / "mask" / mask_type / f"{self._rel_key(row)}.png"
+
+    def _depth_path(self, row, meta) -> Optional[Path]:
+        if meta.get("rfpath_depth"):
+            return self.path_raw / meta["rfpath_depth"]
+        extra = self.cfg.extra or {}
+        depth_type = extra.get("depth_type")
+        if not depth_type:
+            return None
+        base = self.path_preprocess / "depth" / depth_type
+        # PASCAL3D / ImageNet3D render depth from a mesh, so their tree carries a
+        # further <mesh_type> level (depth/mesh/meta/...); Objectron's estimator
+        # output does not.
+        if extra.get("depth_mesh_type"):
+            base = base / extra["depth_mesh_type"]
+        return base / f"{self._rel_key(row)}.png"
+
+    def _load_frame_object(self, idx: int):
+        import torch
+
+        from o3b.cv.io import read_depth_image, read_image
+        from o3b.dataset.utils import want as _want
+
+        row = self._frame_rows[idx]
+        mods = self.cfg.modalities
+        meta = load_meta_yaml(self.meta_path(row))
+        if meta is None:
+            return None
+
+        rgb = None
+        if _want("rgb", mods) and meta.get("rfpath_rgb"):
+            p = self.path_raw / meta["rfpath_rgb"]
+            if p.exists():
+                img = read_image(p)
+                rgb = img[:3].float() / 255.0 if img is not None else None
+        if rgb is None:
+            return None
+
+        fo_mask = None
+        if _want("fo_mask", mods):
+            p = self._mask_path(row, meta)
+            if p is not None and p.exists():
+                m = read_image(p)
+                if m is not None:
+                    fo_mask = (m[0] > 127) if m.dtype == torch.uint8 else (m[0] > 0.5)
+
+        depth, depth_mask = None, None
+        if _want("depth", mods) or _want("depth_mask", mods):
+            p = self._depth_path(row, meta)
+            if p is not None and p.exists():
+                d = read_depth_image(p, factor=float(meta.get("depth_scale", 1000.0)))
+                if d is not None:
+                    depth = d[0] if d.dim() == 3 else d
+                    depth_mask = (depth > 0) if _want("depth_mask", mods) else None
+                    if not _want("depth", mods):
+                        depth = None
+
+        cam_intr4x4 = None
+        if meta.get("l_cam_intr4x4"):
+            cam_intr4x4 = torch.tensor(meta["l_cam_intr4x4"], dtype=torch.float32)
+
+        cam_tform4x4_obj = None
+        if meta.get("l_cam_tform4x4_obj"):
+            M = torch.tensor(meta["l_cam_tform4x4_obj"], dtype=torch.float32)
+            # od3d writes cam<-obj in an OpenCV-style frame (+Y down, +Z forward);
+            # o3b is OpenGL. Same flip UCO3D applies.
+            if self.cfg.cam_tform4x4_cam_raw is not None:
+                M = torch.tensor(self.cfg.cam_tform4x4_cam_raw, dtype=torch.float32) @ M
+            scale = float((self.cfg.extra or {}).get("scale_to_m") or 1.0)
+            if scale != 1.0:
+                M = M.clone()
+                M[:3, 3] = M[:3, 3] * scale   # HANDAL's poses are millimetres
+            cam_tform4x4_obj = M
+
+        cam_bbox2d = None
+        if _want("cam_bbox2d", mods):
+            if meta.get("l_bbox"):
+                cam_bbox2d = torch.tensor(meta["l_bbox"], dtype=torch.float32)
+            elif fo_mask is not None and bool(fo_mask.any()):
+                from o3b.cv.visual.draw import get_bboxs_from_masks
+                cam_bbox2d = get_bboxs_from_masks(fo_mask[None])[0].float()
+
+        obj_kpts3d = None
+        if meta.get("l_kpts3d") and _want("obj_kpts3d", mods):
+            obj_kpts3d = torch.tensor(meta["l_kpts3d"], dtype=torch.float32)
+
+        from o3b.data.datatypes.frame_object import FrameObject
+
+        object_id = f"{row['category']}/{row['sequence']}"
+        return FrameObject(
+            frame_id=row["frame_id"],
+            frame_object_id=row["frame_id"],
+            object_id=object_id,
+            category=row["category"],
+            rgb=rgb,
+            depth=depth,
+            depth_mask=depth_mask,
+            fo_mask=fo_mask,
+            cam_intr4x4=cam_intr4x4,
+            cam_tform4x4_obj=cam_tform4x4_obj,
+            cam_bbox2d=cam_bbox2d,
+            obj_kpts3d=obj_kpts3d,
+        )

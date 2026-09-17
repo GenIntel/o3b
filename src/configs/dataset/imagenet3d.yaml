@@ -67,6 +67,7 @@ filter_count_max:
 
 extra:
   depth_type: mesh
+  depth_mesh_type: meta
   mask_type: sam_kpts2d_bbox
   map_to_uco3d: true
   # Annotation quality tiers. od3d's default allows all four; narrowing this is
