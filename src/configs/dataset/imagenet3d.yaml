@@ -22,6 +22,13 @@ path_raw:        ${path_datasets_raw}/ImageNet3D
 path_preprocess: ${path_datasets_preprocess}/ImageNet3D_Preprocess
 
 item_type: frame_object
+
+# Simplified marching-cubes remesh, converted on first use into
+# <path_preprocess>/mesh/mc16/ and cached there — the same variant and the same
+# mechanism HouseCorr3D uses. The raw meshes are CAD models and BOP scans (a
+# PASCAL3D aeroplane is 58k verts), which are slow to rasterise once per frame
+# for fo_mask_amodal and heavy to carry inside every shard.
+mesh_type: "mc16"
 split: val
 
 cam_tform4x4_cam_raw:

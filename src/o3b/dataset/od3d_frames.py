@@ -850,7 +850,11 @@ class Od3dFrameDataset(ConfigurableDataset):
         # frame took the shard build from 153 item/s to 1.19 — a 5-minute job
         # turning into nine hours.
         path = self._mesh_path(row, meta)
-        key = str(path) if path is not None else f"{row['category']}/{row['sequence']}"
+        mesh_type = self.cfg.mesh_type or "default"
+        # mesh_type is part of the key: switching it must not hand back the
+        # previous type's geometry from a warm cache.
+        key = (f"{mesh_type}|{path}" if path is not None
+               else f"{mesh_type}|{row['category']}/{row['sequence']}")
         cache = getattr(self, "_mesh_cache", None)
         if cache is None:
             cache = self._mesh_cache = {}
@@ -874,10 +878,54 @@ class Od3dFrameDataset(ConfigurableDataset):
         verts, faces = None, None
         if path is not None and path.exists():
             try:
-                import trimesh
-                loaded = trimesh.load(path, process=False)
-                verts = torch.tensor(loaded.vertices, dtype=torch.float32)
-                faces = torch.tensor(loaded.faces, dtype=torch.int64)
+                if mesh_type not in ("default", "raw", ""):
+                    # Simplified variant (mc16 and friends), converted once and
+                    # cached beside the dataset exactly as HouseCorr3D does.
+                    #
+                    # Keyed by the SOURCE MESH rather than by the object: many
+                    # frames — and in PASCAL3D and ImageNet3D many different
+                    # objects — share one CAD model, so an object-keyed cache
+                    # would reconvert the same file repeatedly and store it
+                    # repeatedly. The raw meshes are also why this matters:
+                    # a PASCAL3D aeroplane is 58k verts, which is slow to
+                    # rasterise per frame and heavy to carry in every shard.
+                    from o3b.data.datatypes.mesh import Mesh, convert_mesh
+
+                    stem = str(path)
+                    for root in (self.path_raw, self.path_preprocess):
+                        try:
+                            stem = str(path.relative_to(root))
+                            break
+                        except ValueError:
+                            continue
+                    flat = stem.replace("/", "__").rsplit(".", 1)[0]
+                    converted = (self.path_preprocess / "mesh" / mesh_type
+                                 / f"{flat}.glb")
+                    converted.parent.mkdir(parents=True, exist_ok=True)
+                    m = Mesh._try_load(converted)
+                    if m is None:
+                        # Not Mesh.load_or_convert: that loads the source through
+                        # Mesh.load, which cannot read PASCAL3D's and ImageNet3D's
+                        # CAD .off files. trimesh can, so the source is read here
+                        # and only the *conversion* is delegated.
+                        import trimesh
+                        raw = trimesh.load(path, process=False)
+                        src = Mesh(
+                            verts=torch.tensor(raw.vertices, dtype=torch.float32),
+                            faces=torch.tensor(raw.faces, dtype=torch.int64),
+                        )
+                        m = convert_mesh(mesh_type, src)
+                        try:
+                            m.save(converted)
+                        except Exception as e:      # a read-only cache dir is survivable
+                            logger.warning(f"could not cache {converted}: {e}")
+                    verts = m.verts.float()
+                    faces = m.faces.long() if m.faces is not None else None
+                else:
+                    import trimesh
+                    loaded = trimesh.load(path, process=False)
+                    verts = torch.tensor(loaded.vertices, dtype=torch.float32)
+                    faces = torch.tensor(loaded.faces, dtype=torch.int64)
             except Exception as e:
                 logger.warning(f"could not read mesh {path}: {e}")
 
