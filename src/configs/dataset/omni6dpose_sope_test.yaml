@@ -30,7 +30,13 @@ filter_has_kpts: false
 categories:
 filter_count_max:
 
-# od3d capped ROPE at 16 frames per sequence; without a cap ROPE alone is
-# ~332k frames x ~4.7 objects = ~1.55M object-frames.
+# SOPE is thinned the way od3d thinned it: subset_fraction 0.1, a uniform
+# random 10% of the valid rows, and NO per-sequence cap. (ROPE, by contrast, is
+# capped at 16 views per object track.) SOPE scenes are short — ~24 frames — so
+# the per-track cap barely bites there: it kept 975,771 of SOPE test's 1,023,279
+# valid rows, ~175 GB as a shard, against ~102k at 0.1. od3d sampled unseeded;
+# subset_seed fixes ours.
 extra:
-  frames_count_max_per_sequence: 16
+  frames_count_max_per_sequence:
+  subset_fraction: 0.1
+  subset_seed: 0

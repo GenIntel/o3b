@@ -6,8 +6,8 @@
 # The three Omni6DPose configs share one frames.db. SQLite takes ONE writer:
 # never index them in parallel — doing so corrupted that file once already.
 #
-# Thinned to 16 evenly spaced frames per object track (scene x object) by
-# extra.frames_count_max_per_sequence, inherited from omni6dpose_sope_test; is_valid=0 frames
+# Thinned to a seeded random 10% of the valid rows (extra.subset_fraction,
+# as od3d did for SOPE — no per-track cap), inherited from omni6dpose_sope_test; is_valid=0 frames
 # are dropped by the loader before that (0% of ROPE, ~24% of SOPE).
 #
 # MUST run on a compute node: fo_mask_amodal is rasterised at build time.

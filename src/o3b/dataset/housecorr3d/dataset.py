@@ -349,9 +349,27 @@ class HouseCorr3D(ConfigurableDataset):
                           f"{len(self._frame_rows_id)} / {n_before} frame rows "
                           f"over {len(groups)} object tracks")
 
+                # extra.subset_fraction: od3d's thinning for SOPE (0.1 for both
+                # splits) — a uniform random sample without replacement of that
+                # fraction of the rows. od3d drew it with an UNSEEDED
+                # torch.multinomial, so no two of its builds kept the same items;
+                # seeded here (extra.subset_seed, default 0) so that at least ours
+                # are repeatable. Indices are re-sorted after sampling so rows of
+                # one object stay together and the mesh cache keeps hitting.
+                frac = (self.cfg.extra or {}).get("subset_fraction")
+                if frac is not None and float(frac) < 1.0 \
+                        and self.cfg.item_type == ItemType.FRAME_OBJECT:
+                    import torch as _torch
+                    n_all = len(self._frame_rows_id)
+                    k = max(int(float(frac) * n_all), 1)
+                    g = _torch.Generator().manual_seed(int((self.cfg.extra or {}).get("subset_seed", 0)))
+                    pick = sorted(_torch.randperm(n_all, generator=g)[:k].tolist())
+                    self._frame_rows_id = [self._frame_rows_id[i] for i in pick]
+                    print(f"subset_fraction={frac}: kept {k} / {n_all} frame rows")
+
                 # Either filter moved the cap out of SQL, so spend it here on what
                 # they left; pairs cap their own count in _build_frame_pairs.
-                if (limit and (frame_groups is not None or subset is not None or per_seq)
+                if (limit and (frame_groups is not None or subset is not None or per_seq or frac)
                         and self.cfg.item_type == ItemType.FRAME_OBJECT):
                     self._frame_rows_id = self._frame_rows_id[:limit]
             finally:
