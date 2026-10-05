@@ -721,6 +721,16 @@ class Od3dFrameDataset(ConfigurableDataset):
         cam_tform4x4_obj = None
         if meta.get("l_cam_tform4x4_obj"):
             M = torch.tensor(meta["l_cam_tform4x4_obj"], dtype=torch.float32)
+            # A handful of od3d's PASCAL3D/ImageNet3D annotations are sheared, not
+            # rotations — column norms 0.03-0.88, det(R/|R|) down to 0.02 — so
+            # there is no GT orientation to train on or score against; the oracle
+            # even fails them against themselves. Dropped. Columns are normalised
+            # first, so a per-axis scale in an otherwise valid pose passes.
+            Rn = M[:3, :3] / M[:3, :3].norm(dim=0, keepdim=True).clamp(min=1e-12)
+            if float((Rn.T @ Rn - torch.eye(3)).abs().max()) > 1e-2:
+                logger.warning(f"{self.meta_path(row)}: cam_tform4x4_obj is not a "
+                               f"rotation (sheared od3d annotation); frame dropped")
+                return None
             # od3d writes cam<-obj in an OpenCV-style frame (+Y down, +Z forward);
             # o3b is OpenGL. Same flip UCO3D applies.
             if self.cfg.cam_tform4x4_cam_raw is not None:
