@@ -653,8 +653,15 @@ class Od3dFrameDataset(ConfigurableDataset):
         if _want("rgb", mods) and meta.get("rfpath_rgb"):
             p = self.path_raw / meta["rfpath_rgb"]
             if p.exists():
-                img = read_image(p)
-                rgb = img[:3].float() / 255.0 if img is not None else None
+                # Through PIL's convert("RGB"), not read_image: PASCAL3D and
+                # ImageNet3D carry grayscale (and palette / CMYK) JPEGs, which
+                # read_image hands back as 1- or 4-channel tensors that
+                # img[:3] cannot fix, and one such frame breaks the batch stack.
+                import numpy as np
+                from PIL import Image
+                with Image.open(p) as im:
+                    img = torch.from_numpy(np.asarray(im.convert("RGB")).copy()).permute(2, 0, 1)
+                rgb = img.float() / 255.0
         if rgb is None:
             return None
 
