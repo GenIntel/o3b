@@ -73,12 +73,30 @@ class PoseTask(OD3D_Task):
         self.iou_acc = tuple(iou_acc)
         self._warned_missing: set = set()
 
+    def _warn_once(self, key: str, msg: str) -> None:
+        if key not in self._warned_missing:
+            self._warned_missing.add(key)
+            print("WARNING: " + msg)
+
     def forward(self, batch, return_qualit: bool = True) -> Tuple[FrameObjectQuantBatch, object]:
         from o3b.cv.metric.pose import get_pose_diff, get_pose_diff_in_rad
 
         quant = FrameObjectQuantBatch()
 
-        gt = getattr(batch, "cam_tform4x4_obj", None)
+        # The NCDS pose, not the metric one. Methods write pred_cam_tform4x4_obj
+        # in NCDS form (TrinityMethod is trained against cam_tform4x4_obj_ncds
+        # and returns _ncds_pose_from_metric), whose translation is the camera
+        # position of the object's BOX CENTRE; the metric pose's translation is
+        # the object's ORIGIN. Rotation error is scale-invariant either way, but
+        # comparing translations across the two conventions would be off by
+        # R @ centre — exactly, for every mesh not centred on its own origin, and
+        # not at all for those that are, so it would differ by dataset.
+        gt = getattr(batch, "cam_tform4x4_obj_ncds", None)
+        if gt is None:
+            gt = getattr(batch, "cam_tform4x4_obj", None)
+            self._warn_once("ncds", "PoseTask: batch has no cam_tform4x4_obj_ncds; "
+                            "falling back to the metric pose — translation errors are "
+                            "then measured to the object origin, not its box centre.")
         pred = getattr(batch, "pred_cam_tform4x4_obj", None)
         if pred is None:
             # No method configured: score the GT against itself (the oracle
@@ -94,6 +112,10 @@ class PoseTask(OD3D_Task):
         gt = gt.float()
         pred = pred.float()
         syms = getattr(batch, "obj_syms", None)
+        if syms is None:
+            self._warn_once("syms", "PoseTask: batch has no obj_syms — the symmetry-aware "
+                            "accuracies (*_sym, the second number of each table cell) are "
+                            "NOT computed. Add obj_syms to the dataset's modalities.")
 
         # ── rotation, plain and symmetry-aware ───────────────────────────────
         rot_err = get_pose_diff_in_rad(pred_tform4x4=pred, gt_tform4x4=gt)
@@ -131,6 +153,10 @@ class PoseTask(OD3D_Task):
 
         # ── size and 3-D IoU ─────────────────────────────────────────────────
         gt_size = getattr(batch, "obj_size3d", None)
+        if gt_size is None:
+            self._warn_once("size", "PoseTask: batch has no obj_size3d — size error and "
+                            "3-D IoU are NOT computed. Add obj_size3d to the dataset's "
+                            "modalities.")
         pred_size = getattr(batch, "pred_obj_size3d", None)
         if pred_size is None:
             pred_size = gt_size

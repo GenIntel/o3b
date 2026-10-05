@@ -25,6 +25,27 @@ filter_count_max:
 
 img_size: 256
 
+# uco3d.yaml's list plus obj_size3d — restated whole, since OmegaConf
+# replaces lists rather than merging them.
+modalities:
+  - rgb                    # decoded from rgb_video.mp4 at the frame's timestamp
+  - depth                  # depth_maps.h5, metres
+  - depth_mask
+  - fo_mask                # mask_video.mkv (the object; UCO3D is one object per sequence)
+  - fo_mask_amodal         # mesh_type mesh rendered under the GT pose (a reconstruction,
+  - fo_mask_amodal_dt      #   not an artist mesh — it fills occlusions at that fidelity)
+  - cam_intr4x4
+  - cam_tform4x4_obj       # metric rigid cam←obj
+  - cam_tform4x4_obj_ncds  # task target: maps normalised object points → camera space
+  - cam_bbox2d             # required by the CropCamBBox2D transform
+  - cam_bbox3d
+  - obj_syms               # per-axis symmetry, derived from the category's orientation tree
+  - category
+  - mesh
+
+# UCO3D has no keypoint annotations.
+  - obj_size3d             # GT side lengths: PoseTask's size error + 3-D IoU
+
 # Frames per sequence. every9d_v7 inherits 16 from uco3d.yaml; kept explicit
 # here because it is what bounds the cache size.
 extra:

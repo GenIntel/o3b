@@ -550,6 +550,12 @@ class FrameObjectBatch:
     obj_kpts2d_mask:  Optional[Tensor]       = None  # (B, K)    bool
     cam_tform4x4_obj: Optional[Tensor]       = None  # (B, 4, 4)
     cam_tform4x4_obj_ncds: Optional[Tensor]  = None  # (B, 4, 4) ncds→cam
+    # Object properties a pose task needs and the batch used to drop: without
+    # obj_syms the symmetry-aware rotation error cannot be computed, without
+    # obj_size3d neither can 3-D IoU — and both used to come back None
+    # silently rather than as an error.
+    obj_size3d:       Optional[Tensor]       = None  # (B, 3) side lengths, object frame
+    obj_syms:         Optional[Tensor]       = None  # (B, 3) see FrameObject.obj_syms
     # object
     pts3d:                   Optional[Tensor] = None  # (B, N, 3)
     pts3d_feats:             Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
@@ -727,6 +733,8 @@ def collate_frame_objects(
         obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj"),
         obj_kpts3d              = _get("obj_kpts3d"),
         obj_kpts3d_mask         = _get("obj_kpts3d_mask"),
+        obj_size3d              = _get("obj_size3d"),
+        obj_syms                = _get("obj_syms"),
         # GT meshes stay per-sample (variable vertex counts); ObjGeo3D's pcl_cd
         # uses their vertices as the target point cloud
         meshes = (

@@ -614,6 +614,16 @@ class UCO3D(ConfigurableDataset):
             from o3b.dataset.housecorr3d.dataset import _compute_obj_sym_geometry
             from o3b.dataset.uco3d.obj_syms import obj_syms_for_category
             obj_syms = obj_syms_for_category(category)
+            # The orientation tree states symmetry in the RAW labelling's axis
+            # order (index 2 = top = Z_raw), but obj_gl_tform4x4_obj_raw has
+            # already turned this item into o3b's canonical frame (top = Y).
+            # Unpermuted, a bottle came out continuous about canonical Z — its
+            # *back* axis — so every symmetry-aware rotation error on Every9D
+            # quotiented out the wrong axis. new[i] = syms[raw axis feeding i].
+            if self.cfg.obj_gl_tform4x4_obj_raw is not None:
+                R = torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw,
+                                 dtype=torch.float32)[:3, :3].abs()
+                obj_syms = (R @ obj_syms.float()).round().long()
             obj_kpts3d_syms, obj_axis6d_sym = _compute_obj_sym_geometry(obj_syms, None)
 
         category_id = None

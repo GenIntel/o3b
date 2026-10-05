@@ -30,6 +30,7 @@ modalities:
   - cam_bbox2d
   - cam_bbox3d
   - obj_syms
+  - obj_size3d             # GT side lengths: PoseTask's size error + 3-D IoU
   - category
   - mesh
 

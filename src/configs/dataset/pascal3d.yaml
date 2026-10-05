@@ -47,6 +47,16 @@ cam_tform4x4_cam_raw:
   - [ 0.00000,  0.00000, -1.00000,  0.00000]
   - [ 0.00000,  0.00000,  0.00000,  1.00000]
 
+# UCO3D raw labelling -> o3b canonical (right/top/back = X/Y/Z), the SAME matrix
+# uco3d.yaml applies, so these datasets share Every9D's object frame. Applied on
+# read together with the per-category alignment (extra.map_to_uco3d), never
+# baked into the shards. Without it they are Z-up and Every9D is Y-up.
+obj_gl_tform4x4_obj_raw:
+  - [-1.00000,  0.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000,  1.00000,  0.00000]
+  - [ 0.00000,  1.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000,  0.00000,  1.00000]
+
 modalities:
   - rgb
   - depth                  # rendered from the CAD mesh (see extra.depth_type)
@@ -63,6 +73,7 @@ modalities:
                            #   FrameObject.viz draws its 3-D box from
   - obj_bbox3d             # (8,3) the same corners in OBJECT space
   - obj_syms               # via the UCO3D orientation tree (see extra.map_to_uco3d)
+  - obj_size3d             # GT side lengths: PoseTask's size error + 3-D IoU
   - category
   - mesh
 

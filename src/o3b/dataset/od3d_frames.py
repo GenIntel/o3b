@@ -361,13 +361,30 @@ class Od3dFrameDataset(ConfigurableDataset):
         return transf4x4_from_rot3x3(torch.tensor(rot, dtype=torch.float32))
 
     def _apply_uco3d_alignment(self, item):
-        """Re-express one item's object frame and symmetry in UCO3D's convention.
+        """Re-express one item in o3b's canonical object frame, with symmetry.
 
-        Mirrors od3d's OD3D_Dataset.get_frames bookkeeping: the object frame is
-        rotated by T, so the pose is post-multiplied by inv(T) and the mesh and
-        the NCDS transform follow, leaving the object projecting onto exactly the
-        same pixels. obj_size3d is permuted by |R| because rotating the axes
-        permutes which side length belongs to which.
+        Two rotations, composed into one ``T = T_gl @ T_orient``:
+
+        ``T_orient``  per category, this dataset's object axes -> UCO3D's RAW
+                      labelling (od3d's map_categories_obj_orient_to_uco3d;
+                      identity for PASCAL3D and Objectron, whose axes already
+                      agree).
+        ``T_gl``      UCO3D raw -> o3b canonical (right/top/back = X/Y/Z), the
+                      config's obj_gl_tform4x4_obj_raw — the SAME matrix UCO3D
+                      applies. Without it these datasets stayed Z-up while
+                      Every9D is Y-up, so a model trained on one would be scored
+                      against axes turned 90 degrees on the other.
+
+        Bookkeeping for a rotation T of the object frame (the object still lands
+        on exactly the same pixels): pose @ inv(T); NCDS map T @ M @ inv(T),
+        where M = obj_ncds0c_tform4x4_obj maps NCDS -> object; mesh verts and
+        keypoints by T; size permuted by |R|; boxes rebuilt in canonical corner
+        order; and cam_tform4x4_obj_ncds recomposed as pose @ M — NOT
+        pose @ inv(M), which an earlier version used and which corrupted the NCDS
+        pose for every re-oriented item (ImageNet3D, HANDAL).
+
+        Symmetry comes from UCO3D's orientation tree, stated in raw axis order,
+        so it is permuted by |R_gl| alone: after T_orient the item is in raw axes.
         """
         import torch
 
@@ -380,54 +397,51 @@ class Od3dFrameDataset(ConfigurableDataset):
         if isinstance(category, (list, tuple)):      # defensive: never batched here
             return item
         uco3d_cat = self._uco3d_category(category)
-        T = self._obj_orient_tform(category)
+
+        T_orient = self._obj_orient_tform(category)
+        T_gl = None
+        if self.cfg.obj_gl_tform4x4_obj_raw is not None:
+            T_gl = torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=torch.float32)
+        T = None
+        if T_orient is not None and T_gl is not None:
+            T = T_gl @ T_orient
+        else:
+            T = T_orient if T_orient is not None else T_gl
 
         if T is not None:
-            R_abs = T[:3, :3].abs()
+            R = T[:3, :3]
+            R_abs = R.abs()
             if item.cam_tform4x4_obj is not None:
                 item.cam_tform4x4_obj = item.cam_tform4x4_obj @ inv_tform4x4(T)
             if item.obj_ncds0c_tform4x4_obj is not None:
                 item.obj_ncds0c_tform4x4_obj = T @ item.obj_ncds0c_tform4x4_obj @ inv_tform4x4(T)
             if item.obj_size3d is not None:
-                item.obj_size3d = (item.obj_size3d[..., None, :] * R_abs).sum(dim=-1)
+                item.obj_size3d = R_abs @ item.obj_size3d.float()
             if item.mesh is not None:
                 # replace, never mutate: _object_geometry hands out a fresh Mesh
                 # that still SHARES the cached verts tensor, so rotating in place
-                # would turn the cache entry too and every later frame of the
+                # would turn the cache entry too, and every later frame of the
                 # object would be rotated again.
                 from dataclasses import replace as _r_mesh
-                item.mesh = _r_mesh(
-                    item.mesh, verts=item.mesh.verts.float() @ T[:3, :3].T)
+                item.mesh = _r_mesh(item.mesh, verts=item.mesh.verts.float() @ R.T)
             if item.obj_kpts3d is not None:
-                item.obj_kpts3d = item.obj_kpts3d @ T[:3, :3].T
+                item.obj_kpts3d = item.obj_kpts3d.float() @ R.T
             if item.obj_bbox3d is not None:
-                # Rotate the corners, then REBUILD them in canonical order from
-                # the rotated bounds. Rotating alone would keep the box in the
-                # right place while permuting which corner is index 0..7, and the
-                # ordering is exactly what draw_bbox3d_corners and
-                # _corners8_to_size_tform rely on — so the box would go back to
-                # being drawn across its own diagonals, but only for the
-                # categories that carry a re-orientation.
-                rot = item.obj_bbox3d @ T[:3, :3].T
-                lo, hi = rot.min(dim=0).values, rot.max(dim=0).values
-                item.obj_bbox3d = _corners_canonical(lo, hi)
-            if item.cam_bbox3d is not None and item.cam_tform4x4_obj is not None:
-                # cam_bbox3d is camera-space and so unmoved by an object-frame
-                # rotation, but its corner order followed obj_bbox3d's, so it is
-                # rebuilt from the new object box through the (already rotated)
-                # pose.
+                # rotate, then REBUILD in canonical corner order: rotating alone
+                # keeps the box in place but permutes which corner is index 0..7,
+                # which draw_bbox3d_corners / _corners8_to_size_tform rely on
+                rot = item.obj_bbox3d.float() @ R.T
+                item.obj_bbox3d = _corners_canonical(rot.min(dim=0).values,
+                                                     rot.max(dim=0).values)
+            if item.cam_bbox3d is not None and item.cam_tform4x4_obj is not None \
+                    and item.obj_bbox3d is not None:
+                # camera-space, so unmoved by the rotation, but its corner order
+                # followed obj_bbox3d's — recompose through the rotated pose
                 R2, t2 = item.cam_tform4x4_obj[:3, :3], item.cam_tform4x4_obj[:3, 3]
                 item.cam_bbox3d = item.obj_bbox3d.float() @ R2.t() + t2
             if item.cam_tform4x4_obj is not None and item.obj_ncds0c_tform4x4_obj is not None:
-                item.cam_tform4x4_obj_ncds = (
-                    item.cam_tform4x4_obj @ inv_tform4x4(item.obj_ncds0c_tform4x4_obj)
-                )
+                item.cam_tform4x4_obj_ncds = item.cam_tform4x4_obj @ item.obj_ncds0c_tform4x4_obj
 
-        # Symmetry comes from UCO3D's orientation tree, which is stated in
-        # UCO3D's axes. With T applied the item is already in those axes; without
-        # it (an unmapped category, or a dataset with no orientation table) the
-        # code has to be rotated back into the item's own frame, or the pose
-        # metric would quotient out the wrong axis.
         if uco3d_cat is not None:
             from o3b.dataset.uco3d.obj_syms import obj_syms_for_category
 
@@ -436,11 +450,8 @@ class Od3dFrameDataset(ConfigurableDataset):
             except KeyError:
                 syms = None
             if syms is not None:
-                if T is None:
-                    T_back = self._obj_orient_tform(category)
-                    if T_back is not None:
-                        R_abs = inv_tform4x4(T_back)[:3, :3].abs()
-                        syms = (syms[..., None, :].float() * R_abs).sum(dim=-1).long()
+                if T_gl is not None:
+                    syms = (T_gl[:3, :3].abs() @ syms.float()).round().long()
                 item.obj_syms = syms
         return item
 
