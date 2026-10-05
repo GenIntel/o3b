@@ -686,7 +686,13 @@ if [ "${INSTALL_TRINITY}" = "true" ] || [ "${INSTALL_TRINITY}" = "True" ]; then
     # training, not a registration warning. It builds from source against this
     # torch and is slow (tens of minutes); best-effort, since the conv-only
     # stages run without it.
-    if ! MAX_JOBS="${MAX_JOBS:-4}" pip install --no-build-isolation flash-attn; then
+    #
+    # --no-cache-dir: flash-attn's setup.py downloads its prebuilt wheel into the
+    # build dir (under TMPDIR) and os.rename()s it into pip's wheel cache, which
+    # on the cluster is $HOME on another filesystem — EXDEV, "Invalid
+    # cross-device link", and the install fails after the download succeeded.
+    # Without the cache pip's wheel dir is under TMPDIR too.
+    if ! MAX_JOBS="${MAX_JOBS:-4}" pip install --no-cache-dir --no-build-isolation flash-attn; then
         echo "WARNING: flash-attn failed to build -- LitePT stages with enc_attn=True"
         echo "         will fail at forward time. Configure enc_attn all-False, or"
         echo "         install a wheel matching this torch/CUDA by hand."
