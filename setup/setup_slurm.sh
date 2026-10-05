@@ -692,7 +692,13 @@ if [ "${INSTALL_TRINITY}" = "true" ] || [ "${INSTALL_TRINITY}" = "True" ]; then
     # on the cluster is $HOME on another filesystem — EXDEV, "Invalid
     # cross-device link", and the install fails after the download succeeded.
     # Without the cache pip's wheel dir is under TMPDIR too.
-    if ! MAX_JOBS="${MAX_JOBS:-4}" pip install --no-cache-dir --no-build-isolation flash-attn; then
+    #
+    # Pinned to 2.7.4.post1: 2.8.3's prebuilt torch-2.6 "cxx11abiFALSE" wheel
+    # references new-ABI (std::__cxx11) c10 symbols, so it installs cleanly and
+    # then fails at import against the pip torch 2.6 (old ABI) with "undefined
+    # symbol: _ZN3c105ErrorC2ENS_14SourceLocation...". The pin also replaces a
+    # broken 2.8.3 already in an env.
+    if ! MAX_JOBS="${MAX_JOBS:-4}" pip install --no-cache-dir --no-build-isolation "flash-attn==2.7.4.post1"; then
         echo "WARNING: flash-attn failed to build -- LitePT stages with enc_attn=True"
         echo "         will fail at forward time. Configure enc_attn all-False, or"
         echo "         install a wheel matching this torch/CUDA by hand."
@@ -709,6 +715,11 @@ if [ "${INSTALL_TRINITY}" = "true" ] || [ "${INSTALL_TRINITY}" = "True" ]; then
     python -c "from o3b.model.litept.litept import LitePT" >/dev/null 2>&1 \
         && echo "--- LitePT imports OK ---" \
         || echo "WARNING: LitePT still does not import -- 'LitePT' will be an unknown model."
+    # flash_attn is imported inside LitePT's forward, so the check above passes
+    # with a broken build; load the compiled module itself.
+    python -c "import torch, flash_attn_2_cuda" >/dev/null 2>&1 \
+        && echo "--- flash-attn kernels load OK ---" \
+        || echo "WARNING: flash_attn_2_cuda does not load -- LitePT attention stages will crash at forward time."
 fi
 
 
