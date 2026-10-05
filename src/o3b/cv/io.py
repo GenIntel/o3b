@@ -267,6 +267,8 @@ def read_co3d_depth_image(path: Path):
 
 def read_depth_image(path: Path, factor=1000.):
     depth = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH)
+    if depth is None:  # unreadable / truncated file: cv2 returns None, no exception
+        return None
     depth = torch.from_numpy(depth / factor)[None,]
     return depth
 

@@ -685,6 +685,13 @@ class Od3dFrameDataset(ConfigurableDataset):
                 )
             if p is not None and p.exists():
                 d = read_depth_image(p, factor=float(meta.get("depth_scale", 1000.0)))
+                if d is None:
+                    # The file is there but does not decode (one truncated HANDAL
+                    # train PNG killed a whole shard build). Dropped like a frame
+                    # without rgb: a frame silently missing the depth every
+                    # other frame has would break collation downstream instead.
+                    logger.warning(f"unreadable depth {p}; frame dropped")
+                    return None
                 if d is not None:
                     depth = d[0] if d.dim() == 3 else d
                     # Depth is stored as uint16 millimetres, so anything past
