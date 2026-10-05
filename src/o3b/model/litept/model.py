@@ -106,7 +106,11 @@ class LitePT(OD3D_Model):
            or/and
            batch [N]: batch index of each point
         """
-        map_points2batch_id = torch.arange(len(frames_pred)).to(frames_pred.device)
+        # B and device from the point cloud the previous stage set, not from
+        # len(frames_pred) / frames_pred.device: those are od3d's OD3D_Frames API,
+        # which a plain frames bag (TrinityMethod's _Frames) does not have.
+        B = frames_pred.pts3d.shape[0]
+        map_points2batch_id = torch.arange(B, device=frames_pred.pts3d.device)
         map_points2batch_id = map_points2batch_id.unsqueeze(1).repeat(1, frames_pred.pts3d.shape[1]).view(-1)
 
 
@@ -123,7 +127,7 @@ class LitePT(OD3D_Model):
         # res.keys() # dict_keys(['feat', 'coord', 'grid_size', 'batch', 'offset', 'grid_coord', 'sparse_shape', 'sparse_conv_feat'])
         # feat_out = res # ["feat_out"]
 
-        B = len(frames_pred)
+        B = frames_pred.pts3d.shape[0]
 
         # if self.model.enc_mode:
 
