@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import urllib.request
 from pathlib import Path
 
@@ -64,9 +65,13 @@ class PartFieldModel(OD3D_Model):
                     pct = min(100, count * block_size * 100 // total_size)
                     logger.info("PartField: download %d%%", pct)
 
-            tmp = ckpt_path.with_suffix(".ckpt.part")
+            # per-process temp name: concurrent jobs (one per category) all
+            # download on first use, and with one shared .part file the first
+            # rename pulls it out from under the others. replace() is atomic,
+            # so the last finisher just overwrites an identical file.
+            tmp = ckpt_path.with_suffix(f".ckpt.part{os.getpid()}")
             urllib.request.urlretrieve(self.ckpt_url, tmp, reporthook=_reporthook)
-            tmp.rename(ckpt_path)
+            tmp.replace(ckpt_path)
         return ckpt_path
 
     def _build_modules(self, device: torch.device):

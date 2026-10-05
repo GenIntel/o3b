@@ -631,7 +631,8 @@ if [ "${INSTALL_PARTFIELD}" = "true" ] || [ "${INSTALL_PARTFIELD}" = "True" ]; t
     # subset vendored under o3b/model/partfield/. The Objaverse checkpoint is
     # downloaded at runtime by PartFieldModel (→ checkpoints/partfield/).
     echo "--- pip install partfield deps ---"
-    pip install einops
+    # yacs: the checkpoint pickles its config as a yacs CfgNode
+    pip install einops yacs
     # pre-built wheel matching the torch+cuda combo, e.g. torch-2.6.0+cu124
     pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html"
 fi
