@@ -375,6 +375,9 @@ def convert_mesh_to_mc(mesh: Mesh, res: int = 64) -> Mesh:
 
     min_v = V.min(axis=0)
     max_v = V.max(axis=0)
+    # The source mesh's own box, kept before the grid is padded: the converted
+    # mesh is projected back into it below.
+    box_lo, box_hi = min_v.copy(), max_v.copy()
     padding = 0.05 * (max_v - min_v)
     min_v -= padding
     max_v += padding
@@ -406,6 +409,29 @@ def convert_mesh_to_mc(mesh: Mesh, res: int = 64) -> Mesh:
 
 
     verts, faces, _ = igl.marching_cubes(SDF.reshape(-1), grid_points, res, res, res, 0.0)
+
+    # Project every vertex that left the source mesh's 3-D box back onto that
+    # box's surface (per-axis clamp), so the remesh never claims more extent
+    # than the object has. The grid is padded by 5% and MC interpolates between
+    # grid points, so without this a vertex can land a fraction of a voxel
+    # outside. Measured on PASCAL3D CAD models that overshoot is tiny (<= 1e-4
+    # of the extent); the larger effect is the opposite — MC falls *short* of
+    # the box by 1-5% per axis, up to 20% where a feature thinner than a voxel
+    # is lost — which a clamp cannot undo.
+    verts = np.clip(verts, box_lo, box_hi)
+
+    # ... and then stretch it, per axis, so it spans the box exactly. The clamp
+    # guarantees the remesh's box lies inside the source's; this maps the one
+    # onto the other, so obj_size3d / obj_bbox3d / the NCDS normalisation
+    # derived from the converted mesh match the source object instead of
+    # running 1-5% small (20% on PASCAL3D aeroplane/01 along Z, whose tail fin
+    # is thinner than a voxel and does not survive MC16). The price is a
+    # stretch of the same size on that axis; an axis with no extent is left
+    # alone rather than divided by zero.
+    mc_lo, mc_hi = verts.min(axis=0), verts.max(axis=0)
+    mc_ext, box_ext = mc_hi - mc_lo, box_hi - box_lo
+    scale = np.where(mc_ext > 1e-12, box_ext / np.maximum(mc_ext, 1e-12), 1.0)
+    verts = box_lo + (verts - mc_lo) * scale
     print(f"MC{res} mesh: {verts.shape[0]} vertices, {faces.shape[0]} faces")
 
     has_color = mesh.vert_colors is not None or (
