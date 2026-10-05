@@ -413,7 +413,8 @@ def build_sharded_dataset(records: list[dict]):
 
 
 def build_sharded_dataset_from_generator(gen_fn, writer_batch_size: int = 1000,
-                                         item_cls=None, probe: dict | None = None):
+                                         item_cls=None, probe: dict | None = None,
+                                         cache_dir: str | None = None):
     """Build a HuggingFace Dataset by streaming records from a generator.
 
     Processes ``writer_batch_size`` records at a time so peak memory is
@@ -444,6 +445,7 @@ def build_sharded_dataset_from_generator(gen_fn, writer_batch_size: int = 1000,
     _drop_zstd_cache()
     return HFDataset.from_generator(
         gen_fn, num_proc=1, writer_batch_size=writer_batch_size, features=features,
+        cache_dir=cache_dir,
     )
 
 
@@ -544,3 +546,122 @@ def read_mesh_sidecar(path):
 def decode_sidecar_mesh(mesh_sidecar, row: int):
     """Decode the Mesh stored at ``row`` of a mesh sidecar dataset."""
     return _decode(mesh_sidecar[int(row)]["mesh"])
+
+
+# ── chunked builds ────────────────────────────────────────────────────────────
+#
+# A cache too large for one job's walltime (Every9D train: ~1.77M items at
+# ~20 items/s) is built as k contiguous chunks by k parallel jobs
+# (`o3b dataset init --chunks k --chunk i`), then joined by one more
+# (`--chunks k --merge`). Each chunk is an ordinary save_to_disk directory.
+
+_CHUNKS_SUFFIX = ".chunks"
+
+
+def chunks_root(final_path) -> Path:
+    """Where the chunks of the cache at ``final_path`` are built."""
+    final_path = Path(final_path)
+    return final_path.with_name(final_path.name + _CHUNKS_SUFFIX)
+
+
+def chunk_dir(final_path, i: int, k: int) -> Path:
+    return chunks_root(final_path) / f"chunk_{i:03d}_of_{k:03d}"
+
+
+def chunk_is_complete(path) -> bool:
+    """A chunk counts as built once save_to_disk wrote its state.json."""
+    path = Path(path)
+    return (path / "state.json").is_file() and (path / "dataset_info.json").is_file()
+
+
+def _saved_dataset_meta(path: Path) -> tuple[dict, dict]:
+    import json
+    return (json.loads((path / "state.json").read_text()),
+            json.loads((path / "dataset_info.json").read_text()))
+
+
+def _join_saved_datasets(srcs: list, dst: Path) -> None:
+    """Make ``dst`` the concatenation of the save_to_disk directories ``srcs``.
+
+    Renames their Arrow files into ``dst`` in order and writes one state.json
+    listing them — load_from_disk reads a dataset as the concatenation of the
+    files state.json names. The sources must already be checked to share their
+    features (see merge_sharded_chunks); they are consumed.
+    """
+    import json
+    import uuid
+
+    metas = [_saved_dataset_meta(s) for s in srcs]
+    files = [(s, f["filename"]) for s, (state, _) in zip(srcs, metas)
+             for f in state["_data_files"]]
+    dst.mkdir(parents=True, exist_ok=True)
+    names = []
+    for j, (s, fname) in enumerate(files):
+        name = f"data-{j:05d}-of-{len(files):05d}.arrow"
+        os.rename(str(s / fname), str(dst / name))
+        names.append({"filename": name})
+    state = dict(metas[0][0])
+    state["_data_files"] = names
+    state["_fingerprint"] = uuid.uuid4().hex[:16]
+    (dst / "state.json").write_text(json.dumps(state, indent=2))
+    (dst / "dataset_info.json").write_text(json.dumps(metas[0][1], indent=2))
+
+
+def merge_sharded_chunks(final_path, k: int, override: bool = False) -> int:
+    """Join chunks 0..k-1 of ``final_path`` into the cache at ``final_path``.
+
+    Zero-copy: the chunks' Arrow files are *renamed* into the final directory,
+    in chunk order, under one state.json. Rewriting ~250 GB through
+    concatenate_datasets + save_to_disk would take hours on NFS; a rename is a
+    metadata operation. Requires every chunk to declare the same Arrow features,
+    which they do because each types its schema from the same probe (item 0 of
+    the whole dataset); a mismatch is refused, not papered over.
+
+    The mesh sidecars are joined the same way. An object whose frames straddle a
+    chunk boundary then has its mesh twice; read_mesh_sidecar maps object_id to
+    a row, so either copy (they are identical) serves.
+
+    Everything that can be checked is checked before the first rename; the
+    result is loaded and counted before it replaces the old cache, and the
+    chunks are deleted only after that. Returns the merged item count.
+    """
+    from datasets import load_from_disk
+
+    final_path = Path(final_path)
+    chunks = [chunk_dir(final_path, i, k) for i in range(k)]
+    missing = [str(c) for c in chunks if not chunk_is_complete(c)]
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)}/{k} chunk(s) are not built: {missing[:3]}"
+            f"{' …' if len(missing) > 3 else ''}"
+        )
+    if final_path.exists() and not override:
+        raise FileExistsError(f"{final_path} exists; pass override to replace it")
+
+    feats = [_saved_dataset_meta(c)[1].get("features") for c in chunks]
+    for c, f in zip(chunks[1:], feats[1:]):
+        if f != feats[0]:
+            raise ValueError(
+                f"{c} declares different Arrow features than {chunks[0]}; "
+                f"rebuild it (init --chunks {k} --chunk <i> --override)"
+            )
+    sides = [c / _MESH_SIDECAR_DIRNAME for c in chunks if (c / _MESH_SIDECAR_DIRNAME).is_dir()]
+    side_feats = [_saved_dataset_meta(s)[1].get("features") for s in sides]
+    if any(f != side_feats[0] for f in side_feats[1:]):
+        raise ValueError("the chunks' mesh sidecars declare different features")
+    n_expected = sum(len(load_from_disk(str(c))) for c in chunks)
+
+    tmp = final_path.with_name(final_path.name + ".merging")
+    _remove_dir(tmp)
+    _join_saved_datasets(chunks, tmp)
+    if sides:
+        _join_saved_datasets(sides, tmp / _MESH_SIDECAR_DIRNAME)
+
+    n_merged = len(load_from_disk(str(tmp)))
+    if n_merged != n_expected:
+        raise RuntimeError(f"merged {n_merged} items but the chunks held {n_expected}; "
+                           f"the partial merge is at {tmp}")
+    _remove_dir(final_path)
+    os.rename(str(tmp), str(final_path))
+    _remove_dir(chunks_root(final_path))
+    return n_merged

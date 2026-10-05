@@ -1,7 +1,12 @@
 # every9d_v7_train_max5_sharded — every9d_v7_train_max5 materialised into ONE Arrow cache over every category.
 #
 #   o3b dataset index -d every9d_v7 -p slurm_lmbl40 --remote   # once, if absent
-#   o3b dataset init  -d every9d_v7_train_max5_sharded -p slurm_lmbl40_cpu16 --remote
+#   o3b dataset init  -d every9d_v7_train_max5_sharded -p slurm_lmbl40 --remote --chunks 10
+#
+# --chunks: ~1.77M items at ~20 items/s is ~25 h, over the partition's 24 h
+# walltime, and more workers per job do not help (16 ran at 19 items/s against
+# 22-25 on 8). Ten parallel jobs build ~177k items each (~2.5 h), and a merge job
+# that waits on all of them (afterok) joins them into the one cache below.
 #
 # Whole-dataset rather than per-category: o3b resolves one sharded_name per
 # config, so a per-category cache cannot be read back as a dataset, and training
@@ -52,9 +57,7 @@ extra:
   frames_count_max_per_sequence: 16
 
 sharded_shard_size: 500
-# 16, and build it on -p slurm_lmbl40_cpu16: ~1.77M items at ~25 items/s on 8
-# workers is ~20 h, too close to the partition's 24 h walltime.
-sharded_num_workers: 16
+sharded_num_workers: 8
 
 sharded_transform:
   class_name: CropCamBBox2D

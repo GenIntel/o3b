@@ -120,6 +120,12 @@ class DatasetConfig:
     # worker processes used to load+encode items while building the shards
     # (0 = build sequentially in the main process)
     sharded_num_workers: int                = 0
+    # Chunked build (set by `o3b dataset init --chunks N --chunk I`, never from
+    # YAML): build only the I-th of N contiguous slices of the item list into
+    # sharded/<sharded_name>.chunks/, for `init --chunks N --merge` to join.
+    # How a cache too large for one job's walltime is built by parallel jobs.
+    sharded_chunk:     Optional[int]        = None
+    sharded_chunks:    Optional[int]        = None
 
     # HuggingFace Hub repo holding this config's sharded cache.  All hc3d configs
     # share one repo ("GenIntelLab/HouseCorr3D") and become separate *subsets*
@@ -454,11 +460,10 @@ class ConfigurableDataset(_TorchDataset):
 
     def _setup_sharded(self) -> None:
         """Load the sharded dataset, building it from raw items if necessary."""
-        from o3b.dataset.sharding import (
-            build_sharded_dataset_from_generator, drop_reason, iter_records,
-            read_sharded_dataset, write_sharded_dataset,
-            read_mesh_sidecar, strip_mesh_from_record, write_mesh_sidecar,
-        )
+        from o3b.dataset.sharding import read_mesh_sidecar, read_sharded_dataset
+
+        if self.cfg.sharded_chunk is not None:
+            return self._setup_sharded_chunk()
 
         path = self._sharded_dir()
         if path is not None and path.exists() and not self.cfg.sharded_override:
@@ -483,23 +488,77 @@ class ConfigurableDataset(_TorchDataset):
                 "load it from the hub instead)."
             )
 
+        n = len(self)
+        self._build_sharded_into(path, 0, n)
+        self._sharded = read_sharded_dataset(path)
+        self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
+        print(f"Done. Wrote {len(self._sharded)} items → {path}")
+
+    def _setup_sharded_chunk(self) -> None:
+        """Build (or reuse) chunk ``sharded_chunk`` of ``sharded_chunks``.
+
+        The chunk is items ``[n*i//k, n*(i+1)//k)`` of the same item list the
+        whole-dataset build would walk, so ``merge_sharded_chunks`` concatenating
+        chunks 0..k-1 in order reproduces that build item for item. A chunk that
+        is already complete is reused, so re-running the failed chunks of a
+        partial run rebuilds only those.
+        """
+        from o3b.dataset.sharding import (
+            chunk_dir, chunk_is_complete, read_mesh_sidecar, read_sharded_dataset,
+        )
+
+        final = self._sharded_dir()
+        if final is None:
+            raise ValueError("a chunked build needs path_preprocess")
+        i, k = int(self.cfg.sharded_chunk), int(self.cfg.sharded_chunks or 0)
+        if not 0 <= i < k:
+            raise ValueError(f"sharded_chunk={i} is not in [0, sharded_chunks={k})")
+        path = chunk_dir(final, i, k)
+        if chunk_is_complete(path) and not self.cfg.sharded_override:
+            print(f"Chunk {i}/{k} already built at {path}; reusing it")
+        else:
+            n = len(self)
+            lo, hi = n * i // k, n * (i + 1) // k
+            print(f"Chunk {i}/{k}: items [{lo}, {hi}) of {n}")
+            self._build_sharded_into(path, lo, hi)
+        self._sharded = read_sharded_dataset(path)
+        self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
+        print(f"Done. Chunk {i}/{k} holds {len(self._sharded)} items → {path}")
+
+    def _load_sharded_item_at(self, offset: int, idx: int):
+        return self._load_sharded_item(offset + idx)
+
+    def _sharded_drop_reason_at(self, offset: int, idx: int) -> str:
+        return self._sharded_drop_reason(offset + idx)
+
+    def _build_sharded_into(self, path: Path, lo: int, hi: int) -> None:
+        """Encode items ``[lo, hi)`` and save them as a sharded cache at ``path``."""
+        import functools
+        import shutil
+        from collections import Counter
+
         from tqdm import tqdm
 
+        from o3b.dataset.sharding import (
+            build_sharded_dataset_from_generator, drop_reason, iter_records,
+            write_sharded_dataset, strip_mesh_from_record, write_mesh_sidecar,
+        )
+
         action = "Overriding" if path.exists() else "Building"
-        n = len(self)
+        n = hi - lo
         num_workers = self.cfg.sharded_num_workers
         workers_note = f", {num_workers} workers" if num_workers > 0 else ""
         print(f"{action} sharded dataset at {path} ({n} items{workers_note})…")
 
         pbar = tqdm(total=n, desc="Sharding", unit="item")
         meshes: dict = {}   # object_id → encoded mesh, deduplicated across frames
-        from collections import Counter
         drops: Counter = Counter()   # drop reason → count (why n_out < n)
+        load_fn = functools.partial(self._load_sharded_item_at, lo)
+        reason_fn = functools.partial(self._sharded_drop_reason_at, lo)
 
         def _gen():
-            for record in iter_records(self._load_sharded_item, n,
-                                       num_workers=num_workers,
-                                       reason_fn=self._sharded_drop_reason):
+            for record in iter_records(load_fn, n, num_workers=num_workers,
+                                       reason_fn=reason_fn):
                 pbar.update(1)
                 reason = drop_reason(record)
                 if reason is not None:
@@ -507,9 +566,21 @@ class ConfigurableDataset(_TorchDataset):
                     continue
                 yield strip_mesh_from_record(record, meshes)
 
+        # A private HF cache next to the output, deleted once the shards are
+        # written. The shared ~/.cache-style generator dir kept a full copy of
+        # every cache ever built (77 GB at one point), and since its key is the
+        # config rather than the code, a rebuild after a loader fix could be
+        # served the old records. Private per path, parallel chunk builds also
+        # cannot share a builder directory.
+        hf_cache = path.with_name(path.name + ".hf_cache")
+        shutil.rmtree(hf_cache, ignore_errors=True)
+        # The schema probe is always item 0 of the whole dataset, never this
+        # range's first item: every chunk then declares the same Arrow features,
+        # which is what lets merge_sharded_chunks join them without a rewrite.
         hf = build_sharded_dataset_from_generator(
             _gen, writer_batch_size=self.cfg.sharded_shard_size,
-            item_cls=self._item_type_cls(), probe=self._sharded_schema_probe(n),
+            item_cls=self._item_type_cls(), probe=self._sharded_schema_probe(len(self)),
+            cache_dir=str(hf_cache),
         )
         pbar.close()
         if drops:
@@ -519,9 +590,8 @@ class ConfigurableDataset(_TorchDataset):
         write_sharded_dataset(hf, path, shard_size=self.cfg.sharded_shard_size)
         if meshes:
             write_mesh_sidecar(meshes, path)
-        self._sharded = read_sharded_dataset(path)
-        self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
-        print(f"Done. Wrote {len(self._sharded)} items → {path}")
+        del hf
+        shutil.rmtree(hf_cache, ignore_errors=True)
 
     def _sharded_schema_probe(self, n: int, max_tries: int = 32):
         """One encoded record, used to type the shards' scalar columns.

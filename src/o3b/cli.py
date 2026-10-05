@@ -110,6 +110,21 @@ def _build_dataset_parser(sub):
              "instead of initialising locally",
     )
     p_init.add_argument(
+        "--chunks", type=int, default=None, metavar="K",
+        help="Build the sharded cache as K contiguous chunks, then merge them. With "
+             "--remote: K parallel sbatch jobs plus a merge job that starts once all "
+             "of them succeeded (afterok). Locally: the chunks one after another. For "
+             "caches too large for one job's walltime",
+    )
+    p_init.add_argument(
+        "--chunk", type=int, default=None, metavar="I",
+        help="With --chunks K: build only chunk I (0-based), reusing it if already built",
+    )
+    p_init.add_argument(
+        "--merge", action="store_true",
+        help="With --chunks K: only merge the K built chunks into the sharded cache",
+    )
+    p_init.add_argument(
         "-a", "--ablation", default=None, metavar="ABLATIONS",
         help="Comma-separated ablations, each a fragment of extra `o3b dataset init` "
              'arguments (e.g. -a "-c backpack,-c book"). One run is started per '
@@ -571,6 +586,16 @@ def _run_dataset_remote(args) -> None:
         parts += ["--limit", str(args.limit)]
     if command in ("init", "hf-upload") and getattr(args, "override", False):
         parts.append("--override")
+    chunks = getattr(args, "chunks", None) if command == "init" else None
+    if chunks:
+        parts += ["--chunks", str(chunks)]
+        if getattr(args, "chunk", None) is not None:
+            parts += ["--chunk", str(args.chunk)]
+        elif getattr(args, "merge", False):
+            parts.append("--merge")
+        else:
+            _run_dataset_init_chunks_remote(args, parts, chunks)
+            return
     if command == "hf-upload":
         if getattr(args, "public", False):
             parts.append("--public")
@@ -582,6 +607,35 @@ def _run_dataset_remote(args) -> None:
     if cats := _parse_categories(getattr(args, "categories", None)):
         job_name += f"_c{'_'.join(cats)}"  # keep per-ablation jobs distinguishable
     _run_platform_run_cmd(args.platform, remote_cmd, job_name=job_name)
+
+
+def _run_dataset_init_chunks_remote(args, parts: list, chunks: int) -> None:
+    """Submit one sbatch job per chunk, then a merge job gated on all of them.
+
+    The merge depends on ``afterok`` of every chunk job, so it starts only once
+    all succeeded; if one fails it stays pending (DependencyNeverSatisfied) and
+    the remedy is to resubmit that chunk and then the merge — completed chunks
+    are reused, never rebuilt.
+    """
+    import shlex
+
+    stem = args.config.stem
+    ids = []
+    for i in range(chunks):
+        cmd = " ".join(shlex.quote(p) for p in parts + ["--chunk", str(i)])
+        jid = _run_platform_run_cmd(args.platform, cmd,
+                                    job_name=f"init_{stem}_chunk{i:03d}of{chunks:03d}")
+        if jid is None:
+            raise SystemExit(f"could not read the job id of chunk {i}; not submitting the merge")
+        ids.append(jid)
+    cmd = " ".join(shlex.quote(p) for p in parts + ["--merge"])
+    merge_id = _run_platform_run_cmd(args.platform, cmd, job_name=f"init_{stem}_merge",
+                                     sbatch_args=f"--dependency=afterok:{':'.join(ids)}")
+    print(f"\n{chunks} chunk job(s): {', '.join(ids)}")
+    print(f"merge job {merge_id} starts after all of them succeed (afterok). If a chunk "
+          f"fails, the merge stays pending: scancel it, resubmit the chunk with "
+          f"`o3b dataset init -d {stem} -p {args.platform} --remote --chunks {chunks} "
+          f"--chunk <i>`, then the merge with `... --chunks {chunks} --merge`.")
 
 
 def _viz_remote_command(args, remote_port: int) -> str:
@@ -693,6 +747,37 @@ def _run_dataset_viz_remote(args) -> None:
         subprocess.run(["ssh", ssh_host, f"rm -f {remote_init}"], check=False)
 
 
+def _run_dataset_init(cls, cfg, args) -> None:
+    """`o3b dataset init`, including the chunked build (--chunks/--chunk/--merge)."""
+    from copy import copy
+
+    k = getattr(args, "chunks", None)
+    chunk, merge = getattr(args, "chunk", None), getattr(args, "merge", False)
+    if not k:
+        if chunk is not None or merge:
+            raise SystemExit("--chunk / --merge need --chunks K")
+        cls.init(cfg, limit=args.limit, override=args.override)
+        return
+    if not cfg.sharded_name:
+        raise SystemExit(f"--chunks needs a sharded config; {args.config.stem} has no sharded_name")
+    if chunk is not None and not 0 <= chunk < k:
+        raise SystemExit(f"--chunk {chunk} is not in [0, {k})")
+
+    if not merge:
+        for i in ([chunk] if chunk is not None else range(k)):
+            c = copy(cfg)
+            c.sharded_chunk, c.sharded_chunks = i, k
+            cls.init(c, override=args.override)
+        if chunk is not None:
+            return
+
+    from o3b.dataset.sharding import merge_sharded_chunks
+    final = Path(cfg.path_preprocess) / "sharded" / cfg.sharded_name
+    n = merge_sharded_chunks(final, k, override=args.override)
+    print(f"Merged {k} chunks → {final} ({n} items)")
+    cls.init(cfg, limit=args.limit)   # loads the merged cache back as a check
+
+
 def _run_dataset(args, parser=None, argv=None):
     if getattr(args, "ablation", None):
         _run_dataset_ablations(args, parser, argv)
@@ -750,7 +835,7 @@ def _run_dataset(args, parser=None, argv=None):
     elif args.dataset_command == "index":
         cls.index(cfg, db=args.db, remove=args.remove, max_index=getattr(args, "max_index", None))
     elif args.dataset_command == "init":
-        cls.init(cfg, limit=args.limit, override=args.override)
+        _run_dataset_init(cls, cfg, args)
     elif args.dataset_command == "viz-cat":
         from o3b.dataset.viz_category import run_category_sheet
         run_category_sheet(
@@ -2548,7 +2633,8 @@ def _run_platform_setupi(args):
     subprocess.run(["ssh", "-t", ssh_host, srun])
 
 
-def _run_platform_run_cmd(platform: str, command: str, job_name: str | None = None) -> None:
+def _run_platform_run_cmd(platform: str, command: str, job_name: str | None = None,
+                          sbatch_args: str = "") -> str | None:
     """Submit *command* as a queued sbatch job on the platform and return once submitted.
 
     Uses sbatch (not srun) so the job is queued independently of this process —
@@ -2559,7 +2645,7 @@ def _run_platform_run_cmd(platform: str, command: str, job_name: str | None = No
 
     if job_name is None:
         job_name = re.sub(r"[^A-Za-z0-9_.\-]+", "_", command).strip("_")[:60] or "o3b_run"
-    _run_bench_sbatch_cmd(platform, command, job_name)
+    return _run_bench_sbatch_cmd(platform, command, job_name, sbatch_args=sbatch_args)
 
 
 def _run_platform_run(args):
@@ -4187,7 +4273,8 @@ def _run_bench_run(args) -> None:
 
 def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
                           deps_override: list | None = None,
-                          platform_override: dict | None = None) -> None:
+                          platform_override: dict | None = None,
+                          sbatch_args: str = "") -> str | None:
     """Upload a run script + sbatch wrapper and submit via sbatch.
 
     ``platform_override`` is the ``platform:`` block collected from the run's
@@ -4363,9 +4450,19 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
         input=sbatch_script, text=True, check=True,
     )
 
-    remote_submit = f"mkdir -p {path_home}/slurm_jobs && sbatch {remote_sbatch}"
+    # sbatch_args go on the command line, ahead of the script, so they win over
+    # its #SBATCH header — e.g. --dependency=afterok:<ids> for a chunked build's
+    # merge job.
+    remote_submit = (f"mkdir -p {path_home}/slurm_jobs && "
+                     f"sbatch {sbatch_args + ' ' if sbatch_args else ''}{remote_sbatch}")
     print(f"Submitting sbatch job '{job_name}' on {ssh_host}…")
-    subprocess.run(["ssh", ssh_host, remote_submit], check=True)
+    res = subprocess.run(["ssh", ssh_host, remote_submit], check=True,
+                         capture_output=True, text=True)
+    print(res.stdout.strip())
+    if res.stderr.strip():
+        print(res.stderr.strip())
+    m = re.search(r"Submitted batch job (\d+)", res.stdout)
+    return m.group(1) if m else None
 
 
 def _get_existing_jobs_on_platform(platform: str, hours: float = 24.0) -> set[str]:
