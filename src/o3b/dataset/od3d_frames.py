@@ -511,15 +511,17 @@ class Od3dFrameDataset(ConfigurableDataset):
                                       frame_id=r["frame_id"])]
         per_seq = (self.cfg.extra or {}).get("frames_count_max_per_sequence")
         if per_seq:
-            seen: dict = {}
-            kept = []
+            # EVENLY SPACED across the sequence, as od3d's
+            # get_subset_frames_names_uniform and UCO3D's _subsample both do.
+            # Keeping the first N instead gives N neighbouring frames of a video
+            # — for HANDAL the first 16 of ~130, nearly one viewpoint repeated.
+            # (A flat dataset's sequence is a single frame, so this is a no-op
+            # for PASCAL3D and ImageNet3D.)
+            from o3b.dataset.uco3d.dataset import _subsample
+            groups: dict = {}
             for r in rows:
-                key = (r["category"], r["sequence"])
-                if seen.get(key, 0) >= per_seq:
-                    continue
-                seen[key] = seen.get(key, 0) + 1
-                kept.append(r)
-            rows = kept
+                groups.setdefault((r["category"], r["sequence"]), []).append(r)
+            rows = [r for g in groups.values() for r in _subsample(g, per_seq)]
         if self.cfg.filter_count_max:
             if self.cfg.categories:
                 # per category, so a rare one is not starved by a common one

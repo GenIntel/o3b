@@ -1,0 +1,49 @@
+# omni6dpose_sope_train_sharded — omni6dpose_sope_train materialised into ONE Arrow cache over every category.
+#
+#   o3b dataset index -d omni6dpose_sope_train -p slurm_lmbl40 --remote   # frames.db (shared, see below)
+#   o3b dataset init  -d omni6dpose_sope_train_sharded -p slurm_lmbl40 --remote
+#
+# The three Omni6DPose configs share one frames.db. SQLite takes ONE writer:
+# never index them in parallel — doing so corrupted that file once already.
+#
+# Thinned to 16 evenly spaced frames per object track (scene x object) by
+# extra.frames_count_max_per_sequence, inherited from omni6dpose_sope_train; is_valid=0 frames
+# are dropped by the loader before that (0% of ROPE, ~24% of SOPE).
+#
+# MUST run on a compute node: fo_mask_amodal is rasterised at build time.
+
+defaults:
+  - omni6dpose_sope_train
+  - _self_
+
+img_size: 256
+
+modalities:
+  - rgb
+  - depth
+  - depth_mask
+  - fo_mask
+  - fo_mask_amodal
+  - cam_intr4x4
+  - cam_tform4x4_obj
+  - cam_tform4x4_obj_ncds
+  - cam_bbox2d
+  - cam_bbox3d
+  - obj_syms
+  - category
+  - mesh
+
+sharded_shard_size: 500
+sharded_num_workers: 8
+
+sharded_transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}
+  W: ${img_size}
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+transform:
+
+sharded_name: omni6dpose_sope_train_r${img_size}_all
+sharded_override: false

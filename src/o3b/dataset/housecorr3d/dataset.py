@@ -329,19 +329,25 @@ class HouseCorr3D(ConfigurableDataset):
                 # compose with it above.
                 per_seq = (self.cfg.extra or {}).get("frames_count_max_per_sequence")
                 if per_seq and self.cfg.item_type == ItemType.FRAME_OBJECT:
+                    # A "sequence" is one object instance's track through one
+                    # scene — (scene_name, object_id) — so every object of a
+                    # multi-object ROPE/SOPE scene keeps its own N views, and the
+                    # N are spaced EVENLY over its frames (od3d's
+                    # get_subset_frames_names_uniform, UCO3D's _subsample).
+                    # Grouping by scene alone and keeping the first rows would
+                    # take the opening ~3 frames of the video for all of its
+                    # objects at once.
+                    from o3b.dataset.uco3d.dataset import _subsample
                     n_before = len(self._frame_rows_id)
-                    seen: dict = {}
-                    kept = []
+                    groups: dict = {}
                     for rid in self._frame_rows_id:
-                        key = self._frame_rows[rid].get("scene_name")
-                        if seen.get(key, 0) >= per_seq:
-                            continue
-                        seen[key] = seen.get(key, 0) + 1
-                        kept.append(rid)
-                    self._frame_rows_id = kept
+                        r = self._frame_rows[rid]
+                        groups.setdefault((r.get("scene_name"), r.get("object_id")), []).append(rid)
+                    self._frame_rows_id = [rid for g in groups.values()
+                                           for rid in _subsample(g, per_seq)]
                     print(f"frames_count_max_per_sequence={per_seq}: kept "
-                          f"{len(kept)} / {n_before} frame rows "
-                          f"over {len(seen)} scenes")
+                          f"{len(self._frame_rows_id)} / {n_before} frame rows "
+                          f"over {len(groups)} object tracks")
 
                 # Either filter moved the cap out of SQL, so spend it here on what
                 # they left; pairs cap their own count in _build_frame_pairs.
