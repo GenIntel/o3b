@@ -543,6 +543,9 @@ fi
 
 if [ "${INSTALL_DENSEMATCHER}" = "true" ] || [ "${INSTALL_DENSEMATCHER}" = "True" ]; then
   # pip install --no-cache-dir xformers  # requires torch 2.10 not required
+  echo "--- pip install densematcher deps ---"
+  # densematcher/render.py renders through pytorch3d
+  _install_pytorch3d_checked
   pip install --no-cache-dir robust-laplacian
   pip install --no-cache-dir potpourri3d
   pip install diffusers[torch]==0.27.2
@@ -749,7 +752,11 @@ fi
 # densematcher numpy<2 pin, …) can shift numpy afterwards. The crsp3d task
 # imports gdist in every env, so a stale one fails the deps-less env too with
 # "numpy.dtype size changed, may indicate binary incompatibility".
+# --no-deps / --no-build-isolation: compile against the numpy already here and
+# leave it alone -- with deps, --force-reinstall pulls the newest numpy and
+# undoes a dep set's own pin (densematcher's numpy<2).
 echo "--- pip install gdist (from source, against the final numpy) ---"
-pip install --no-binary gdist gdist --force-reinstall --no-cache-dir
+pip install cython
+pip install --no-binary gdist gdist --force-reinstall --no-cache-dir --no-deps --no-build-isolation
 
 echo "=== setup complete ==="
