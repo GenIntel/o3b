@@ -348,15 +348,18 @@ def plotly_fig_2_tensor(fig, width=None, height=None):
 
 
 _offscreen_renderers: dict = {}
-# Bounded, because each entry holds an EGL context + framebuffer that pyrender
-# only frees on .delete(). Unbounded it is a GPU resource leak keyed by image
-# size: a dataset of fixed-size frames creates one renderer, but one of
-# arbitrarily-sized photographs creates a renderer per distinct (W, H) — and
-# building one costs ~135 ms against ~4 ms to render. Baking fo_mask_amodal
-# over ImageNet3D (40,527 photos, sizes all different) drove the shard build to
-# 3.74 s/item, degrading as the cache grew, while fixed-size HANDAL and
-# Objectron built at 20-100 item/s.
-_OFFSCREEN_RENDERER_MAX = 8
+# ONE renderer per process, resized per call (pyrender rebuilds the framebuffer
+# when viewport_width/height change), rather than one per image size.
+#
+# Keyed by size it was a GPU resource leak: a dataset of arbitrarily-sized
+# photographs (ImageNet3D, 40,527 of them) built a renderer — EGL context plus
+# framebuffer, ~135 ms each — for every distinct (W, H) and never freed one, and
+# shard builds ran at 3.74 s/item. Bounding that cache and calling .delete() on
+# eviction was worse: pyrender's delete_context calls eglTerminate on the
+# process's SHARED display, which invalidates every other cached renderer, so
+# each eviction made the survivors fail eglMakeCurrent with EGL_BAD_CONTEXT —
+# ~10% of fo_mask_amodal renders lost on PASCAL3D and ImageNet3D builds.
+# Fixed-size datasets never evicted and never saw either problem.
 # The cached renderer's GL context may only be current in one thread at a time,
 # and pyrender never hands it back (EGLPlatform.make_uncurrent is a no-op stub),
 # so a second thread's eglMakeCurrent fails with EGL_BAD_ACCESS on drivers that
@@ -395,12 +398,13 @@ def offscreen_renderer(width: int, height: int):
 
 
 def _offscreen_renderer(width: int, height: int):
-    """pyrender OffscreenRenderer for this size, created once per process.
+    """The process's pyrender OffscreenRenderer, resized to (width, height).
 
     Building one costs ~135 ms (EGL context + framebuffer setup) against ~4 ms
     for the render itself, so a per-call renderer dominates any loop over
     frames — e.g. baking fo_mask_amodal over a dataset. pyrender takes the
-    scene at render time, so one renderer serves every scene of that size.
+    scene at render time and rebuilds its framebuffer when the viewport size
+    changes, so one renderer serves every scene of every size.
 
     Keyed by pid as well: a DataLoader worker forked after the parent rendered
     would otherwise inherit the parent's GL context, which is not valid in the
@@ -408,22 +412,16 @@ def _offscreen_renderer(width: int, height: int):
     """
     import pyrender
 
-    key = (os.getpid(), int(width), int(height))
+    key = os.getpid()
     if key not in _offscreen_renderers:
         if "DISPLAY" not in os.environ:
             os.environ["PYOPENGL_PLATFORM"] = "egl"
-        # Evict oldest first, and actually delete it: dropping the reference
-        # alone leaves the context alive until pyrender is garbage-collected,
-        # which is what makes this a leak rather than a cache.
-        while len(_offscreen_renderers) >= _OFFSCREEN_RENDERER_MAX:
-            oldest_key = next(iter(_offscreen_renderers))
-            old = _offscreen_renderers.pop(oldest_key)
-            try:
-                old.delete()
-            except Exception:                 # a dead context must not stop us
-                pass
-        _offscreen_renderers[key] = pyrender.OffscreenRenderer(*key[1:])
-    return _offscreen_renderers[key]
+        _offscreen_renderers[key] = pyrender.OffscreenRenderer(int(width), int(height))
+    renderer = _offscreen_renderers[key]
+    if renderer.viewport_width != int(width) or renderer.viewport_height != int(height):
+        renderer.viewport_width = int(width)
+        renderer.viewport_height = int(height)
+    return renderer
 
 
 def render_trimesh_to_tensor(
