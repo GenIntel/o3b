@@ -1337,6 +1337,10 @@ class HouseCorr3D(ConfigurableDataset):
             cam_bbox2d              = cam_bbox2d,
             cam_bbox3d              = cam_bbox3d,
             obj_bbox3d              = (obj.obj_bbox3d if (obj is not None and _want("obj_bbox3d", mods)) else None),
+            # The object's metric side lengths, in the same canonical frame as the
+            # pose and mesh. Frame items used to drop it, so a pose task had no GT
+            # size and Omni6DPose's 3-D IoU could not be computed at all.
+            obj_size3d              = (obj.obj_size3d if (obj is not None and _want("obj_size3d", mods)) else None),
             mesh                    = obj.mesh if obj is not None else None,
             obj_ncds0c_tform4x4_obj = tform if _want("obj_ncds0c_tform4x4_obj", mods) else None,
             obj_size_ncds           = obj_size_ncds,
