@@ -544,8 +544,10 @@ fi
 if [ "${INSTALL_DENSEMATCHER}" = "true" ] || [ "${INSTALL_DENSEMATCHER}" = "True" ]; then
   # pip install --no-cache-dir xformers  # requires torch 2.10 not required
   echo "--- pip install densematcher deps ---"
-  # densematcher/render.py renders through pytorch3d
+  # densematcher/render.py renders through pytorch3d; densematcher/utils.py
+  # imports meshplot (before the numpy<2 pin below, so it cannot move numpy)
   _install_pytorch3d_checked
+  pip install git+https://github.com/skoch9/meshplot.git pythreejs
   pip install --no-cache-dir robust-laplacian
   pip install --no-cache-dir potpourri3d
   pip install diffusers[torch]==0.27.2
