@@ -902,23 +902,31 @@ class Od3dFrameDataset(ConfigurableDataset):
                     converted = (self.path_preprocess / "mesh" / mesh_type
                                  / f"{flat}.glb")
                     converted.parent.mkdir(parents=True, exist_ok=True)
+                    from o3b.data.datatypes.mesh import _file_lock
+
+                    # Converted under the same per-mesh lock load_or_convert
+                    # uses: shard builds run several workers and many frames
+                    # share one CAD model, so unlocked they convert the same
+                    # mesh in parallel and write the same .glb concurrently.
                     m = Mesh._try_load(converted)
                     if m is None:
-                        # Not Mesh.load_or_convert: that loads the source through
-                        # Mesh.load, which cannot read PASCAL3D's and ImageNet3D's
-                        # CAD .off files. trimesh can, so the source is read here
-                        # and only the *conversion* is delegated.
-                        import trimesh
-                        raw = trimesh.load(path, process=False)
-                        src = Mesh(
-                            verts=torch.tensor(raw.vertices, dtype=torch.float32),
-                            faces=torch.tensor(raw.faces, dtype=torch.int64),
-                        )
-                        m = convert_mesh(mesh_type, src)
-                        try:
-                            m.save(converted)
-                        except Exception as e:      # a read-only cache dir is survivable
-                            logger.warning(f"could not cache {converted}: {e}")
+                        with _file_lock(converted.with_name(converted.name + ".lock")):
+                            m = Mesh._try_load(converted)   # another worker may have won
+                            if m is None:
+                                # Not Mesh.load_or_convert: that reads the source
+                                # through Mesh.load, which cannot open the CAD
+                                # .off files of PASCAL3D and ImageNet3D. trimesh
+                                # can, so only the conversion is delegated.
+                                import trimesh
+                                raw = trimesh.load(path, process=False)
+                                m = convert_mesh(mesh_type, Mesh(
+                                    verts=torch.tensor(raw.vertices, dtype=torch.float32),
+                                    faces=torch.tensor(raw.faces, dtype=torch.int64),
+                                ))
+                                try:
+                                    m.save(converted)
+                                except Exception as e:  # read-only cache dir is survivable
+                                    logger.warning(f"could not cache {converted}: {e}")
                     verts = m.verts.float()
                     faces = m.faces.long() if m.faces is not None else None
                 else:
