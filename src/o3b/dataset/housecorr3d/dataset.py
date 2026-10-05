@@ -1338,6 +1338,30 @@ class HouseCorr3D(ConfigurableDataset):
                 row, obj, cam_tform4x4_obj_metric, tform, rgb=rgb, mask=mask,
             )
 
+        # ── mesh units → metres in the object frame the item hands out ────────
+        # Up to here the object frame is the mesh's own units and obj_scale rides
+        # in the pose's rotation block. That is invisible on ROPE (meshes already
+        # in metres, obj_scale ≈ 1) but on SOPE (millimetres, ≈ 1e-3) it left
+        # cam_tform4x4_obj a similarity and obj_size3d / obj_bbox3d 1000× too
+        # large next to a cam_bbox3d in metres — a pose task's size error and 3-D
+        # IoU compare against those. Moving S = obj_scale·I from the pose onto the
+        # object side makes the pose rigid and object space metric, while
+        # cam_tform4x4_obj_ncds (= pose @ obj_ncds0c), cam_bbox3d and the
+        # NCDS-space mesh and keypoints are unchanged.
+        obj_bbox3d_out = obj.obj_bbox3d if obj is not None else None
+        obj_size3d_out = obj.obj_size3d if obj is not None else None
+        tform_out      = tform
+        if obj_scale and obj_scale != 1.0:
+            s = float(obj_scale)
+            if cam_tform4x4_obj is not None:
+                cam_tform4x4_obj = cam_tform4x4_obj.clone()
+                cam_tform4x4_obj[:3, :3] = cam_tform4x4_obj[:3, :3] / s
+            if tform_out is not None:
+                tform_out = tform_out.float().clone()
+                tform_out[:3, :] = tform_out[:3, :] * s
+            obj_bbox3d_out = obj_bbox3d_out * s if obj_bbox3d_out is not None else None
+            obj_size3d_out = obj_size3d_out * s if obj_size3d_out is not None else None
+
         return FrameObject(
             frame_id                = row.get("frame_id", ""),
             frame_object_id         = row.get("frame_id", ""),
@@ -1354,13 +1378,13 @@ class HouseCorr3D(ConfigurableDataset):
             cam_tform4x4_obj_ncds   = cam_tform4x4_obj_ncds,
             cam_bbox2d              = cam_bbox2d,
             cam_bbox3d              = cam_bbox3d,
-            obj_bbox3d              = (obj.obj_bbox3d if (obj is not None and _want("obj_bbox3d", mods)) else None),
+            obj_bbox3d              = (obj_bbox3d_out if _want("obj_bbox3d", mods) else None),
             # The object's metric side lengths, in the same canonical frame as the
             # pose and mesh. Frame items used to drop it, so a pose task had no GT
             # size and Omni6DPose's 3-D IoU could not be computed at all.
-            obj_size3d              = (obj.obj_size3d if (obj is not None and _want("obj_size3d", mods)) else None),
+            obj_size3d              = (obj_size3d_out if _want("obj_size3d", mods) else None),
             mesh                    = obj.mesh if obj is not None else None,
-            obj_ncds0c_tform4x4_obj = tform if _want("obj_ncds0c_tform4x4_obj", mods) else None,
+            obj_ncds0c_tform4x4_obj = tform_out if _want("obj_ncds0c_tform4x4_obj", mods) else None,
             obj_size_ncds           = obj_size_ncds,
             obj_size                = obj_size,
             obj_kpts3d              = (obj.obj_kpts3d      if (obj is not None and _want("obj_kpts3d", mods)) else None),
