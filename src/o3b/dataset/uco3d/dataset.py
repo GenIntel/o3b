@@ -220,7 +220,20 @@ class UCO3D(ConfigurableDataset):
             # shrink the dataset, so fall back to the walk unless it covers all
             # of them.  With no `categories` set that means every category on
             # disk — one directory listing to check.
-            wanted = set(cats) if cats is not None else set(self._iter_categories())
+            #
+            # Except under a subset: then what is wanted is the categories the
+            # subset lists, not every directory on disk. uCO3D has ~1076 category
+            # directories and an Every9D tform_obj_type covers ~965 of them, so
+            # the on-disk set can never be covered and every whole-dataset
+            # Every9D config fell back to the walk — one directory listing per
+            # sequence over NFS, hours for the 110k-sequence train subset.
+            sub = self.subset() if cats is None else None
+            if cats is not None:
+                wanted = set(cats)
+            elif sub is not None:
+                wanted = {i.split("/", 1)[0] for i in sub.ids}
+            else:
+                wanted = set(self._iter_categories())
             missing = sorted(c for c in wanted if not cur.execute(
                 "SELECT 1 FROM frames WHERE tform_obj_type = ? AND category = ? LIMIT 1",
                 (self.cfg.tform_obj_type, c),
