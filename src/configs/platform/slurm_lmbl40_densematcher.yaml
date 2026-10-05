@@ -1,0 +1,7 @@
+defaults:
+  - slurm_lmbl40_diff3f
+
+# Same job sizing as slurm_lmbl40_diff3f; only the dep set differs.
+#   o3b platform setup -p slurm_lmbl40_densematcher
+deps:
+  - densematcher  # creates <repo>_py310_cu124_torch26_densematcher and installs deps there

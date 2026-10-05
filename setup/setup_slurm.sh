@@ -538,11 +538,6 @@ if [ "${INSTALL_DIFF3F}" = "true" ] || [ "${INSTALL_DIFF3F}" = "True" ]; then
     pip install diffusers transformers accelerate
     pip install git+https://github.com/skoch9/meshplot.git
     pip install pythreejs
-    # Recompile gdist from source against the final numpy in this venv.
-    # Binary wheels are pinned to the numpy ABI at build time; optional deps
-    # (pytorch3d, diffusers, …) can silently shift numpy afterwards, causing
-    # "numpy.dtype size changed, may indicate binary incompatibility".
-    pip install --no-binary gdist gdist --force-reinstall --no-cache-dir
 fi
 
 
@@ -746,11 +741,15 @@ if [ "${INSTALL_MRF3DTOPO}" = "true" ] || [ "${INSTALL_MRF3DTOPO}" = "True" ]; t
     pip install libigl "setuptools<82"
     #pip install --no-build-isolation "git+ssh://git@github.com/paul0noah/sm-mrf.git"
     pip install --no-build-isolation "git+https://github.com/paul0noah/sm-mrf.git"
-    # Recompile gdist from source against the final numpy in this venv.
-    # Binary wheels are pinned to the numpy ABI at build time; optional deps
-    # (pytorch3d, diffusers, …) can silently shift numpy afterwards, causing
-    # "numpy.dtype size changed, may indicate binary incompatibility".
-    pip install --no-binary gdist gdist --force-reinstall --no-cache-dir
 fi
+
+# Recompile gdist from source against the final numpy in this env, whatever
+# the deps: binary wheels are pinned to the numpy ABI they were built with, and
+# both the base install and the optional deps (pytorch3d, diffusers, the
+# densematcher numpy<2 pin, …) can shift numpy afterwards. The crsp3d task
+# imports gdist in every env, so a stale one fails the deps-less env too with
+# "numpy.dtype size changed, may indicate binary incompatibility".
+echo "--- pip install gdist (from source, against the final numpy) ---"
+pip install --no-binary gdist gdist --force-reinstall --no-cache-dir
 
 echo "=== setup complete ==="

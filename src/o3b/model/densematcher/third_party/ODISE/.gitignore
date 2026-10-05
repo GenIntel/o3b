@@ -1,0 +1,4 @@
+
+# symlink to ../../configs, (re)created by setup.py at build time; tracked, it
+# is picked up as a package data *file* and the build fails copying it
+odise/model_zoo/configs

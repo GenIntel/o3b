@@ -4211,6 +4211,12 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
         # override is applied with struct off.
         OmegaConf.set_struct(cfg, False)
         cfg = OmegaConf.merge(cfg, OmegaConf.create(dict(platform_override)))
+    if deps_override is not None:
+        # into cfg, not only a local: `_resolve_env_layout` names the env from
+        # cfg.deps, and a job whose DEPS_TAG says diff3f while it activates the
+        # deps-less env fails on the first import the dep set provides
+        OmegaConf.set_struct(cfg, False)
+        cfg.deps = list(deps_override)
 
     ssh_host = cfg.get("ssh")
     if not ssh_host or ssh_host is False:
@@ -4220,7 +4226,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str,
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    deps                 = deps_override if deps_override is not None else list(cfg.get("deps", []) or [])
+    deps                 = list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
     install_flags        = {f"INSTALL_{dep.upper()}": "true" for dep in deps}
     setup          = "true" if cfg.get("setup", False) else "false"
