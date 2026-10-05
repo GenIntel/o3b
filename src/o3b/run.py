@@ -30,7 +30,7 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     from o3b.dataset.dataset import DatasetConfig, build_dataset, ItemType
     from o3b.task.task import build_task
     from o3b.data.datatypes.object import collate_object_pairs
-    from o3b.data.datatypes.frame_object import collate_frame_object_pairs
+    from o3b.data.datatypes.frame_object import collate_frame_object_pairs, collate_frame_objects
     from o3b import ddp
 
     # ── distributed (torchrun) ────────────────────────────────────────────────
@@ -80,9 +80,14 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     if is_main:
         print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
 
-    collate_fn = (collate_frame_object_pairs
-                  if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
-                  else collate_object_pairs)
+    # One collate per item type. A single frame_object dataset (the pose
+    # benchmarks) used to fall through to collate_object_pairs, which expects
+    # ObjectPair items; include=None as for the pairs, so every field an item
+    # carries is stacked.
+    collate_fn = {
+        ItemType.FRAME_OBJECT_PAIR: collate_frame_object_pairs,
+        ItemType.FRAME_OBJECT:      collate_frame_objects,
+    }.get(dataset_cfg.item_type, collate_object_pairs)
     # rank r evaluates items r, r + W, r + 2W, …  Unlike DistributedSampler
     # this pads nothing, so the union over the ranks is exactly the dataset and
     # no item is scored twice — the shard sizes then differ by at most one,
@@ -277,8 +282,15 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
         quant, qualit = task(batch, return_qualit=return_qualit)
 
-        B = (batch.src_obj_kpts3d.shape[0]
-             if batch.src_obj_kpts3d is not None else batch_size)
+        # Samples in this batch, from whatever it carries: a pair batch has
+        # src_obj_kpts3d, a single frame-object batch (the pose benchmarks) has
+        # no such attribute at all and used to raise AttributeError here.
+        B = batch_size
+        for _attr in ("src_obj_kpts3d", "rgb", "cam_tform4x4_obj", "src_rgb"):
+            _v = getattr(batch, _attr, None)
+            if _v is not None and hasattr(_v, "shape"):
+                B = int(_v.shape[0])
+                break
         n_samples += B
 
         for metric_name, value in quant.mean().items():
