@@ -3719,18 +3719,27 @@ def _run_bench_viz_qualit(args) -> None:
                     if fname:
                         filenames.append(fname)
 
-        try:
-            _collect(run.scan_history(keys=[key]))
-        except Exception as exc:
-            # W&B's parquet history export fails for some runs ("Step column
-            # '_step' not found in schema") that the sampled history endpoint
-            # reads fine; samples is set above any eval's batch count, so it
-            # returns every row rather than a sample
-            filenames.clear()
+        # The sampled history endpoint first, scan_history only as a fallback:
+        # scan_history (W&B's parquet export) is unreliable both ways -- it
+        # raises for some runs ("Step column '_step' not found in schema") and,
+        # worse, returns *zero rows* without error for others, intermittently
+        # (the same run read 5 rows, then 0 an hour later), which left those
+        # cells N/A with no warning. samples is above any eval's batch count,
+        # so history() returns every row rather than a sample.
+        errors = []
+        for read in (lambda: run.history(keys=[key], samples=100000, pandas=False),
+                     lambda: run.scan_history(keys=[key])):
             try:
-                _collect(run.history(keys=[key], samples=100000, pandas=False))
-            except Exception as exc2:
-                print(f"  WARNING: could not read history for {key!r} on run {run.name}: {exc} / {exc2}")
+                _collect(read())
+            except Exception as exc:
+                errors.append(exc)
+                filenames.clear()
+                continue
+            if filenames:
+                break
+        if not filenames:
+            print(f"  WARNING: no {key!r} images found on run {run.name}"
+                  + (f": {' / '.join(map(str, errors))}" if errors else ""))
         history_cache[cache_key] = filenames
         return filenames
 
