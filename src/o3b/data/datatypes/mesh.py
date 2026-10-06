@@ -230,6 +230,12 @@ class Mesh:
     def _load_concat_feats(cls, converted_path: Path, default_path: Path, mesh_type: str) -> "Mesh":
         """``..._f<a>+<b>``: concatenate the cached features of ``..._f<a>`` and ``..._f<b>``.
 
+        ``..._f<a>@<w_a>+<b>@<w_b>`` weights the parts (default: equal). A part
+        is scaled by sqrt(w) after normalisation, so the weights are linear in
+        the squared distance the NN sees: w_a * |da|^2 + w_b * |db|^2. Scaling
+        all weights together leaves every nearest neighbour unchanged, so only
+        their ratio matters (0.5/0.5 == the unweighted form).
+
         Each part goes through its own ``load_or_convert`` under its own
         mesh_type directory (a sibling of *converted_path*'s), so a part that is
         already cached is only read, never re-extracted. Parts share the
@@ -244,8 +250,10 @@ class Mesh:
 
         feature_model = _parse_mc_type(mesh_type)["feature_model"]
         base = mesh_type[: -len(feature_model)]  # "mc16_vuni100_r256_f"
-        parts = []
-        for name in feature_model.split("+"):
+        parts, weights = [], []
+        for spec in feature_model.split("+"):
+            name, _, weight = spec.partition("@")
+            weights.append(float(weight) if weight else 1.0)
             part_type = base + name
             part_path = converted_path.parent.parent / part_type / converted_path.name
             part = cls.load_or_convert(part_path, default_path, part_type)
@@ -260,7 +268,9 @@ class Mesh:
                     f"{part_type} and {parts[0][0]} were remeshed differently for "
                     f"{converted_path.name}; their per-vertex features do not line up"
                 )
-        mesh.vert_feats = torch.cat([F.normalize(p.vert_feats.float(), dim=1) for _, p in parts], dim=1)
+        mesh.vert_feats = torch.cat(
+            [w ** 0.5 * F.normalize(p.vert_feats.float(), dim=1) for w, (_, p) in zip(weights, parts)], dim=1
+        )
         return mesh
 
     @classmethod
@@ -283,7 +293,7 @@ def _parse_mc_type(type_str: str) -> dict:
     """
     import re
     m = re.fullmatch(
-        r"mc(\d+)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+]+))?)?",
+        r"mc(\d+)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
         type_str,
     )
     if not m:
@@ -293,7 +303,7 @@ def _parse_mc_type(type_str: str) -> dict:
         "view_sampling": m.group(2),                          # 'uni', 'rand', or None
         "n_views":       int(m.group(3)) if m.group(3) else None,
         "resolution":    int(m.group(4)) if m.group(4) else None,
-        "feature_model": m.group(5),                          # e.g. 'dinov2s', 'dinov2b+partfield', or None
+        "feature_model": m.group(5),                          # e.g. 'dinov2s', 'dinov2b@0.3+partfield@0.7', or None
     }
 
 
