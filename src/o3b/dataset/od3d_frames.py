@@ -766,8 +766,11 @@ class Od3dFrameDataset(ConfigurableDataset):
             # there is no GT orientation to train on or score against; the oracle
             # even fails them against themselves. Dropped. Columns are normalised
             # first, so a per-axis scale in an otherwise valid pose passes.
+            # Threshold 0.1: the degenerate ones sit at 0.27-1.0, while whole
+            # HANDAL sequences carry a mild 0.012 (column norms 0.99-1.04) that a
+            # 0.01 cut-off dropped as if they were broken (64 test, 320 train).
             Rn = M[:3, :3] / M[:3, :3].norm(dim=0, keepdim=True).clamp(min=1e-12)
-            if float((Rn.T @ Rn - torch.eye(3)).abs().max()) > 1e-2:
+            if float((Rn.T @ Rn - torch.eye(3)).abs().max()) > 0.1:
                 logger.warning(f"{self.meta_path(row)}: cam_tform4x4_obj is not a "
                                f"rotation (sheared od3d annotation); frame dropped")
                 return None
