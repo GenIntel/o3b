@@ -211,6 +211,8 @@ class Mesh:
         asking for the same object convert it once instead of N times.
         """
         converted_path = Path(converted_path)
+        if mesh_type.startswith("mc") and "+" in (_parse_mc_type(mesh_type)["feature_model"] or ""):
+            return cls._load_concat_feats(converted_path, default_path, mesh_type)
         mesh = cls._try_load(converted_path)
         if mesh is not None:
             return mesh
@@ -223,6 +225,43 @@ class Mesh:
             converted = convert_mesh(mesh_type, cls.load(default_path))
             converted.save(converted_path)
         return converted
+
+    @classmethod
+    def _load_concat_feats(cls, converted_path: Path, default_path: Path, mesh_type: str) -> "Mesh":
+        """``..._f<a>+<b>``: concatenate the cached features of ``..._f<a>`` and ``..._f<b>``.
+
+        Each part goes through its own ``load_or_convert`` under its own
+        mesh_type directory (a sibling of *converted_path*'s), so a part that is
+        already cached is only read, never re-extracted. Parts share the
+        marching-cubes remesh, hence the vertex check before rows are joined.
+        Each part is L2-normalised per vertex first: the extractors' scales
+        differ (dinov2b ~33 vs partfield ~8.5), and the crsp3d task's Euclidean
+        nearest neighbour would otherwise be decided by the largest-norm part
+        alone. Normalised, the squared distance is the sum of the parts'
+        cosine distances (x2). The concatenation itself is not cached.
+        """
+        import torch.nn.functional as F
+
+        feature_model = _parse_mc_type(mesh_type)["feature_model"]
+        base = mesh_type[: -len(feature_model)]  # "mc16_vuni100_r256_f"
+        parts = []
+        for name in feature_model.split("+"):
+            part_type = base + name
+            part_path = converted_path.parent.parent / part_type / converted_path.name
+            part = cls.load_or_convert(part_path, default_path, part_type)
+            if part.vert_feats is None:
+                raise ValueError(f"{part_type} carries no vert_feats ({part_path})")
+            parts.append((part_type, part))
+
+        mesh = parts[0][1]
+        for part_type, part in parts[1:]:
+            if part.verts.shape != mesh.verts.shape or not torch.allclose(part.verts, mesh.verts, atol=1e-5):
+                raise ValueError(
+                    f"{part_type} and {parts[0][0]} were remeshed differently for "
+                    f"{converted_path.name}; their per-vertex features do not line up"
+                )
+        mesh.vert_feats = torch.cat([F.normalize(p.vert_feats.float(), dim=1) for _, p in parts], dim=1)
+        return mesh
 
     @classmethod
     def _try_load(cls, path: Path) -> Optional["Mesh"]:
@@ -244,7 +283,7 @@ def _parse_mc_type(type_str: str) -> dict:
     """
     import re
     m = re.fullmatch(
-        r"mc(\d+)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f(\w+))?)?",
+        r"mc(\d+)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+]+))?)?",
         type_str,
     )
     if not m:
@@ -254,7 +293,7 @@ def _parse_mc_type(type_str: str) -> dict:
         "view_sampling": m.group(2),                          # 'uni', 'rand', or None
         "n_views":       int(m.group(3)) if m.group(3) else None,
         "resolution":    int(m.group(4)) if m.group(4) else None,
-        "feature_model": m.group(5),                          # e.g. 'dinov2s', or None
+        "feature_model": m.group(5),                          # e.g. 'dinov2s', 'dinov2b+partfield', or None
     }
 
 
