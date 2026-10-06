@@ -3707,8 +3707,9 @@ def _run_bench_viz_qualit(args) -> None:
         if cache_key in history_cache:
             return history_cache[cache_key]
         filenames: list = []
-        try:
-            for row in run.scan_history(keys=[key]):
+
+        def _collect(rows):
+            for row in rows:
                 v = row.get(key)
                 v_type = _get_type(v)
                 if v_type == "images/separated":
@@ -3717,8 +3718,19 @@ def _run_bench_viz_qualit(args) -> None:
                     fname = v.get("path")
                     if fname:
                         filenames.append(fname)
+
+        try:
+            _collect(run.scan_history(keys=[key]))
         except Exception as exc:
-            print(f"  WARNING: could not read history for {key!r} on run {run.name}: {exc}")
+            # W&B's parquet history export fails for some runs ("Step column
+            # '_step' not found in schema") that the sampled history endpoint
+            # reads fine; samples is set above any eval's batch count, so it
+            # returns every row rather than a sample
+            filenames.clear()
+            try:
+                _collect(run.history(keys=[key], samples=100000, pandas=False))
+            except Exception as exc2:
+                print(f"  WARNING: could not read history for {key!r} on run {run.name}: {exc} / {exc2}")
         history_cache[cache_key] = filenames
         return filenames
 
