@@ -1008,7 +1008,10 @@ def _build_platform_parser(sub):
         help="Platform name matching a config in configs/platform/ (default: slurm)",
     )
     p_run.add_argument(
-        "-c", "--command", required=True, metavar="CMD",
+        # dest is not "command": that is the top-level sub-command main()
+        # dispatches on, which this would overwrite — `platform run` then
+        # matched no branch and exited 0 without submitting anything.
+        "-c", "--command", dest="run_command", required=True, metavar="CMD",
         help="Shell command to execute on the compute node",
     )
 
@@ -2649,7 +2652,7 @@ def _run_platform_run_cmd(platform: str, command: str, job_name: str | None = No
 
 
 def _run_platform_run(args):
-    _run_platform_run_cmd(args.platform, args.command)
+    _run_platform_run_cmd(args.platform, args.run_command)
 
 
 def _run_scancel(ssh_host: str, scancel_cmd: str) -> None:
