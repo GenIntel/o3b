@@ -446,14 +446,21 @@ def _extract_vert_feats(
     grid_y = (verts_2d[..., 1] / (H - 1)) * 2 - 1
     grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(2)    # (N, V, 1, 2)
 
-    sampled = F.grid_sample(
-        featmaps.float(), grid, mode="bilinear", align_corners=True, padding_mode="zeros"
-    )                                                             # (N, C, V, 1)
-    sampled = sampled.squeeze(-1)                                 # (N, C, V)
-
-    # masked mean across views
+    # chunked over vertices: one (N, C, V) sample of a dense remesh (dmtet32,
+    # ~20-30k verts after the atlas split, x 100 views x 768 ch) passes 2^31
+    # elements, which cuDNN's grid_sample rejects (CUDNN_STATUS_NOT_SUPPORTED),
+    # and is 6+ GB besides. Vertices are independent, so chunks are exact.
+    featmaps = featmaps.float()
+    N, C = featmaps.shape[:2]
+    chunk = max(1, 2 ** 28 // (N * C))
     valid_f = valid.float().unsqueeze(1)                          # (N, 1, V)
-    vert_feats = (sampled * valid_f).sum(0) / valid_f.sum(0).clamp(min=1)  # (C, V)
+    vert_feats = torch.cat([
+        (F.grid_sample(featmaps, grid[:, i:i + chunk], mode="bilinear",
+                       align_corners=True, padding_mode="zeros").squeeze(-1)  # (N, C, v)
+         * valid_f[..., i:i + chunk]).sum(0)
+        / valid_f[..., i:i + chunk].sum(0).clamp(min=1)           # masked mean across views
+        for i in range(0, V, chunk)
+    ], dim=1)                                                     # (C, V)
     return vert_feats.T.cpu()                                     # (V, C)
 
 
