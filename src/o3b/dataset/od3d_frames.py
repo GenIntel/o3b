@@ -717,6 +717,13 @@ class Od3dFrameDataset(ConfigurableDataset):
         cam_intr4x4 = None
         if meta.get("l_cam_intr4x4"):
             cam_intr4x4 = torch.tensor(meta["l_cam_intr4x4"], dtype=torch.float32)
+            # A few ImageNet3D annotations carry fx = fy = 0: the intrinsics are
+            # singular, so the frame cannot be lifted to a point cloud (a
+            # method's K^-1 raised mid-evaluation) nor projected. Dropped.
+            if float(cam_intr4x4[0, 0]) <= 0 or float(cam_intr4x4[1, 1]) <= 0:
+                logger.warning(f"{self.meta_path(row)}: focal length <= 0 in "
+                               f"cam_intr4x4; frame dropped")
+                return None
 
         cam_tform4x4_obj = None
         if meta.get("l_cam_tform4x4_obj"):

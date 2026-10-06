@@ -213,6 +213,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
               + "\n")
 
     accum: dict[str, list] = {}
+    dump_samples = eval_cfg.get("dump_samples")
+    dumped: list = []
     n_samples = 0
     qualit_log_batches = eval_cfg.get("qualit_log_batches", 8)
 
@@ -282,6 +284,27 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
         quant, qualit = task(batch, return_qualit=return_qualit)
 
+        # eval.dump_samples: <path> keeps every sample's prediction, GT and
+        # metric values (one <path>.rank<R>.pt per rank) for analyses the means
+        # cannot answer — e.g. whether a category's rotation error is one
+        # consistent offset (a frame-convention mismatch) or scatter.
+        if dump_samples:
+            rec = {}
+            for k in ("category", "frame_object_id", "object_id"):
+                v = getattr(batch, k, None)
+                rec[k] = ([] if v is None else v.tolist() if isinstance(v, _torch.Tensor)
+                          else list(v))
+            for k in ("pred_cam_tform4x4_obj", "cam_tform4x4_obj_ncds", "cam_tform4x4_obj",
+                      "obj_syms", "obj_size3d", "pred_obj_size3d"):
+                v = getattr(batch, k, None)
+                if isinstance(v, _torch.Tensor):
+                    rec[k] = v.detach().cpu()
+            for k in getattr(quant, "_FIELDS", ()):
+                v = getattr(quant, k, None)
+                if isinstance(v, _torch.Tensor):
+                    rec[k] = v.detach().cpu()
+            dumped.append(rec)
+
         # Samples in this batch, from whatever it carries: a pair batch has
         # src_obj_kpts3d, a single frame-object batch (the pose benchmarks) has
         # no such attribute at all and used to raise AttributeError here.
@@ -314,6 +337,12 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
                          **{k: round(sum(v) / len(v), 4) for k, v in accum.items()}})
 
     t_eval_total   = time.perf_counter() - t_eval_start
+    if dump_samples:
+        from pathlib import Path as _Path
+        _dump_path = _Path(f"{dump_samples}.rank{rank}.pt")
+        _dump_path.parent.mkdir(parents=True, exist_ok=True)
+        _torch.save(dumped, _dump_path)
+        print(f"Dumped {sum(len(r.get('category') or []) for r in dumped)} samples → {_dump_path}")
     _peak_alloc    = _cuda_mem(_torch.cuda.max_memory_allocated)
     _peak_resv     = _cuda_mem(_torch.cuda.max_memory_reserved)
 
