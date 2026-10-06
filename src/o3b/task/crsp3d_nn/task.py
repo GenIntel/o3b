@@ -429,6 +429,18 @@ class Crsp3DNNTask(OD3D_Task):
         B   = (src_verts if src_verts is not None else trgt_verts).shape[0]
         dev = (src_verts if src_verts is not None else trgt_verts).device
 
+        # mesh resolution, (src + trgt) / 2 per pair: the prediction is a target
+        # vertex, so a denser remesh lowers the errors by itself -- logged so a
+        # geometry comparison (mc / dmtet / fc) can tell density from fit
+        def _n_verts(verts, mask):
+            if verts is None:
+                return None
+            return mask.sum(dim=1).float() if mask is not None else \
+                torch.full((verts.shape[0],), float(verts.shape[1]), device=dev)
+        n_counts = [n for n in (_n_verts(src_verts, src_verts_mask), _n_verts(trgt_verts, trgt_verts_mask))
+                    if n is not None]
+        quant_extra = dict(n_verts=torch.stack(n_counts).mean(dim=0))
+
         # ── target bounding-box size (PCK threshold) ──────────────────────────
         tv = trgt_verts.float()
         if trgt_verts_mask is not None:
@@ -665,7 +677,7 @@ class Crsp3DNNTask(OD3D_Task):
 
         # ── qualitative: keypoint correspondence images ───────────────────────
         if not return_qualit:
-            return ObjectPairQuantBatch(**quant_kpts, **quant_parts), None
+            return ObjectPairQuantBatch(**quant_kpts, **quant_parts, extra=quant_extra), None
 
         qualit_imgs = None
         if has_kpts and pred_trgt_kpt_pos is not None:
@@ -716,7 +728,7 @@ class Crsp3DNNTask(OD3D_Task):
                 right_meshes     = feat_trgt_meshes,
             )
 
-        quant  = ObjectPairQuantBatch(**quant_kpts, **quant_parts)
+        quant  = ObjectPairQuantBatch(**quant_kpts, **quant_parts, extra=quant_extra)
         qualit = ObjectPairQualitBatch(imgs=qualit_imgs, part_imgs=part_imgs, feat_imgs=feat_imgs)
         if has_kpts:
             qualit.trgt_src_vert_corr      = pred_trgt_kpt_vert
