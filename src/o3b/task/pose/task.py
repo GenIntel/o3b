@@ -49,11 +49,8 @@ def _unit_rot3x3(tform4x4: torch.Tensor) -> torch.Tensor:
 def _aabb_iou(size_a: torch.Tensor, size_b: torch.Tensor) -> torch.Tensor:
     """3-D IoU of two origin-centred, axis-aligned boxes given their side lengths.
 
-    Axis-aligned and concentric on purpose: this is the *size* agreement, the
-    same quantity od3d's bbox3d_iou reduces to once both boxes are placed at the
-    predicted and GT poses and those poses agree. It cannot punish a rotation
-    error — that is what the rotation columns are for — so a run should never be
-    read as good because its IoU is high while its 30-degree number is low.
+    The *size* agreement alone (pose_size3d_iou): blind to rotation and
+    translation. pose_bbox3d_iou is the camera-space IoU of the oriented boxes.
     """
     a = size_a.float().clamp(min=0)
     b = size_b.float().clamp(min=0)
@@ -164,7 +161,22 @@ class PoseTask(OD3D_Task):
             gt_size = gt_size.float()
             pred_size = pred_size.float()
             quant.pose_size3d_err_m = (pred_size - gt_size).abs().mean(dim=-1)
-            iou = _aabb_iou(pred_size, gt_size)
+            quant.pose_size3d_iou = _aabb_iou(pred_size, gt_size)
+
+            # Camera-space IoU of the oriented boxes. The GT box is the dataset's
+            # own cam_bbox3d corners; the predicted one is pred_obj_size3d placed
+            # by the predicted pose (orientation and translation — the NCDS
+            # pose's translation is the box centre). Unlike the size IoU above
+            # this is low for a well-sized box that is turned or misplaced.
+            from o3b.cv.metric.bbox3d import bbox3d_corners_from_pose, bbox3d_iou
+            gt_corners = getattr(batch, "cam_bbox3d", None)
+            if gt_corners is None or tuple(gt_corners.shape[-2:]) != (8, 3):
+                self._warn_once("cam_bbox3d", "PoseTask: batch has no (8, 3) cam_bbox3d — "
+                                "the GT box for the 3-D IoU is built from the GT pose "
+                                "and obj_size3d instead. Add cam_bbox3d to the modalities.")
+                gt_corners = bbox3d_corners_from_pose(gt, gt_size)
+            pred_corners = bbox3d_corners_from_pose(pred, pred_size)
+            iou = bbox3d_iou(pred_corners, gt_corners.float())
             quant.pose_bbox3d_iou = iou
             for thr in self.iou_acc:
                 setattr(quant, f"pose_bbox3d_acc_{int(thr*100)}", (iou > thr).float())

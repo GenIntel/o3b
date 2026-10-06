@@ -37,7 +37,11 @@ class FrameObjectQuantBatch:
 
     # ── size / 3-D IoU ───────────────────────────────────────────────────────
     pose_size3d_err_m:  Optional[Tensor] = None  # (B,) mean abs side-length error
-    pose_bbox3d_iou:    Optional[Tensor] = None  # (B,) axis-aligned 3-D IoU
+    # camera-space 3-D IoU of the oriented boxes: pred pose + pred size against
+    # the GT box (cam_bbox3d) — punishes rotation and translation as well as size
+    pose_bbox3d_iou:    Optional[Tensor] = None  # (B,)
+    # sizes alone: concentric, axis-aligned boxes (what pose_bbox3d_iou used to be)
+    pose_size3d_iou:    Optional[Tensor] = None  # (B,)
     pose_bbox3d_acc_25: Optional[Tensor] = None
     pose_bbox3d_acc_50: Optional[Tensor] = None
     pose_bbox3d_acc_75: Optional[Tensor] = None
@@ -50,7 +54,7 @@ class FrameObjectQuantBatch:
         "pose_rot_acc_10deg_sym", "pose_rot_acc_30deg_sym",
         "pose_transl_err_m", "pose_transl_acc_5cm", "pose_transl_acc_10cm",
         "pose_rot_transl_acc_10deg_5cm", "pose_rot_transl_acc_30deg_10cm",
-        "pose_size3d_err_m", "pose_bbox3d_iou",
+        "pose_size3d_err_m", "pose_bbox3d_iou", "pose_size3d_iou",
         "pose_bbox3d_acc_25", "pose_bbox3d_acc_50", "pose_bbox3d_acc_75",
     )
 
