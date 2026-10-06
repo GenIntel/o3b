@@ -1,0 +1,13 @@
+class_name: MeshFM
+ckpt_path: "checkpoints/meshfm/meshfm.pth"
+ckpt_gdrive_id: "1ONUMs3Ji_VlmyflO74No5rk5bAHM6qgc"   # upstream README; fetched with gdown
+n_pc_points: 100000        # surface samples fed to the PVCNN encoder
+n_sample_each: 200000      # triplane-query chunk size (OOM guard)
+triplane_channels_low: 128
+triplane_channels_high: 1536   # = feature dim
+triplane_resolution: 128
+pvcnn_z_triplane_channels: 256
+pvcnn_z_triplane_resolution: 128
+apply_tanh: true           # upstream default: planes squashed before querying
+seed: 0                    # surface sampler; null = unseeded, as upstream's CLI
+freeze: true

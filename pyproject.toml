@@ -12,6 +12,7 @@ dependencies = [
                    # whatever those happened to resolve
     "numpy",
     "gdown",
+    "einops",  # MeshFM's PVCNN encoder
     "hydra-core",
     "omegaconf",
     "opencv-python<5",  # opencv 5.0 wheels dropped OpenEXR support (depth/mask .exr loading)
