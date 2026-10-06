@@ -915,9 +915,17 @@ class HouseCorr3D(ConfigurableDataset):
                         split_dir = patch_dir / split_name
                         if not split_dir.exists():
                             continue
+                        # The name carries every level of the path. Scene numbers
+                        # repeat across the environments (ikea / matterport3d /
+                        # scannet++) of a train split, and frame_id is built from
+                        # the scene name, so "<patch>_<scene>" made those scenes
+                        # collide and INSERT OR IGNORE dropped all but the first:
+                        # 129,549 of SOPE train's 367,786 images were missing.
                         for kind_dir in sorted(d for d in split_dir.iterdir() if d.is_dir()):
                             for scene_dir in sorted(d for d in kind_dir.iterdir() if d.is_dir()):
-                                yield scene_dir, f"{patch_dir.name}_{scene_dir.name}", split_name
+                                yield (scene_dir,
+                                       f"{patch_dir.name}_{split_name}_{kind_dir.name}_{scene_dir.name}",
+                                       split_name)
 
             # materialise so the progress bar can show total / remaining scenes
             # (and drop scenes whose split the loader would filter out)
