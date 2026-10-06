@@ -211,11 +211,26 @@ class Mesh:
         asking for the same object convert it once instead of N times.
         """
         converted_path = Path(converted_path)
-        if mesh_type.startswith("mc") and "+" in (_parse_mc_type(mesh_type)["feature_model"] or ""):
+        params = _parse_mc_type(mesh_type) if _is_remesh_type(mesh_type) else None
+        if params and "+" in (params["feature_model"] or ""):
             return cls._load_concat_feats(converted_path, default_path, mesh_type)
         mesh = cls._try_load(converted_path)
         if mesh is not None:
             return mesh
+        if params and params["method"] != "mc" and params["feature_model"] is not None:
+            # a fitted remesh is cached bare first (mesh/<dmtet16>/), so every
+            # feature type of the object -- and both halves of a concat --
+            # reads one geometry instead of refitting it (mc is cheap and
+            # deterministic, and keeps its old single-step cache)
+            geom_path = converted_path.parent.parent / params["geometry"] / converted_path.name
+            geom = cls.load_or_convert(geom_path, default_path, params["geometry"])
+            with _file_lock(converted_path.with_name(converted_path.name + ".lock")):
+                mesh = cls._try_load(converted_path)
+                if mesh is not None:
+                    return mesh
+                converted = _add_vert_feats(geom, params)
+                converted.save(converted_path)
+            return converted
 
         with _file_lock(converted_path.with_name(converted_path.name + ".lock")):
             # another process may have converted it while we waited for the lock
@@ -249,7 +264,7 @@ class Mesh:
         import torch.nn.functional as F
 
         feature_model = _parse_mc_type(mesh_type)["feature_model"]
-        base = mesh_type[: -len(feature_model)]  # "mc16_vuni100_r256_f"
+        base = mesh_type[: -len(feature_model)]  # "mc16_vuni100_r256_f", "fc16_vuni100_r256_f", …
         parts, weights = [], []
         for spec in feature_model.split("+"):
             name, _, weight = spec.partition("@")
@@ -286,32 +301,57 @@ class Mesh:
             return None
 
 
-def _parse_mc_type(type_str: str) -> dict:
-    """Parse mesh type strings like 'mc16', 'mc16_vuni4_r256_fdinov2s'.
+ISOSURFACE_FIT_STEPS = 300  # dmtet<N> / fc<N> without _o<steps>
 
-    Returns dict with keys: res, view_sampling, n_views, resolution, feature_model.
+
+def _parse_mc_type(type_str: str) -> dict:
+    """Parse mesh type strings like 'mc16', 'mc16_vuni4_r256_fdinov2s', 'fc16_o0'.
+
+    The geometry prefix is ``mc<N>`` (marching cubes), ``dmtet<N>`` (marching
+    tets) or ``fc<N>`` (FlexiCubes), N SDF samples per axis; the latter two
+    take ``_o<steps>`` for their surface fit (default ISOSURFACE_FIT_STEPS,
+    ``_o0`` = plain extraction), see o3b/cv/isosurface/remesh.py.
+
+    Returns dict with keys: method, res, fit_steps, geometry, view_sampling,
+    n_views, resolution, feature_model.
     """
     import re
     m = re.fullmatch(
-        r"mc(\d+)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
+        r"((mc|dmtet|fc)(\d+)(?:_o(\d+))?)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
         type_str,
     )
     if not m:
         raise ValueError(f"Cannot parse mesh type: {type_str!r}")
+    if m.group(2) == "mc" and m.group(4) is not None:
+        raise ValueError(f"mc has no surface fit, drop the _o: {type_str!r}")
     return {
-        "res":           int(m.group(1)),
-        "view_sampling": m.group(2),                          # 'uni', 'rand', or None
-        "n_views":       int(m.group(3)) if m.group(3) else None,
-        "resolution":    int(m.group(4)) if m.group(4) else None,
-        "feature_model": m.group(5),                          # e.g. 'dinov2s', 'dinov2b@0.3+partfield@0.7', or None
+        "method":        m.group(2),                          # 'mc', 'dmtet' or 'fc'
+        "res":           int(m.group(3)),
+        "fit_steps":     (int(m.group(4)) if m.group(4) else ISOSURFACE_FIT_STEPS) if m.group(2) != "mc" else None,
+        "geometry":      m.group(1),                          # the type without features, e.g. 'fc16'
+        "view_sampling": m.group(5),                          # 'uni', 'rand', or None
+        "n_views":       int(m.group(6)) if m.group(6) else None,
+        "resolution":    int(m.group(7)) if m.group(7) else None,
+        "feature_model": m.group(8),                          # e.g. 'dinov2s', 'dinov2b@0.3+partfield@0.7', or None
     }
 
 
+def _is_remesh_type(type_str: str) -> bool:
+    return type_str.startswith(("mc", "dmtet", "fc"))
+
+
 def convert_mesh(type_str: str, mesh: Mesh) -> Mesh:
-    if not type_str.startswith("mc"):
+    if not _is_remesh_type(type_str):
         raise ValueError(f"Unknown mesh type: {type_str}")
     params = _parse_mc_type(type_str)
-    mc_mesh = convert_mesh_to_mc(mesh, params["res"])
+    if params["method"] == "mc":
+        mc_mesh = convert_mesh_to_mc(mesh, params["res"])
+    else:
+        mc_mesh = convert_mesh_to_isosurface(mesh, params["method"], params["res"], params["fit_steps"])
+    return _add_vert_feats(mc_mesh, params)
+
+
+def _add_vert_feats(mc_mesh: Mesh, params: dict) -> Mesh:
     if params["feature_model"] is not None:
         vert_feats = _extract_vert_feats(
             mc_mesh,
@@ -458,6 +498,28 @@ def convert_mesh_to_mc(mesh: Mesh, res: int = 64) -> Mesh:
 
 
     verts, faces, _ = igl.marching_cubes(SDF.reshape(-1), grid_points, res, res, res, 0.0)
+    return _finish_remesh(verts, faces, V, F, mesh, box_lo, box_hi, f"MC{res}")
+
+
+def convert_mesh_to_isosurface(mesh: Mesh, method: str, res: int = 16, fit_steps: int = ISOSURFACE_FIT_STEPS) -> Mesh:
+    """DMTet / FlexiCubes counterpart of ``convert_mesh_to_mc``: same grid box,
+    SDF samples and finish (box clamp + stretch, texture atlas); the
+    extraction, optionally fitted to the source surface, is in
+    o3b/cv/isosurface/remesh.py."""
+    from o3b.cv.isosurface.remesh import remesh_isosurface
+
+    V, F = mesh.verts.cpu().numpy(), mesh.faces.cpu().numpy()
+    verts, faces = remesh_isosurface(V, F, method, res, fit_steps=fit_steps)
+    if faces.shape[0] == 0:
+        raise ValueError(f"{method}{res}: empty isosurface")
+    return _finish_remesh(verts, faces, V, F, mesh, V.min(axis=0), V.max(axis=0),
+                          f"{method.upper()}{res}" + (f"_o{fit_steps}" if fit_steps != ISOSURFACE_FIT_STEPS else ""))
+
+
+def _finish_remesh(verts, faces, V, F, mesh: Mesh, box_lo, box_hi, label: str) -> Mesh:
+    """Clamp + stretch a remesh onto the source box, then texture it; *faces*
+    wound like igl.marching_cubes (flipped to viser's convention here)."""
+    import numpy as np
 
     # Project every vertex that left the source mesh's 3-D box back onto that
     # box's surface (per-axis clamp), so the remesh never claims more extent
@@ -481,7 +543,7 @@ def convert_mesh_to_mc(mesh: Mesh, res: int = 64) -> Mesh:
     mc_ext, box_ext = mc_hi - mc_lo, box_hi - box_lo
     scale = np.where(mc_ext > 1e-12, box_ext / np.maximum(mc_ext, 1e-12), 1.0)
     verts = box_lo + (verts - mc_lo) * scale
-    print(f"MC{res} mesh: {verts.shape[0]} vertices, {faces.shape[0]} faces")
+    print(f"{label} mesh: {verts.shape[0]} vertices, {faces.shape[0]} faces")
 
     has_color = mesh.vert_colors is not None or (
         mesh.texture is not None and mesh.verts_uvs is not None
