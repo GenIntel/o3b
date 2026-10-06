@@ -355,9 +355,34 @@ def write_image(img: torch.Tensor, path: Path):
     img.save(path)
 
 
+def to_wandb_uint8(img):
+    """(3, H, W) tensor or (H, W, C) array -> (H, W, C) uint8 for wandb.Image.
+
+    Never hand wandb.Image a float image: wandb <= 0.28 scaled a [0, 1] float
+    array by 255, wandb 0.30 casts it to uint8 as is -- every image came out
+    black (0/1 values) in the envs that pulled 0.30. Floats are read as [0, 1]
+    (as [0, 255] if their max says so), NaN as 0.
+    """
+    import numpy as np
+    if isinstance(img, torch.Tensor):
+        img = img.detach().cpu()
+        if img.ndim == 3 and img.shape[0] in (1, 3, 4) and img.shape[-1] not in (1, 3, 4):
+            img = img.permute(1, 2, 0)
+        img = img.float().numpy() if img.is_floating_point() else img.numpy()
+    img = np.asarray(img)
+    if img.dtype == np.uint8:
+        return img
+    if np.issubdtype(img.dtype, np.floating):
+        img = np.nan_to_num(img.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        if img.size and img.max() <= 1.0 + 1e-6:
+            img = img * 255.0
+        return np.clip(np.rint(img), 0, 255).astype(np.uint8)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
 def image_as_wandb_image(img, caption="Caption Blub"):
     img = wandb.Image(
-        img.permute(1, 2, 0).detach().cpu().numpy(),
+        to_wandb_uint8(img),
         caption=caption,
     )
     return img

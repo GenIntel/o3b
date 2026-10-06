@@ -43,12 +43,14 @@ class ObjectPairQualitBatch:
         if wb is None or not log_imgs:
             return out
 
+        from o3b.cv.io import to_wandb_uint8
+
         def _log_tensor_imgs(tensor, key):
             if tensor is None:
                 return
             out[key] = [
                 wb.Image(
-                    img.permute(1, 2, 0).detach().cpu().float().numpy(),
+                    to_wandb_uint8(img),
                     caption=f"i{i}",
                 )
                 for i, img in enumerate(tensor)

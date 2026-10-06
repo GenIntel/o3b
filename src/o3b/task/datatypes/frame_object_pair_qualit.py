@@ -26,9 +26,10 @@ class FrameObjectPairQualitBatch:
         out: dict = {}
         if wb is None or not log_imgs:
             return out
+        from o3b.cv.io import to_wandb_uint8
         if self.imgs is not None:
             out[f"{prefix}/correspondences"] = [
-                wb.Image(img.permute(1, 2, 0).detach().cpu().float().numpy(), caption=f"i{i}")
+                wb.Image(to_wandb_uint8(img), caption=f"i{i}")
                 for i, img in enumerate(self.imgs)
             ]
         # extra image groups (e.g. featmap-PCA / mesh-NOCS correspondence panels):
@@ -38,7 +39,7 @@ class FrameObjectPairQualitBatch:
                 continue
             try:
                 out[f"{prefix}/{name}"] = [
-                    wb.Image(img.permute(1, 2, 0).detach().cpu().float().numpy(), caption=f"i{i}")
+                    wb.Image(to_wandb_uint8(img), caption=f"i{i}")
                     for i, img in enumerate(imgs)
                 ]
             except Exception:

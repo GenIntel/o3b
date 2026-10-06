@@ -303,7 +303,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             if method_qualit is not None:
                 for k, v in method_qualit.items():
                     import numpy as np
-                    wb_log[k] = _wb.Image(v) if isinstance(v, np.ndarray) else v
+                    from o3b.cv.io import to_wandb_uint8
+                    wb_log[k] = _wb.Image(to_wandb_uint8(v)) if isinstance(v, np.ndarray) else v
             wb_log["batch/n_samples"] = n_samples
             # no explicit step: training already advanced the global wandb
             # step, and steps must be monotonically increasing
