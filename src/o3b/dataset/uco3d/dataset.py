@@ -231,7 +231,15 @@ class UCO3D(ConfigurableDataset):
             if cats is not None:
                 wanted = set(cats)
             elif sub is not None:
-                wanted = {i.split("/", 1)[0] for i in sub.ids}
+                # ... and of those, only the ones that exist on disk: the walk
+                # can yield nothing for a category it cannot list, so requiring
+                # the index to cover one only forces a walk that returns the
+                # same rows. every9d_v7's subsets still list 339 ids under
+                # strainer_prereCanon_backup, a pre-canonicalisation copy of
+                # strainer whose directory is gone — which alone sent every
+                # every9d_v7_train_max5 build into the hours-long walk.
+                wanted = ({i.split("/", 1)[0] for i in sub.ids}
+                          & set(self._iter_categories()))
             else:
                 wanted = set(self._iter_categories())
             missing = sorted(c for c in wanted if not cur.execute(
