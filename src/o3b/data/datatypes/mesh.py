@@ -255,7 +255,7 @@ class Mesh:
         mesh_type directory (a sibling of *converted_path*'s), so a part that is
         already cached is only read, never re-extracted. Parts share the
         marching-cubes remesh, hence the vertex check before rows are joined.
-        Each part is L2-normalised per vertex first: the extractors' scales
+        Each part except UNNORMALISED_FEATS (ncds) is L2-normalised per vertex first: the extractors' scales
         differ (dinov2b ~33 vs partfield ~8.5), and the crsp3d task's Euclidean
         nearest neighbour would otherwise be decided by the largest-norm part
         alone. Normalised, the squared distance is the sum of the parts'
@@ -283,8 +283,11 @@ class Mesh:
                     f"{part_type} and {parts[0][0]} were remeshed differently for "
                     f"{converted_path.name}; their per-vertex features do not line up"
                 )
+        names = [s.partition("@")[0] for s in feature_model.split("+")]
         mesh.vert_feats = torch.cat(
-            [w ** 0.5 * F.normalize(p.vert_feats.float(), dim=1) for w, (_, p) in zip(weights, parts)], dim=1
+            [w ** 0.5 * (p.vert_feats.float() if name.lower() in UNNORMALISED_FEATS
+                         else F.normalize(p.vert_feats.float(), dim=1))
+             for w, name, (_, p) in zip(weights, names, parts)], dim=1
         )
         return mesh
 
@@ -302,6 +305,23 @@ class Mesh:
 
 
 ISOSURFACE_FIT_STEPS = 300  # dmtet<N> / fc<N> without _o<steps>
+
+# Features that carry their information in the vector's length, not only its
+# direction, and so skip the per-vertex L2 normalisation of a concat: ncds
+# normalised would keep only the direction from the bbox centre, folding every
+# radius onto the unit sphere (the centre and the surface along one ray agree).
+UNNORMALISED_FEATS = {"ncds"}
+
+
+def ncds_vert_feats(verts: Tensor) -> Tensor:
+    """(V, 3) normalised coordinates: centred on the bbox centre, divided by
+    the bbox's largest side, so the longest axis spans [-0.5, 0.5] and the
+    aspect ratio is kept. Computed from the converted mesh itself, in the
+    frame it is cached in; the dataset rotates every object by the same
+    obj_gl_tform4x4_obj_raw afterwards, which leaves NN distances unchanged."""
+    v = verts.float()
+    lo, hi = v.min(0).values, v.max(0).values
+    return (v - 0.5 * (lo + hi)) / (hi - lo).max().clamp(min=1e-12)
 
 
 def _parse_mc_type(type_str: str) -> dict:
@@ -374,6 +394,9 @@ def _extract_vert_feats(
     """
     import torch
     import torch.nn.functional as F
+
+    if feature_model_name.lower() == "ncds":
+        return ncds_vert_feats(mesh.verts)  # geometry, no model or rendering
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
