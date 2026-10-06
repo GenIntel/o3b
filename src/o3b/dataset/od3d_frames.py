@@ -74,6 +74,33 @@ def _corners_canonical(v_min, v_max):
 _DEPTH_U16_CEILING_M = 65.535
 
 
+def _load_cached_mesh(path):
+    """A cached converted mesh in the units it was saved in, or None.
+
+    Not Mesh._try_load: that goes through o3b.io._load_mesh, which re-centres
+    the mesh and scales its longest side to 2, and Mesh.load drops the transform
+    that undoes it. Geometry here is measured from the mesh (obj_size3d, the
+    box, the NCDS transform), so a mesh read back from the cache lost its size:
+    HANDAL's tools came out ~2 mm long whenever the mesh was not converted
+    afresh in the same worker. The transform is applied back here.
+    """
+    from pathlib import Path
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        from o3b.io import _load_mesh
+        mesh, tform = _load_mesh(path)
+    except Exception as e:
+        logger.warning(f"ignoring unreadable cached mesh {path} ({e}) — reconverting")
+        return None
+    if mesh is None:
+        return None
+    if tform is not None:
+        mesh.verts = mesh.verts.float() @ tform[:3, :3].T.float() + tform[:3, 3].float()
+    return mesh
+
+
 def load_meta_yaml(path: Path) -> Optional[dict]:
     """Read one od3d meta YAML (re-exported from the UCO3D loader).
 
@@ -701,6 +728,12 @@ class Od3dFrameDataset(ConfigurableDataset):
                     return None
                 if d is not None:
                     depth = d[0] if d.dim() == 3 else d
+                    # extra.scale_to_m converts the poses and the mesh (HANDAL:
+                    # millimetres) and has to convert the depth with them: left
+                    # in millimetres every pixel sat past the saturation ceiling
+                    # below, so depth_mask was empty, and a method lifting the
+                    # depth saw the object ~1000x too far away.
+                    depth = depth * float((self.cfg.extra or {}).get("scale_to_m") or 1.0)
                     # Depth is stored as uint16 millimetres, so anything past
                     # 65.535 m saturates at exactly that value rather than
                     # clipping to something obviously wrong. Monocular estimates
@@ -952,10 +985,10 @@ class Od3dFrameDataset(ConfigurableDataset):
                     # uses: shard builds run several workers and many frames
                     # share one CAD model, so unlocked they convert the same
                     # mesh in parallel and write the same .glb concurrently.
-                    m = Mesh._try_load(converted)
+                    m = _load_cached_mesh(converted)
                     if m is None:
                         with _file_lock(converted.with_name(converted.name + ".lock")):
-                            m = Mesh._try_load(converted)   # another worker may have won
+                            m = _load_cached_mesh(converted)   # another worker may have won
                             if m is None:
                                 # Not Mesh.load_or_convert: that reads the source
                                 # through Mesh.load, which cannot open the CAD
