@@ -22,6 +22,7 @@ class ObjectPairQuantBatch:
 
     # ── per-sample keypoint aggregates ───────────────────────────────────────
     kpts_trgt_pck01:              Optional[Tensor] = None  # (B,)  PCK @ 0.1 * trgt_max_dim
+    kpts_trgt_pck005:             Optional[Tensor] = None  # (B,)  PCK @ 0.05 * trgt_max_dim
     kpts_trgt_euc_dist_mean:      Optional[Tensor] = None  # (B,)  mean Euclidean dist
     kpts_trgt_geo_dist_mean:      Optional[Tensor] = None  # (B,)  mean geodesic dist
     kpts_trgt_geo_dist_norm_mean: Optional[Tensor] = None  # (B,)  mean geodesic dist / sqrt(surface area)
@@ -48,6 +49,7 @@ class ObjectPairQuantBatch:
         out = {}
         for fname in (
             "kpts_trgt_pck01",
+            "kpts_trgt_pck005",
             "kpts_trgt_euc_dist_mean",
             "kpts_trgt_geo_dist_mean",
             "kpts_trgt_geo_dist_norm_mean",

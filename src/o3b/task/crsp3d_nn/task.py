@@ -511,11 +511,14 @@ class Crsp3DNNTask(OD3D_Task):
             )  # (B, K) long, (B, K, 3), (B, K)
             kpts_trgt_euc_dist_mean = (kpts_trgt_euc_dist * kpts_valid.float()).sum(dim=1) / n_valid
 
-            # PCK @ 0.1 * trgt_max_dim
-            kpts_trgt_pck01 = (
-                (kpts_trgt_euc_dist < trgt_max_dim.unsqueeze(1) * 0.1).float()
-                * kpts_valid.float()
-            ).sum(dim=1) / n_valid
+            # PCK @ 0.1 / 0.05 * trgt_max_dim
+            def _pck(frac):
+                return (
+                    (kpts_trgt_euc_dist < trgt_max_dim.unsqueeze(1) * frac).float()
+                    * kpts_valid.float()
+                ).sum(dim=1) / n_valid
+            kpts_trgt_pck01  = _pck(0.1)
+            kpts_trgt_pck005 = _pck(0.05)
 
             # Geodesic error (pred → GT vert on target mesh), normalized by sqrt(surface area)
             kpts_trgt_geo_dist      = torch.zeros(B_k, K, dtype=torch.float32)
@@ -557,6 +560,7 @@ class Crsp3DNNTask(OD3D_Task):
                 kpts_trgt_geo_dist           = geo_t,
                 kpts_mask                    = kpts_valid,
                 kpts_trgt_pck01              = kpts_trgt_pck01,
+                kpts_trgt_pck005             = kpts_trgt_pck005,
                 kpts_trgt_euc_dist_mean      = kpts_trgt_euc_dist_mean,
                 kpts_trgt_geo_dist_mean      = kpts_trgt_geo_dist_mean,
                 kpts_trgt_geo_dist_norm_mean = kpts_trgt_geo_dist_norm_mean,
