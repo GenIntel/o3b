@@ -253,8 +253,9 @@ class Mesh:
 
         Each part goes through its own ``load_or_convert`` under its own
         mesh_type directory (a sibling of *converted_path*'s), so a part that is
-        already cached is only read, never re-extracted. Parts share the
-        marching-cubes remesh, hence the vertex check before rows are joined.
+        already cached is only read, never re-extracted -- unless it was cached
+        on a different dmtet/fc fit than the bare geometry, see below. Parts
+        share one remesh, hence the vertex check before rows are joined.
         Each part except UNNORMALISED_FEATS (ncds) is L2-normalised per vertex first: the extractors' scales
         differ (dinov2b ~33 vs partfield ~8.5), and the crsp3d task's Euclidean
         nearest neighbour would otherwise be decided by the largest-norm part
@@ -263,7 +264,10 @@ class Mesh:
         """
         import torch.nn.functional as F
 
-        feature_model = _parse_mc_type(mesh_type)["feature_model"]
+        from dataclasses import replace as _replace
+
+        params = _parse_mc_type(mesh_type)
+        feature_model = params["feature_model"]
         base = mesh_type[: -len(feature_model)]  # "mc16_vuni100_r256_f", "fc16_vuni100_r256_f", …
         parts, weights = [], []
         for spec in feature_model.split("+"):
@@ -275,6 +279,29 @@ class Mesh:
             if part.vert_feats is None:
                 raise ValueError(f"{part_type} carries no vert_feats ({part_path})")
             parts.append((part_type, part))
+
+        # A fitted geometry (dmtet / fc) is not bit-reproducible, and the
+        # per-mesh flock does not hold across nodes on the cluster's NFS, so
+        # jobs of one category can fit the same object concurrently and cache
+        # its feature types on *different* fits (seen for fc16/fc32: dinov2b
+        # written on one fit, the bare geometry overwritten by another 5 s
+        # later). The cached bare geometry is the reference: a part on any
+        # other fit is re-extracted on it and its cache rewritten, so the
+        # caches converge instead of failing the concat. (mc is deterministic,
+        # every part is already on the same remesh.)
+        if params["method"] != "mc":
+            geom_path = converted_path.parent.parent / params["geometry"] / converted_path.name
+            ref = cls.load_or_convert(geom_path, default_path, params["geometry"])
+            for i, (part_type, part) in enumerate(parts):
+                if part.verts.shape == ref.verts.shape and torch.allclose(part.verts, ref.verts, atol=1e-5):
+                    continue
+                logger.warning("%s: %s was cached on another %s fit; re-extracting it on %s",
+                               converted_path.name, part_type, params["geometry"], geom_path)
+                part = _add_vert_feats(_replace(ref, vert_feats=None), _parse_mc_type(part_type))
+                part_path = converted_path.parent.parent / part_type / converted_path.name
+                with _file_lock(part_path.with_name(part_path.name + ".lock")):
+                    part.save(part_path)
+                parts[i] = (part_type, part)
 
         mesh = parts[0][1]
         for part_type, part in parts[1:]:
