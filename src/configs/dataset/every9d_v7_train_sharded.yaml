@@ -1,0 +1,63 @@
+# every9d_v7_train_sharded — every9d_v7_train materialised into ONE Arrow cache over every category.
+#
+#   o3b dataset index -d every9d_v7 -p slurm_lmbl40 --remote   # once, if absent
+#   o3b dataset init  -d every9d_v7_train_sharded -p slurm_lmbl40 --remote --chunks 10
+#
+# The full split rather than every9d_v7_train_max5: every9d_v7_train is the
+# re-drawn selection in which every tested category leaves a train object
+# behind, so 146 sequences sit on the train side here that max5 tests on
+# (110,887 train / 3,656 test sequences against 110,741 / 3,802). Everything
+# else — crop, modalities, frame cap, load-time axis alignment — is
+# every9d_v7_train_max5_sharded's; see that file for why.
+#
+# MUST run on a compute node: fo_mask_amodal is rasterised at build time.
+
+defaults:
+  - every9d_v7_train
+  - _self_
+
+categories:            # null = every category the subset covers
+filter_count_max:
+
+img_size: 256
+
+# uco3d.yaml's list plus obj_size3d — restated whole, since OmegaConf
+# replaces lists rather than merging them.
+modalities:
+  - rgb                    # decoded from rgb_video.mp4 at the frame's timestamp
+  - depth                  # depth_maps.h5, metres
+  - depth_mask
+  - fo_mask                # mask_video.mkv (the object; UCO3D is one object per sequence)
+  - fo_mask_amodal         # mesh_type mesh rendered under the GT pose (a reconstruction,
+  - fo_mask_amodal_dt      #   not an artist mesh — it fills occlusions at that fidelity)
+  - cam_intr4x4
+  - cam_tform4x4_obj       # metric rigid cam←obj
+  - cam_tform4x4_obj_ncds  # task target: maps normalised object points → camera space
+  - cam_bbox2d             # required by the CropCamBBox2D transform
+  - cam_bbox3d
+  - obj_syms               # per-axis symmetry, derived from the category's orientation tree
+  - category
+  - mesh
+
+# UCO3D has no keypoint annotations.
+  - obj_size3d             # GT side lengths: PoseTask's size error + 3-D IoU
+
+# Frames per sequence. every9d_v7 inherits 16 from uco3d.yaml; kept explicit
+# here because it is what bounds the cache size.
+extra:
+  frames_count_max_per_sequence: 16
+
+sharded_shard_size: 500
+sharded_num_workers: 8
+
+sharded_transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}
+  W: ${img_size}
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+transform:
+
+sharded_name: every9d_v7_train_r${img_size}_all
+sharded_override: false
