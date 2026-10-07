@@ -1093,7 +1093,7 @@ def _save_script_locally(name: str, content: str, ts: str | None = None) -> Path
     return path
 
 
-# Log lines that mean "this node's GPU is broken", not "this run is broken": the
+# Log lines that mean "this node is broken", not "this run is broken": the
 # job fails through no fault of its own and the identical job succeeds elsewhere,
 # so `_make_sbatch_script` resubmits on them with the node excluded. Kept
 # deliberately narrow — a pattern that also matches a genuine bug in the code
@@ -1107,6 +1107,13 @@ _GPU_FAULT_PATTERNS = [
     "CUDA driver initialization failed",
     "no CUDA-capable device is detected",
     "CUDA error: unspecified launch failure",
+    # NCCL hanging on the job's *first* collective: every rank enqueued it and
+    # none completed it within the process-group timeout. Seen on single nodes
+    # (dlc2gpu11, dlc2gpu15) where the identical job then trained elsewhere. A
+    # later collective (SeqNum > 1) is not matched — by then the ranks have
+    # communicated, and a hang there is as likely a rank-divergence bug.
+    # (grep -E pattern, hence the escaped parenthesis.)
+    r"Watchdog caught collective operation timeout: WorkNCCL\(SeqNum=1,",
 ]
 
 
@@ -1216,7 +1223,7 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         "",
         env_block,
         "",
-        "# --- automatic retry on GPU hardware faults --------------------------",
+        "# --- automatic retry on node faults (GPU hardware, NCCL hang) -------",
         "# The retry is a `scontrol requeue` of this very job, not a fresh sbatch:",
         "# the LMB partitions carry AllocNodes=kis3bat[1-4], so sbatch from a",
         "# compute node is refused with `Batch job submission failed:",
@@ -1267,7 +1274,7 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         # excluded, and the list is otherwise passed on down the whole chain
         '    O3B_NEW_EXCLUDE="$(printf \'%s\\n\' "$O3B_EXCLUDE" "$O3B_CUR" "$O3B_BAD"'
         " | tr ',' '\\n' | grep -v '^$' | sort -u | paste -sd, -)\"",
-        '    echo "=== o3b: GPU hardware fault on ${O3B_BAD:-?} (exit $O3B_RC) —'
+        '    echo "=== o3b: node fault on ${O3B_BAD:-?} (exit $O3B_RC) —'
         ' retrying as attempt $O3B_NEXT/$O3B_MAX_ATTEMPTS,'
         ' excluding ${O3B_NEW_EXCLUDE:-<none>} ==="',
         "    # The requeue SIGTERMs this step; ignoring it buys the seconds needed",
