@@ -310,18 +310,26 @@ ISOSURFACE_FIT_STEPS = 300  # dmtet<N> / fc<N> without _o<steps>
 # direction, and so skip the per-vertex L2 normalisation of a concat: ncds
 # normalised would keep only the direction from the bbox centre, folding every
 # radius onto the unit sphere (the centre and the surface along one ray agree).
-UNNORMALISED_FEATS = {"ncds"}
+UNNORMALISED_FEATS = {"ncds", "ncds_1d", "ncds_3d"}
 
 
-def ncds_vert_feats(verts: Tensor) -> Tensor:
-    """(V, 3) normalised coordinates: centred on the bbox centre, divided by
-    the bbox's largest side, so the longest axis spans [-0.5, 0.5] and the
-    aspect ratio is kept. Computed from the converted mesh itself, in the
-    frame it is cached in; the dataset rotates every object by the same
-    obj_gl_tform4x4_obj_raw afterwards, which leaves NN distances unchanged."""
+def ncds_vert_feats(verts: Tensor, per_axis: bool = False) -> Tensor:
+    """(V, 3) normalised coordinates, centred on the bbox centre.
+
+    ``ncds_1d`` (per_axis=False; ``ncds`` is its old name): divided by the
+    bbox's largest side -- the longest axis spans [-0.5, 0.5], the aspect
+    ratio is kept. ``ncds_3d`` (per_axis=True): each axis divided by its own
+    extent, so all three span [-0.5, 0.5] -- the aspect ratio is dropped and
+    objects of different proportions are matched by relative position along
+    each axis. Computed from the converted mesh itself, in the frame it is
+    cached in, which is the same for every object (the dataset's
+    obj_gl_tform4x4_obj_raw rotates the vertices afterwards, not these
+    feature vectors), so source and target features stay comparable --
+    including ncds_3d's per-axis extents, which are the cached frame's axes."""
     v = verts.float()
     lo, hi = v.min(0).values, v.max(0).values
-    return (v - 0.5 * (lo + hi)) / (hi - lo).max().clamp(min=1e-12)
+    ext = (hi - lo).clamp(min=1e-12) if per_axis else (hi - lo).max().clamp(min=1e-12)
+    return (v - 0.5 * (lo + hi)) / ext
 
 
 def _parse_mc_type(type_str: str) -> dict:
@@ -395,8 +403,8 @@ def _extract_vert_feats(
     import torch
     import torch.nn.functional as F
 
-    if feature_model_name.lower() == "ncds":
-        return ncds_vert_feats(mesh.verts)  # geometry, no model or rendering
+    if feature_model_name.lower() in ("ncds", "ncds_1d", "ncds_3d"):  # geometry, no model or rendering
+        return ncds_vert_feats(mesh.verts, per_axis=feature_model_name.lower() == "ncds_3d")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
