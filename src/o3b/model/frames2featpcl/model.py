@@ -18,6 +18,7 @@ class Frames2FeatPCL(OD3D_Model):
         augment_scale_dev =0.2, # : 0. # 0.2
         augment_transl_dev = 0.1, # : 0. # 0.1
         scale_quantile=0.9, # : 0.9
+        pts3d_opengl=False, # unproject into OpenGL camera space; see frames2featpcl
     ):
         super().__init__()
         self.append_rays3d = append_rays3d
@@ -30,6 +31,7 @@ class Frames2FeatPCL(OD3D_Model):
         self.augment_scale_dev = augment_scale_dev
         self.augment_transl_dev = augment_transl_dev
         self.scale_quantile = scale_quantile
+        self.pts3d_opengl = pts3d_opengl
         
     def forward(self, frames_gt: FrameBatch, frames_pred: FrameBatch = None):
         frames_gt, frames_pred = frames2featpcl(frames_gt, frames_pred, 
@@ -43,5 +45,6 @@ class Frames2FeatPCL(OD3D_Model):
                                                 augment_rot=self.augment_rot,
                                                 augment_scale_dev=self.augment_scale_dev,
                                                 augment_transl_dev=self.augment_transl_dev,
-                                                scale_quantile=self.scale_quantile)
+                                                scale_quantile=self.scale_quantile,
+                                                opengl=self.pts3d_opengl)
         return frames_gt, frames_pred

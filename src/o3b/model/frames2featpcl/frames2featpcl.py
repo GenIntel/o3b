@@ -34,8 +34,16 @@ def frames2featpcl(frames_gt, frames_pred,
                    augment_scale_dev=0.2,
                    augment_transl_dev=0.1,
                    scale_quantile=0.9,
+                   opengl=False,
                    ):
-    
+    # opengl: unproject depth into OpenGL camera space (+Y up, -Z forward), the
+    # convention o3b's poses are written in. With normalize_pts3d the predicted
+    # translation is mapped back through the cloud's normalisation, so it lands
+    # in whatever frame the cloud is in: a CV-frame cloud against an OpenGL
+    # target leaves the network to regress (C - I) @ centre — a distance-
+    # proportional offset the normalisation has just divided out. False keeps
+    # od3d's CV frame, which models trained in od3d expect.
+
     size = frames_gt.size # H, W
 
     # B x 3 x H x W
@@ -83,14 +91,16 @@ def frames2featpcl(frames_gt, frames_pred,
     pts3d_grid_mask[pts3d_zero_mask] = 1
     # add nn layer norm or nn batch norm
     #featmap_res_perm = resize(featmap, H_out=depth.shape[-2], W_out=depth.shape[-1], mode="nearest_v2").permute(0, 2, 3, 1)
-    pts3d_grid = depth2pts3d_grid(depth=depth, cam_intr4x4=frames_gt.cam_intr4x4).permute(0, 2, 3, 1).to(featmap.dtype)
+    pts3d_grid = depth2pts3d_grid(depth=depth, cam_intr4x4=frames_gt.cam_intr4x4, opengl=opengl).permute(0, 2, 3, 1).to(featmap.dtype)
 
     if append_rays3d:
         rays3d_grid = cam_intr4x4_2_rays3d(frames_gt.cam_intr4x4, size).permute(0, 2, 3, 1).to(featmap.dtype)
+        if opengl:
+            rays3d_grid = rays3d_grid * rays3d_grid.new_tensor([1., -1., -1.])
     else:
         rays3d_grid = None
 
-    pts3d_grid = depth2pts3d_grid(depth=depth, cam_intr4x4=frames_gt.cam_intr4x4).permute(0, 2, 3, 1).to(featmap.dtype)
+    pts3d_grid = depth2pts3d_grid(depth=depth, cam_intr4x4=frames_gt.cam_intr4x4, opengl=opengl).permute(0, 2, 3, 1).to(featmap.dtype)
     pxl2d_grid = get_pxl2d_like(depth[:, 0, ..., None]).to(featmap.dtype)
     
     from o3b.cv.visual.resize import resize
@@ -139,6 +149,8 @@ def frames2featpcl(frames_gt, frames_pred,
     
     if append_rays3d:
         center_ray3d = cam_intr4x4_2_center_ray3d(frames_gt.cam_intr4x4, size)
+        if opengl:
+            center_ray3d = center_ray3d * center_ray3d.new_tensor([1., -1., -1.])
         center_ray3d_enc = encode_axes(center_ray3d, dim=10) # -> 10 * 6, 6 because 3 x/y/z * 2 sin/cos
     else:
         center_ray3d_enc = None

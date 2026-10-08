@@ -1327,6 +1327,7 @@ def tform4x4_from_transl3d(transl3d: torch.Tensor):
         torch.eye(4)[(None,) * (len(transl3d.shape) - 1)]
         .expand(transl3d.shape[:-1] + torch.Size([4, 4]))
         .to(device=transl3d.device, dtype=transl3d.dtype)
+        .clone()  # .to() is a no-op on a CPU float tensor, leaving the expand's shared storage
     )
     a_tform4x4_b[..., :3, 3] = transl3d
     return a_tform4x4_b
