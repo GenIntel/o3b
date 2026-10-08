@@ -426,6 +426,14 @@ class Od3dFrameDataset(ConfigurableDataset):
         uco3d_cat = self._uco3d_category(category)
 
         T_orient = self._obj_orient_tform(category)
+        # extra.map_obj_orient_to_uco3d: false keeps the dataset's own per-
+        # category object axes (od3d's use_map_obj_orient_uco3d: False) and only
+        # applies the shared T_gl. The symmetries below then have to be stated in
+        # those native axes — see there.
+        R_orient_skipped = None
+        if T_orient is not None and not (self.cfg.extra or {}).get("map_obj_orient_to_uco3d", True):
+            R_orient_skipped = T_orient[:3, :3]
+            T_orient = None
         T_gl = None
         if self.cfg.obj_gl_tform4x4_obj_raw is not None:
             T_gl = torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=torch.float32)
@@ -477,8 +485,15 @@ class Od3dFrameDataset(ConfigurableDataset):
             except KeyError:
                 syms = None
             if syms is not None:
-                if T_gl is not None:
-                    syms = (T_gl[:3, :3].abs() @ syms.float()).round().long()
+                # syms are per axis of UCO3D's raw frame. The item's frame is
+                # T_gl @ raw — or, with the orientation table skipped,
+                # T_gl @ inv(T_orient) @ raw — so they follow |that rotation|.
+                R_sym = T_gl[:3, :3] if T_gl is not None else None
+                if R_orient_skipped is not None:
+                    R_back = R_orient_skipped.t()
+                    R_sym = R_back if R_sym is None else R_sym @ R_back
+                if R_sym is not None:
+                    syms = (R_sym.abs() @ syms.float()).round().long()
                 item.obj_syms = syms
         return item
 

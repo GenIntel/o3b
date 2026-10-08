@@ -101,6 +101,11 @@ extra:
   depth_type: depth_anything_v3
   mask_type: sam_kpts2d_bbox
   map_to_uco3d: true
+  # Per-category re-orientation onto UCO3D's object axes (od3d's
+  # use_map_obj_orient_uco3d). false keeps this dataset's own axes per category
+  # — T_gl and the UCO3D symmetries (restated in those axes) still apply — so a
+  # model trained that way is scored on the dataset's native labelling.
+  map_obj_orient_to_uco3d: true
   # NOTE: ImageNet3D's metas carry an `object_status` tier (status_good /
   # _partially / _barely / _bad) and od3d could filter on it at extract-meta
   # time. o3b does NOT implement that filter, so no key for it is offered here

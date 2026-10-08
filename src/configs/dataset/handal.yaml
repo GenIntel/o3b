@@ -93,6 +93,11 @@ filter_count_max:
 extra:
   depth_type: depth_nerf
   map_to_uco3d: true
+  # Per-category re-orientation onto UCO3D's object axes (od3d's
+  # use_map_obj_orient_uco3d). false keeps this dataset's own axes per category
+  # — T_gl and the UCO3D symmetries (restated in those axes) still apply — so a
+  # model trained that way is scored on the dataset's native labelling.
+  map_obj_orient_to_uco3d: true
   # HANDAL's own poses are metric millimetres; o3b works in metres.
   scale_to_m: 0.001
   # NOTE: the lmbraid19 copy has four EMPTY category directories
