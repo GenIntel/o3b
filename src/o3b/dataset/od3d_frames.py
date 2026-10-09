@@ -50,23 +50,7 @@ from o3b.dataset.dataset import ConfigurableDataset, ItemType
 
 logger = logging.getLogger(__name__)
 
-def _corners_canonical(v_min, v_max):
-    """The 8 box corners in the order o3b's box drawing requires.
-
-    _corners8_to_size_tform documents it as 0-3 bottom, 4-7 top with 0->1 = +x,
-    0->3 = +y, 0->4 = +z, and draw_bbox3d_corners walks (0,1),(1,2),(2,3),(3,0)
-    then (4,5),(5,6),(6,7),(7,4) then the four verticals. A plain x/y/z triple
-    loop yields a different permutation, and the wireframe is then drawn across
-    the diagonals — right size, right place, visibly not a box.
-    """
-    import torch
-
-    x0, y0, z0 = v_min.tolist()
-    x1, y1, z1 = v_max.tolist()
-    return torch.tensor([
-        [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],   # bottom
-        [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],   # top
-    ], dtype=torch.float32)
+from o3b.dataset.obj_frame import _corners_canonical, rotate_object_frame  # noqa: E402
 
 
 #: read_depth_image decodes uint16 millimetres, so this is the largest value the
@@ -444,38 +428,7 @@ class Od3dFrameDataset(ConfigurableDataset):
             T = T_orient if T_orient is not None else T_gl
 
         if T is not None:
-            R = T[:3, :3]
-            R_abs = R.abs()
-            if item.cam_tform4x4_obj is not None:
-                item.cam_tform4x4_obj = item.cam_tform4x4_obj @ inv_tform4x4(T)
-            if item.obj_ncds0c_tform4x4_obj is not None:
-                item.obj_ncds0c_tform4x4_obj = T @ item.obj_ncds0c_tform4x4_obj @ inv_tform4x4(T)
-            if item.obj_size3d is not None:
-                item.obj_size3d = R_abs @ item.obj_size3d.float()
-            if item.mesh is not None:
-                # replace, never mutate: _object_geometry hands out a fresh Mesh
-                # that still SHARES the cached verts tensor, so rotating in place
-                # would turn the cache entry too, and every later frame of the
-                # object would be rotated again.
-                from dataclasses import replace as _r_mesh
-                item.mesh = _r_mesh(item.mesh, verts=item.mesh.verts.float() @ R.T)
-            if item.obj_kpts3d is not None:
-                item.obj_kpts3d = item.obj_kpts3d.float() @ R.T
-            if item.obj_bbox3d is not None:
-                # rotate, then REBUILD in canonical corner order: rotating alone
-                # keeps the box in place but permutes which corner is index 0..7,
-                # which draw_bbox3d_corners / _corners8_to_size_tform rely on
-                rot = item.obj_bbox3d.float() @ R.T
-                item.obj_bbox3d = _corners_canonical(rot.min(dim=0).values,
-                                                     rot.max(dim=0).values)
-            if item.cam_bbox3d is not None and item.cam_tform4x4_obj is not None \
-                    and item.obj_bbox3d is not None:
-                # camera-space, so unmoved by the rotation, but its corner order
-                # followed obj_bbox3d's — recompose through the rotated pose
-                R2, t2 = item.cam_tform4x4_obj[:3, :3], item.cam_tform4x4_obj[:3, 3]
-                item.cam_bbox3d = item.obj_bbox3d.float() @ R2.t() + t2
-            if item.cam_tform4x4_obj is not None and item.obj_ncds0c_tform4x4_obj is not None:
-                item.cam_tform4x4_obj_ncds = item.cam_tform4x4_obj @ item.obj_ncds0c_tform4x4_obj
+            rotate_object_frame(item, T)
 
         if uco3d_cat is not None:
             from o3b.dataset.uco3d.obj_syms import obj_syms_for_category
@@ -911,6 +864,18 @@ class Od3dFrameDataset(ConfigurableDataset):
     def _cam_bbox2d_from_meta(self, meta):
         """Dataset-specific 2-D box from the meta, or None to use ``l_bbox``."""
         return None
+
+    def _mask_prompt_bbox_from_meta(self, meta):
+        """The xyxy box od3d prompts its box-based SAM masks with (``frame.bbox``).
+
+        ``l_bbox`` by default (od3d's ``meta.bbox``); datasets whose od3d frame
+        derives it otherwise override this. Used by ``preprocess-mask`` only —
+        the crop box (cam_bbox2d) is a separate choice and stays as it is.
+        """
+        box = self._cam_bbox2d_from_meta(meta)
+        if box is None and meta.get("l_bbox"):
+            box = meta["l_bbox"]
+        return box
 
     def _mesh_path(self, row, meta) -> Optional[Path]:
         """Where this row's object mesh lives; None when the dataset has none.

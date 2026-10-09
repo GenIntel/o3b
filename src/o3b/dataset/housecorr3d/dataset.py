@@ -149,6 +149,70 @@ class HouseCorr3D(ConfigurableDataset):
     def path_object_meshes(self) -> Path:
         return self.path_raw / "PAM" / "object_meshes"
 
+    # ── od3d's category-level orientation (onto UCO3D's object axes) ──────────
+    # Applied on read, never baked: the shards keep the global
+    # obj_gl_tform4x4_obj_raw frame, so switching the mapping costs no rebuild.
+
+    #: UCO3D raw -> o3b canonical, uco3d.yaml's obj_gl_tform4x4_obj_raw. od3d's
+    #: table targets UCO3D's *raw* axes; this takes them on to o3b's, exactly as
+    #: od3d_frames composes T_gl @ T_orient for ImageNet3D / HANDAL / Objectron.
+    _OBJ_GL_TFORM_UCO3D = ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0))
+
+    def __getitem__(self, idx: int):
+        return self._apply_uco3d_category_frame(super().__getitem__(idx))
+
+    def _apply_uco3d_category_frame(self, item):
+        """od3d's Omni6DPose -> UCO3D labelling for one frame-object item.
+
+        * ``extra.map_obj_orient_to_uco3d`` (default false): turn the object frame
+          from the global ``obj_gl_tform4x4_obj_raw`` labelling onto the
+          category's UCO3D axes — T_extra = (T_gl_uco3d @ M_cat) @ inv(T_gl),
+          with M_cat od3d's per-category table. The per-instance Omni6DPose
+          symmetry (``obj_syms``) turns with it.
+        * ``obj_syms_cat``: the category's symmetry from UCO3D's orientation tree,
+          stated in the item's axes either way — od3d's second Omni6DPose number
+          (``use_map_obj_syms_uco3d``), next to the instance-level ``obj_syms``.
+        """
+        import torch
+
+        if item is None or not isinstance(getattr(item, "category", None), str):
+            return item
+        from o3b.dataset.housecorr3d.omni6dpose_uco3d import (
+            MAP_CATEGORIES_OBJ_ORIENT_OMNI6DPOSE_TO_UCO3D as ORIENT,
+            MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D as CAT_MAP,
+        )
+        from o3b.cv.geometry.transform import inv_tform4x4, transf4x4_from_rot3x3
+
+        cat = item.category
+        R_gl_u = torch.tensor(self._OBJ_GL_TFORM_UCO3D)
+        T_gl = (torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=torch.float32)
+                if self.cfg.obj_gl_tform4x4_obj_raw is not None else torch.eye(4))
+        M = torch.tensor(ORIENT[cat], dtype=torch.float32) if cat in ORIENT else None
+        mapped = bool((self.cfg.extra or {}).get("map_obj_orient_to_uco3d", False))
+
+        if mapped and M is not None:
+            from o3b.dataset.obj_frame import rotate_object_frame
+            T_extra = transf4x4_from_rot3x3(R_gl_u @ M) @ inv_tform4x4(T_gl)
+            rotate_object_frame(item, T_extra, rotate_syms=True)
+
+        if getattr(item, "obj_syms", None) is not None and CAT_MAP.get(cat):
+            from o3b.dataset.uco3d.obj_syms import obj_syms_for_category
+            try:
+                syms = obj_syms_for_category(CAT_MAP[cat])
+            except KeyError:
+                syms = None
+            if syms is not None:
+                # syms are per axis of UCO3D's raw frame; the item's frame is
+                # T_gl_uco3d @ raw when mapped, else T_gl @ inv(M) @ raw
+                if mapped and M is not None:
+                    R_sym = R_gl_u
+                elif M is not None:
+                    R_sym = T_gl[:3, :3] @ M.t()
+                else:
+                    R_sym = T_gl[:3, :3]
+                item.obj_syms_cat = (R_sym.abs() @ syms.float()).round().long()
+        return item
+
     @property
     def path_raw_meta(self) -> Path:
         return self.path_raw / "Meta"

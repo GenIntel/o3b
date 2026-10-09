@@ -14,6 +14,10 @@ for that error measures the annotation, not the model. A mug's handle does
 determine it. Reporting only one number would be choosing wrongly for half the
 categories, which is why the published table carries both per cell.
 
+Omni6DPose annotates symmetry per *instance*; there ``_sym`` uses that, and a
+third set, ``_symcat``, uses the category's symmetry from UCO3D's orientation
+tree (``obj_syms_cat``). od3d's Omni6DPose cells are instance / category.
+
 **Scale.** ``pose_transl_*`` and ``pose_bbox3d_*`` are metric and therefore
 meaningless for PASCAL3D and ImageNet3D, whose poses are in normalised CAD
 units. They are still computed — suppressing them per dataset would put that
@@ -125,6 +129,16 @@ class PoseTask(OD3D_Task):
             quant.pose_rot_err_rad_sym = rot_err_sym
         else:
             rot_err_sym = None
+        # category-level symmetry next to an instance-level obj_syms (Omni6DPose):
+        # od3d's table reports both for those datasets, instance first
+        syms_cat = getattr(batch, "obj_syms_cat", None)
+        rot_err_symcat = None
+        if syms_cat is not None:
+            _, rot_err_symcat = get_pose_diff(
+                pred_tform4x4=pred.clone(), gt_tform4x4=gt.clone(),
+                obj_rot3d_obj_syms=syms_cat, lp_norm=2,
+            )
+            quant.pose_rot_err_rad_symcat = rot_err_symcat
 
         for deg in self.rot_acc_deg:
             thr = math.radians(deg)
@@ -132,6 +146,9 @@ class PoseTask(OD3D_Task):
             if rot_err_sym is not None:
                 setattr(quant, f"pose_rot_acc_{int(deg)}deg_sym",
                         (rot_err_sym < thr).float())
+            if rot_err_symcat is not None:
+                setattr(quant, f"pose_rot_acc_{int(deg)}deg_symcat",
+                        (rot_err_symcat < thr).float())
 
         # ── translation ──────────────────────────────────────────────────────
         transl_err = (pred[..., :3, 3] - gt[..., :3, 3]).norm(dim=-1)

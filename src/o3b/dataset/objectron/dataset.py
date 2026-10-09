@@ -151,6 +151,19 @@ class Objectron(Od3dFrameDataset):
         else:
             print("[Objectron (frames)] already present — nothing to do.")
 
+    def _mask_prompt_bbox_from_meta(self, meta):
+        """od3d's Objectron ``frame.bbox``: min/max of the 2-D keypoint annotation
+        (the projected box corners, ``l_kpts2d_annot``), unclamped — od3d's
+        ``OD3D_FrameBBoxFromKpts2d3dMixin``. The SAM3 call clamps it to the image.
+        Objectron's metas carry no ``l_bbox``.
+        """
+        k = meta.get("l_kpts2d_annot")
+        if not k:
+            return None
+        xs = [float(p[0]) for p in k]
+        ys = [float(p[1]) for p in k]
+        return [min(xs), min(ys), max(xs), max(ys)]
+
     def _mesh_path(self, row, meta) -> Optional[Path]:
         """The annotated cuboid, at
         mesh/<mesh_type>/keypoints/meta/<split>/<category>/<sequence>/mesh.ply.

@@ -173,6 +173,11 @@ class Object:
                                                         #  rotational, 1 none, 2 half (180°),
                                                         #  4 quarter (90°) — see o3b.cv.metric.pose.
                                                         #  get_obj_tform4x4_obj_sym / get_obj_axis6d_with_mask.
+    obj_syms_cat:            Optional[Tensor] = None  # (3,)  same code, but the *category's*
+                                                        #  symmetry from UCO3D's orientation tree,
+                                                        #  for datasets whose obj_syms is per
+                                                        #  instance (Omni6DPose): PoseTask scores
+                                                        #  both (*_sym and *_symcat).
     obj_kpts3d_syms:         Optional[Tensor] = None  # (K, S, 3)  discrete-symmetric keypoint
                                                         #  candidates derived from obj_syms + obj_kpts3d
                                                         #  (candidate 0 is the identity); same space as

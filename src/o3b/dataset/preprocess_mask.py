@@ -9,9 +9,10 @@ in every choice that changes the mask:
 
 * the SAM2-style ``Sam3TrackerModel`` of ``facebook/sam3``, not the text model
   (a box without a text concept goes to the tracker in od3d);
-* prompts: the frame's 2-D box (``l_bbox`` from the meta, clamped to the
-  image), 8 *negative* points on its corners and edge midpoints, and 1
-  *positive* point at its centre;
+* prompts: the frame's 2-D box as od3d derives it
+  (``_mask_prompt_bbox_from_meta`` — for Objectron the min/max of the
+  projected box corners), clamped to the image; 8 *negative* points on its
+  corners and edge midpoints, and 1 *positive* point at its centre;
 * ``multimask_output=True``, bfloat16 autocast, and the candidate with the
   highest predicted IoU, thresholded at > 0;
 * the full uint8 RGB frame, untransformed (od3d's SAM3 transform is empty);
@@ -144,11 +145,7 @@ def run_preprocess_mask(config_path: Path, *, platform: str = "default",
         imgs, bboxs, outs = [], [], []
         for row in todo[i:i + batch_size]:
             meta = load_meta_yaml(ds.meta_path(row))
-            bbox = None
-            if meta is not None:
-                bbox = ds._cam_bbox2d_from_meta(meta)
-                if bbox is None and meta.get("l_bbox"):
-                    bbox = meta["l_bbox"]
+            bbox = ds._mask_prompt_bbox_from_meta(meta) if meta is not None else None
             if meta is None or bbox is None or not meta.get("rfpath_rgb"):
                 n_skipped += 1
                 continue

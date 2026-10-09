@@ -556,6 +556,7 @@ class FrameObjectBatch:
     # silently rather than as an error.
     obj_size3d:       Optional[Tensor]       = None  # (B, 3) side lengths, object frame
     obj_syms:         Optional[Tensor]       = None  # (B, 3) see FrameObject.obj_syms
+    obj_syms_cat:     Optional[Tensor]       = None  # (B, 3) see Object.obj_syms_cat
     # object
     pts3d:                   Optional[Tensor] = None  # (B, N, 3)
     pts3d_feats:             Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
@@ -735,6 +736,7 @@ def collate_frame_objects(
         obj_kpts3d_mask         = _get("obj_kpts3d_mask"),
         obj_size3d              = _get("obj_size3d"),
         obj_syms                = _get("obj_syms"),
+        obj_syms_cat            = _get("obj_syms_cat"),
         # GT meshes stay per-sample (variable vertex counts); ObjGeo3D's pcl_cd
         # uses their vertices as the target point cloud
         meshes = (

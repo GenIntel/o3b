@@ -40,3 +40,8 @@ extra:
   frames_count_max_per_sequence:
   subset_fraction: 0.1
   subset_seed: 0
+  # od3d's category-level orientation: each category's objects turned onto
+  # UCO3D's axes on read (housecorr3d/omni6dpose_uco3d.py, from od3d), as od3d's
+  # Omni6DPose evaluation has it (use_map_obj_orient_uco3d: True). Not baked
+  # into the shards.
+  map_obj_orient_to_uco3d: true
