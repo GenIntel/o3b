@@ -195,13 +195,20 @@ class HouseCorr3D(ConfigurableDataset):
             T_extra = transf4x4_from_rot3x3(R_gl_u @ M) @ inv_tform4x4(T_gl)
             rotate_object_frame(item, T_extra, rotate_syms=True)
 
-        if getattr(item, "obj_syms", None) is not None and CAT_MAP.get(cat):
+        if getattr(item, "obj_syms", None) is not None:
             from o3b.dataset.uco3d.obj_syms import obj_syms_for_category
-            try:
-                syms = obj_syms_for_category(CAT_MAP[cat])
-            except KeyError:
-                syms = None
-            if syms is not None:
+            syms = None
+            if CAT_MAP.get(cat):
+                try:
+                    syms = obj_syms_for_category(CAT_MAP[cat])
+                except KeyError:
+                    syms = None
+            if syms is None:
+                # od3d's fallback for a category UCO3D's tree cannot resolve: no
+                # symmetry. Never None — the batch drops a field as soon as one
+                # sample lacks it, which would lose *_symcat for whole batches.
+                item.obj_syms_cat = torch.ones(3, dtype=torch.long)
+            else:
                 # syms are per axis of UCO3D's raw frame; the item's frame is
                 # T_gl_uco3d @ raw when mapped, else T_gl @ inv(M) @ raw
                 if mapped and M is not None:
