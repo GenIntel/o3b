@@ -544,7 +544,9 @@ def _render_mesh_pyrender(
     d_max = d[d > 0].max() if (d > 0).any() else torch.tensor(1.0)
     depth_rgb = (d / d_max).clamp(0, 1).unsqueeze(1).expand(-1, 3, -1, -1)
 
-    return {"rgb": rgb, "depth": depth_rgb, "normals": normals}
+    # depth_metric: pyrender's linear depth (distance along the view axis, 0 =
+    # background), for occlusion tests -- "depth" above is rescaled for display
+    return {"rgb": rgb, "depth": depth_rgb, "normals": normals, "depth_metric": depth}
 
 
 def _render_mesh_nvdiffrast(

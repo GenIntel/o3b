@@ -426,6 +426,16 @@ def _extract_vert_feats(
 ) -> Tensor:
     """Render mesh from n_views uniform viewpoints, extract features with the named model,
     project mesh vertices onto each feature map, and return per-vertex mean features (V, C).
+
+    Suffixes on a rendering model's name (H03, research/tasks/H03/):
+      ``<model>_vis``    mean over the views where the vertex is *visible*: inside
+                         the image and passing a depth test against the rendered
+                         depth. Without a suffix only the image bounds are
+                         checked, so occluded views add the occluder's feature.
+      ``<model>_mv``     no mean: every view kept, (V, N*C) float16, NaN where the
+                         vertex is outside the view. The crsp3d task un-flattens
+                         it for its multi-view distances (``feat_dist``).
+      ``<model>_mvvis``  as ``_mv``, NaN also where the vertex is occluded.
     """
     import torch
     import torch.nn.functional as F
@@ -435,7 +445,15 @@ def _extract_vert_feats(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(feature_model_name)
+    import re
+    _m = re.fullmatch(r"(.+?)_(mvvis|mv|vis)", feature_model_name)
+    view_mode = _m.group(2) if _m else ""
+    if _m:
+        feature_model_name = _m.group(1)
+    per_view = view_mode in ("mv", "mvvis")
+    occlusion = view_mode in ("vis", "mvvis")
+
+    print(feature_model_name, view_mode)
     
     # ── Models that consume the mesh directly (own rendering or 3D encoder) ─────
     _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip", "partfield", "meshfm"}
@@ -457,6 +475,7 @@ def _extract_vert_feats(
     batch = sample_uniform_viewpoints(n_views, mesh=mesh)
     modalities = render_mesh_from_viewpoints(batch, H=H, W=W, renderer="pyrender")
     rgbs    = modalities["rgb"].to(device)                               # (N, 3, H, W) float [0,1]
+    depth_metric = modalities.get("depth_metric")                        # (N, 1, H, W) linear depth, 0 = bg
     depths  = modalities["depth"][:, 0].to(device) if "depth"   in modalities else None  # (N, H, W)
     normals = modalities["normals"].to(device)      if "normals" in modalities else None  # (N, 3, H, W)
 
@@ -499,6 +518,21 @@ def _extract_vert_feats(
         & (verts_2d[..., 1] >= 0) & (verts_2d[..., 1] <= H - 1)
     )                                                             # (N, V)
 
+    if occlusion:
+        # depth test: the vertex's depth along the view axis (OpenGL: -z_cam)
+        # against the rendered depth at its pixel; the tolerance absorbs the
+        # pixel footprint on slanted surfaces (2 % of the bbox diagonal)
+        if depth_metric is None:
+            raise ValueError("occlusion-aware features need the renderer's depth_metric")
+        dm = depth_metric[:, 0].to(device).float()                          # (N, H, W)
+        v_h = torch.cat([verts, torch.ones_like(verts[:, :1])], dim=1)       # (V, 4)
+        z_v = -(cam_tform4x4_obj @ v_h.T)[:, 2, :]                           # (N, V)
+        px = verts_2d[..., 0].round().long().clamp(0, W - 1)
+        py = verts_2d[..., 1].round().long().clamp(0, H - 1)
+        z_px = dm[torch.arange(N, device=device)[:, None], py, px]           # (N, V)
+        tol = 0.02 * (verts.max(0).values - verts.min(0).values).norm()
+        valid = valid & (z_px > 0) & (z_v <= z_px + tol)
+
     # normalise pixel coords to [-1, 1] in feature-map space
     grid_x = (verts_2d[..., 0] / (W - 1)) * 2 - 1
     grid_y = (verts_2d[..., 1] / (H - 1)) * 2 - 1
@@ -511,6 +545,15 @@ def _extract_vert_feats(
     featmaps = featmaps.float()
     N, C = featmaps.shape[:2]
     chunk = max(1, 2 ** 28 // (N * C))
+    if per_view:
+        # (V, N*C) float16, NaN where the view does not see the vertex
+        out = []
+        for i in range(0, V, chunk):
+            f = F.grid_sample(featmaps, grid[:, i:i + chunk], mode="bilinear",
+                              align_corners=True, padding_mode="zeros").squeeze(-1)  # (N, C, v)
+            f = f.masked_fill(~valid[:, i:i + chunk].unsqueeze(1), float("nan"))
+            out.append(f.permute(2, 0, 1).reshape(f.shape[2], N * C).half().cpu())
+        return torch.cat(out, dim=0)                              # (V, N*C)
     valid_f = valid.float().unsqueeze(1)                          # (N, 1, V)
     vert_feats = torch.cat([
         (F.grid_sample(featmaps, grid[:, i:i + chunk], mode="bilinear",

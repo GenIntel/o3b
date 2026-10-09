@@ -379,6 +379,47 @@ def _render_corr_imgs(
     return torch.stack(imgs_out) if imgs_out else None
 
 
+# ── multi-view feature distances (H03) ────────────────────────────────────────
+
+def _multiview_dists(query: Tensor, trgt: Tensor, view_dim: int, mode: str, chunk: int = 256) -> Tensor:
+    """(Q, N*C) query and (V, N*C) target per-view features, NaN = view does
+    not see the vertex → (Q, V) distances; inf where a side has no view.
+
+    view_mean averages the visible views and takes the Euclidean distance;
+    mean_of_min / min_of_min compare every visible view of the query with
+    every visible view of each target vertex (see Crsp3DNNTask.__init__).
+    """
+    Q, V = query.shape[0], trgt.shape[0]
+    q = query.float().view(Q, -1, view_dim)                       # (Q, N, C)
+    t = trgt.float().view(V, -1, view_dim)                        # (V, N, C)
+    q_ok = ~torch.isnan(q).any(-1)                                # (Q, N)
+    t_ok = ~torch.isnan(t).any(-1)                                # (V, N)
+    q, t = q.nan_to_num(0.0), t.nan_to_num(0.0)
+    out = torch.full((Q, V), float("inf"), device=trgt.device)
+
+    if mode == "view_mean":
+        qm = (q * q_ok[..., None]).sum(1) / q_ok.sum(1, keepdim=True).clamp(min=1)
+        tm = (t * t_ok[..., None]).sum(1) / t_ok.sum(1, keepdim=True).clamp(min=1)
+        d = torch.cdist(qm, tm)
+        d[~q_ok.any(1)] = float("inf")
+        d[:, ~t_ok.any(1)] = float("inf")
+        return d
+
+    t_sq = (t ** 2).sum(-1)                                       # (V, N)
+    for k in range(Q):
+        qk = q[k][q_ok[k]]                                        # (n_k, C) visible views of the query
+        if qk.shape[0] == 0:
+            continue                                              # never seen: stays inf
+        q_sq = (qk ** 2).sum(-1)                                  # (n_k,)
+        for v0 in range(0, V, chunk):
+            tc, tc_ok = t[v0:v0 + chunk], t_ok[v0:v0 + chunk]     # (c, N, C), (c, N)
+            d2 = q_sq[:, None, None] + t_sq[None, v0:v0 + chunk] - 2 * torch.einsum("ic,vjc->ivj", qk, tc)
+            d = d2.clamp(min=0).sqrt().masked_fill(~tc_ok[None], float("inf"))  # (n_k, c, N)
+            nearest = d.min(dim=2).values                         # (n_k, c): per query view, closest target view
+            out[k, v0:v0 + chunk] = nearest.mean(0) if mode == "mean_of_min" else nearest.min(0).values
+    return out
+
+
 # ── task ──────────────────────────────────────────────────────────────────────
 
 @register_task("Crsp3DNNTask")
@@ -400,8 +441,26 @@ class Crsp3DNNTask(OD3D_Task):
       PCK    = fraction where pred target vertex has the correct part label
     """
 
-    def __init__(self, **kwargs):
-        pass
+    FEAT_DISTS = ("euclidean", "view_mean", "mean_of_min", "min_of_min")
+
+    def __init__(self, feat_dist: str = "euclidean", feat_view_dim: Optional[int] = None, **kwargs):
+        """``feat_dist`` -- how a source vertex is compared with target vertices:
+
+        euclidean    one feature per vertex, Euclidean NN (the default).
+        The others read per-view features, (V, N * feat_view_dim) with NaN for
+        views that do not see the vertex (``..._f<model>_mv`` / ``_mvvis``):
+        view_mean    average the visible views, then Euclidean (reproduces the
+                     view-averaged feature; a sanity check).
+        mean_of_min  d(a, b) = mean over a's views i of min over b's views j of
+                     |f_a^i - f_b^j|.
+        min_of_min   d(a, b) = min over i, j of |f_a^i - f_b^j|.
+        """
+        if feat_dist not in self.FEAT_DISTS:
+            raise ValueError(f"feat_dist {feat_dist!r} not in {self.FEAT_DISTS}")
+        if feat_dist != "euclidean" and not feat_view_dim:
+            raise ValueError(f"feat_dist {feat_dist!r} needs feat_view_dim (per-view channels)")
+        self.feat_dist = feat_dist
+        self.feat_view_dim = int(feat_view_dim) if feat_view_dim else None
 
     def forward(self, batch: ObjectPairBatch, return_qualit: bool = True) -> Tuple[ObjectPairQuantBatch, ObjectPairQualitBatch]:
         src_verts       = batch.src_verts3d             # (B, V_src, 3)
@@ -455,7 +514,10 @@ class Crsp3DNNTask(OD3D_Task):
         # ── shared: query feats → nearest target vert ─────────────────────────
         def feat_nn_batch(query_feats_b, b):
             """(Q, F) → (Q,) target vert indices via feature nearest-neighbour."""
-            dists = torch.cdist(query_feats_b.float(), trgt_feats[b].float())  # (Q, V_trgt)
+            if self.feat_dist == "euclidean":
+                dists = torch.cdist(query_feats_b.float(), trgt_feats[b].float())  # (Q, V_trgt)
+            else:
+                dists = _multiview_dists(query_feats_b, trgt_feats[b], self.feat_view_dim, self.feat_dist)
             if trgt_verts_mask is not None:
                 dists = dists.masked_fill(~trgt_verts_mask[b].unsqueeze(0), float("inf"))
             return dists.argmin(dim=1)  # (Q,)
