@@ -1,0 +1,19 @@
+defaults:
+  - slurm_lmbl40
+  - _self_
+
+# slurm_lmbl40 plus the sam3 dependency group (transformers 5), for od3d-style
+# SAM3 masks:
+#
+#   o3b platform setup -p slurm_lmbl40_sam3
+#   o3b dataset preprocess-mask -d objectron_test -p slurm_lmbl40_sam3 --remote
+#
+# `deps` names the env (<repo>_py310_cu124_torch26_sam3), so transformers 5
+# stays out of the env every other platform runs in.
+deps:
+  - sam3
+
+# The gated facebook/sam3 weights were already fetched into this cache by od3d;
+# HF_HOME points the job at it instead of the default ${.path_ws}/hf, so
+# nothing gated has to be downloaded again.
+path_hf_home: ${.path_ws}/hf_cache

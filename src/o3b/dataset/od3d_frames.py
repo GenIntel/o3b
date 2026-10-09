@@ -372,7 +372,7 @@ class Od3dFrameDataset(ConfigurableDataset):
     def _obj_orient_tform(self, category: Optional[str]):
         """(4, 4) rotation taking this category's object axes onto UCO3D's.
 
-        None when the dataset needs no re-orientation (PASCAL3D, Objectron) or
+        None when the dataset needs no re-orientation (PASCAL3D) or
         the category is unmapped.
         """
         import torch
@@ -394,7 +394,7 @@ class Od3dFrameDataset(ConfigurableDataset):
 
         ``T_orient``  per category, this dataset's object axes -> UCO3D's RAW
                       labelling (od3d's map_categories_obj_orient_to_uco3d;
-                      identity for PASCAL3D and Objectron, whose axes already
+                      identity for PASCAL3D, whose axes already
                       agree).
         ``T_gl``      UCO3D raw -> o3b canonical (right/top/back = X/Y/Z), the
                       config's obj_gl_tform4x4_obj_raw — the SAME matrix UCO3D

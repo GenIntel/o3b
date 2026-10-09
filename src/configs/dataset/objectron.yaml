@@ -98,8 +98,16 @@ filter_count_max:
 
 extra:
   depth_type: depth_anything_v3
-  mask_type: sam_bbox
+  # SAM3, prompted with the box and 9 points — od3d's Objectron mask since Feb
+  # 2026 and the one its evaluation shard (objectron_test_msam3_bbox_...) used.
+  # The older SAM mask (sam_bbox) differs on 12% of frames, mostly bike
+  # (median IoU 0.52 between the two). Written by
+  #   o3b dataset preprocess-mask -d objectron_test -p slurm_lmbl40_sam3 --remote
+  mask_type: sam3_bbox
   mesh_type: cuboid500
   map_to_uco3d: true
+  # od3d's per-category table (book and cup turned) — on, as od3d's Objectron
+  # evaluation has it (objectron_test_sharded: use_map_obj_orient_uco3d: True)
+  map_obj_orient_to_uco3d: true
   fetch_copy_from: ${path_datasets_fallback}/Objectron
   fetch_copy_from_preprocess: ${path_datasets_fallback}/Objectron_Preprocess

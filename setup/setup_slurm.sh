@@ -36,6 +36,7 @@ INSTALL_MORPHEUS="${INSTALL_MORPHEUS:-false}"
 INSTALL_MAGICPONY="${INSTALL_MAGICPONY:-false}"
 INSTALL_PARTFIELD="${INSTALL_PARTFIELD:-false}"
 INSTALL_TRINITY="${INSTALL_TRINITY:-false}"
+INSTALL_SAM3="${INSTALL_SAM3:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
 GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
 GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
@@ -721,6 +722,20 @@ if [ "${INSTALL_TRINITY}" = "true" ] || [ "${INSTALL_TRINITY}" = "True" ]; then
     python -c "import torch, flash_attn_2_cuda" >/dev/null 2>&1 \
         && echo "--- flash-attn kernels load OK ---" \
         || echo "WARNING: flash_attn_2_cuda does not load -- LitePT attention stages will crash at forward time."
+fi
+
+
+if [ "${INSTALL_SAM3}" = "true" ] || [ "${INSTALL_SAM3}" = "True" ]; then
+    # SAM3 (facebook/sam3) through transformers, for `o3b dataset preprocess-mask
+    # --mask-type sam3_bbox` — od3d's Objectron mask. The Sam3Tracker classes
+    # exist from transformers 5 on (the cached checkpoint was saved by
+    # 5.0.0.dev0). Its own group, hence its own env: transformers 5 is not
+    # something the other envs should pick up as a side effect.
+    echo "--- pip install sam3 deps (transformers 5) ---"
+    pip install "transformers>=5.0,<6"
+    python -c "from transformers import Sam3TrackerModel, Sam3TrackerProcessor" \
+        && echo "--- transformers Sam3Tracker imports OK ---" \
+        || echo "WARNING: transformers has no Sam3Tracker -- preprocess-mask sam3_bbox will fail."
 fi
 
 

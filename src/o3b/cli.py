@@ -390,6 +390,25 @@ def _build_dataset_parser(sub):
                         help="Run on the --platform's compute node instead of here — "
                              "much faster than reading 114k files over an sshfs mount")
 
+    p_pmask = ds_sub.add_parser(
+        "preprocess-mask",
+        help="Write an instance-mask tree the way od3d's preprocess_mask does "
+             "(sam3_bbox: SAM3 tracker, box + 9 point prompts) — see "
+             "o3b/dataset/preprocess_mask.py",
+    )
+    _add_config(p_pmask)
+    p_pmask.add_argument("--mask-type", default="sam3_bbox", choices=["sam3_bbox"],
+                         help="mask tree to write under <path_preprocess>/mask/ "
+                              "(default: sam3_bbox)")
+    p_pmask.add_argument("--override", action="store_true",
+                         help="Re-segment frames whose mask already exists")
+    p_pmask.add_argument("--limit", type=int, default=None, metavar="N",
+                         help="Only the first N frames (smoke test)")
+    p_pmask.add_argument("--remote", action="store_true",
+                         help="Run on the --platform's compute node (needs a GPU, the "
+                              "sam3 dependency group and the facebook/sam3 weights — "
+                              "use -p slurm_lmbl40_sam3)")
+
     p_axes = ds_sub.add_parser(
         "axes-tform-obj-type",
         help="Per-category axis editor: view a category's objects in their canonical "
@@ -584,8 +603,12 @@ def _run_dataset_remote(args) -> None:
         parts += ["--max", str(args.max_index)]
     if command == "init" and args.limit:
         parts += ["--limit", str(args.limit)]
-    if command in ("init", "hf-upload") and getattr(args, "override", False):
+    if command in ("init", "hf-upload", "preprocess-mask") and getattr(args, "override", False):
         parts.append("--override")
+    if command == "preprocess-mask":
+        parts += ["--mask-type", args.mask_type]
+        if args.limit:
+            parts += ["--limit", str(args.limit)]
     chunks = getattr(args, "chunks", None) if command == "init" else None
     if chunks:
         parts += ["--chunks", str(chunks)]
@@ -782,7 +805,8 @@ def _run_dataset(args, parser=None, argv=None):
     if getattr(args, "ablation", None):
         _run_dataset_ablations(args, parser, argv)
         return
-    if (args.dataset_command in ("index", "init", "tform-obj-to-db", "hf-upload")
+    if (args.dataset_command in ("index", "init", "tform-obj-to-db", "hf-upload",
+                                 "preprocess-mask")
             and getattr(args, "remote", False)):
         _run_dataset_remote(args)
         return
@@ -806,6 +830,11 @@ def _run_dataset(args, parser=None, argv=None):
     if args.dataset_command == "sshfs":
         from o3b.dataset.cli import _run_sshfs
         _run_sshfs(args)
+        return
+    if args.dataset_command == "preprocess-mask":
+        from o3b.dataset.preprocess_mask import run_preprocess_mask
+        run_preprocess_mask(args.config, platform=args.platform, mask_type=args.mask_type,
+                            override=args.override, limit=args.limit)
         return
     if args.dataset_command == "tform-obj-to-db":
         from o3b.dataset.copy_tform_obj import run_tform_obj_to_db

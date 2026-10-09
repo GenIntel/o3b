@@ -26,6 +26,7 @@ from o3b.dataset.dataset import ItemType, register_dataset
 from o3b.dataset.od3d_frames import Od3dFrameDataset
 from o3b.dataset.od3d_fetch import FetchSkipped
 from o3b.dataset.objectron.enum import (
+    MAP_CATEGORIES_OBJ_ORIENT_OBJECTRON_TO_UCO3D,
     MAP_CATEGORIES_OBJECTRON_TO_UCO3D,
     OBJECTRON_CATEGORIES,
 )
@@ -37,9 +38,10 @@ class Objectron(Od3dFrameDataset):
 
     all_categories = tuple(c.value for c in OBJECTRON_CATEGORIES)
     map_categories_to_uco3d = MAP_CATEGORIES_OBJECTRON_TO_UCO3D
-    # No per-category re-orientation: Objectron's box annotation already uses a
-    # consistent right/up/front frame across its nine categories.
-    map_categories_obj_orient_to_uco3d = None
+    # od3d's per-category re-orientation (book and cup turned, the rest
+    # identity) — applied by od3d's Objectron evaluation; an earlier port
+    # assumed none, from an od3d checkout that predated the table.
+    map_categories_obj_orient_to_uco3d = MAP_CATEGORIES_OBJ_ORIENT_OBJECTRON_TO_UCO3D
 
     # sequenced meta tree — see Od3dFrameDataset
     has_sequence_level = True
@@ -126,7 +128,10 @@ class Objectron(Od3dFrameDataset):
             )
 
         # ── rgb: only the sampled frames ─────────────────────────────────────
-        sampled = cls._sampled_frames(path_pre, mask_type, split)
+        # od3d's draw is recorded in the sam_bbox tree whichever mask the config
+        # reads — the sam3_bbox tree is derived from it (preprocess-mask) and may
+        # not exist yet when fetching
+        sampled = cls._sampled_frames(path_pre, "sam_bbox", split)
         if not sampled:
             print("[Objectron (frames)] no mask tree to read the sampling from — "
                   "skipping the rgb copy")

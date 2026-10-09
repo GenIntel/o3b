@@ -43,3 +43,22 @@ MAP_CATEGORIES_OBJECTRON_TO_UCO3D = {
     OBJECTRON_CATEGORIES.LAPTOP: UCO3D_CATEGORIES.LAPTOP_COMPUTER,
     OBJECTRON_CATEGORIES.SHOE: UCO3D_CATEGORIES.SHOE,
 }
+
+
+# Category-level rotation, object-frame axes -> UCO3D-canonical axes. Copied
+# verbatim from od3d (od3d_datasets/objectron/enum.py,
+# MAP_CATEGORIES_OBJ_ORIENT_OBJECTRON_TO_UCO3D — "as tuned interactively via
+# `od3d dataset orients -d objectron_test`"), which its Objectron evaluation
+# applies (objectron_test_sharded: use_map_obj_orient_uco3d: True). Only book
+# and cup are turned; the other seven are identity.
+MAP_CATEGORIES_OBJ_ORIENT_OBJECTRON_TO_UCO3D = {
+    "book": [[0, 1, 0], [0, 0, -1], [-1, 0, 0]],
+    "bike": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "cup": [[0, 1, 0], [-1, 0, 0], [0, 0, 1]],
+    "laptop": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "shoe": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "chair": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "cereal_box": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "camera": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    "bottle": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+}

@@ -42,5 +42,8 @@ sharded_transform:
 
 transform:
 
-sharded_name: objectron_test_r${img_size}_all
+# The mask is baked into the crop and fo_mask, so it is part of the name (as in
+# od3d's objectron_test_m<mask_type>_...): switching extra.mask_type cannot then
+# silently reuse a cache built from the other mask.
+sharded_name: objectron_test_m${extra.mask_type}_r${img_size}_all
 sharded_override: false
