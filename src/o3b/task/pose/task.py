@@ -197,5 +197,10 @@ class PoseTask(OD3D_Task):
             quant.pose_bbox3d_iou = iou
             for thr in self.iou_acc:
                 setattr(quant, f"pose_bbox3d_acc_{int(thr*100)}", (iou > thr).float())
+            from o3b.cv.metric.auc import calc_auc_for_vals_larger_than_thresh
+            for thr in self.iou_acc:
+                setattr(quant, f"pose_bbox3d_auc_{int(thr*100)}",
+                        calc_auc_for_vals_larger_than_thresh(
+                            iou.float(), thresh_min=thr, thresh_max=1.0, steps=100))
 
         return quant, None

@@ -50,6 +50,11 @@ class FrameObjectQuantBatch:
     pose_bbox3d_acc_25: Optional[Tensor] = None
     pose_bbox3d_acc_50: Optional[Tensor] = None
     pose_bbox3d_acc_75: Optional[Tensor] = None
+    # od3d's bbox3d_auc_*: per sample, the share of 100 thresholds evenly
+    # spaced over [t, 1] that the IoU reaches (o3b.cv.metric.auc)
+    pose_bbox3d_auc_25: Optional[Tensor] = None
+    pose_bbox3d_auc_50: Optional[Tensor] = None
+    pose_bbox3d_auc_75: Optional[Tensor] = None
 
     extra: dict = field(default_factory=dict)
 
@@ -62,6 +67,7 @@ class FrameObjectQuantBatch:
         "pose_rot_transl_acc_10deg_5cm", "pose_rot_transl_acc_30deg_10cm",
         "pose_size3d_err_m", "pose_bbox3d_iou", "pose_size3d_iou",
         "pose_bbox3d_acc_25", "pose_bbox3d_acc_50", "pose_bbox3d_acc_75",
+        "pose_bbox3d_auc_25", "pose_bbox3d_auc_50", "pose_bbox3d_auc_75",
     )
 
     def mean(self) -> dict:
