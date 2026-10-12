@@ -1,5 +1,6 @@
 from __future__ import annotations
 import contextlib
+import re
 import logging
 import os
 from dataclasses import dataclass
@@ -311,11 +312,25 @@ class Mesh:
                     f"{converted_path.name}; their per-vertex features do not line up"
                 )
         names = [s.partition("@")[0] for s in feature_model.split("+")]
-        mesh.vert_feats = torch.cat(
-            [w ** 0.5 * (p.vert_feats.float() if name.lower() in UNNORMALISED_FEATS
-                         else F.normalize(p.vert_feats.float(), dim=1))
-             for w, name, (_, p) in zip(weights, names, parts)], dim=1
-        )
+
+        def _part(w, name, p):
+            x = p.vert_feats.float()
+            if re.fullmatch(r".+_(mv|mvvis|mvrast)", name):
+                # per-view part (H03): each view L2-normalised on its own (NaN
+                # views stay NaN), so the task's multi-view distance on this
+                # block plays the role of |d_a - d_b| in the weighted sum
+                N = params["n_views"]
+                x = F.normalize(x.view(x.shape[0], N, -1), dim=-1).reshape(x.shape[0], -1)
+                return w ** 0.5 * x
+            return w ** 0.5 * (x if name.lower() in UNNORMALISED_FEATS else F.normalize(x, dim=1))
+
+        blocks = [(bool(re.fullmatch(r".+_(mv|mvvis|mvrast)", n)), _part(w, n, p))
+                  for w, n, (_, p) in zip(weights, names, parts)]
+        if sum(pv for pv, _ in blocks) > 1:
+            raise ValueError(f"{mesh_type}: at most one per-view part can be concatenated")
+        # the per-view block first: the task reads it as the first N*C channels
+        # and treats the rest as one feature per vertex (Crsp3DNNTask feat_views)
+        mesh.vert_feats = torch.cat([b for pv, b in blocks if pv] + [b for pv, b in blocks if not pv], dim=1)
         return mesh
 
     @classmethod
