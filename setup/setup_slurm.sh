@@ -798,6 +798,9 @@ if _is_true "${INSTALL_ZEROSHOT}"; then
     git -C "${WILDDET3D_DIR}" checkout --quiet "${WILDDET3D_COMMIT}"
     _git_retry git -C "${WILDDET3D_DIR}" submodule update --init --recursive
     pip install --no-deps "vis4d==1.0.0"
+    # WildDet3D's import chain still does `import pkg_resources`, which
+    # setuptools >= 82 removed (as for the mrf3dtopo block)
+    pip install "setuptools<82"
     pip install "ftfy==6.1.1" "ml_collections==1.1.0" pycocotools absl-py cloudpickle
 
     # last, against the numpy 2 MoGe brought in (see the kaolin note above); the
