@@ -11,9 +11,13 @@ defaults:
 # The method configs declare `deps: [zeroshot]` and this HF_HOME themselves, so
 # rrun with plain slurm_lmbl40 lands in the same env; this file is for `platform
 # setup` (building the env once, outside a run) and interactive srun sessions.
-# `deps` names the env: <repo>_py310_cu124_torch26_zeroshot.
+# `deps` and python_version name the env: <repo>_py312_cu124_torch26_zeroshot.
 deps:
   - zeroshot
+
+# vis4d 1.0.0 (WildDet3D) requires python >= 3.11; od3d ran all four on 3.12.
+# The method configs set the same, so rrun finds this env: <repo>_py312_..._zeroshot.
+python_version: "3.12"
 
 # Every zero-shot checkpoint -- including the gated facebook/sam-3d-objects --
 # is already in this cache, fetched there by od3d.
