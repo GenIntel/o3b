@@ -801,10 +801,15 @@ if _is_true "${INSTALL_ZEROSHOT}"; then
     pip install --no-deps "vis4d==1.0.0"
     pip install "ftfy==6.1.1" "ml_collections==1.1.0" pycocotools absl-py cloudpickle
 
+    # numpy last: MoGe (above) pulls numpy 2, but kaolin 0.17.0's compiled ops
+    # are numpy-1 ABI ("numpy.dtype size changed") -- od3d's venv ran 1.26.4.
+    # opencv-python >= 4.12 requires numpy 2, hence its cap.
+    pip install "numpy==1.26.4" "opencv-python<4.12"
+
     python -c "from every9dv2.method.zeroshot.orientanything import OrientAnythingMethod" \
         && echo "--- OrientAnythingMethod imports OK ---" \
         || echo "WARNING: OrientAnythingMethod does not import."
-    LIDRA_SKIP_INIT=true python -c "import sam3d_objects, kaolin, pytorch3d, moge, flash_attn_2_cuda" \
+    LIDRA_SKIP_INIT=true python -c "import torch, sam3d_objects, kaolin, kaolin.ops.mesh, pytorch3d, moge, flash_attn_2_cuda" \
         && echo "--- SAM3D deps import OK ---" \
         || echo "WARNING: SAM3D's dependencies do not all import -- SAM3DMethod will fail."
     # (wilddet3d itself is imported only after the method's utils3d shim)
