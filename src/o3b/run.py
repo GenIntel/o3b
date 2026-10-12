@@ -16,6 +16,60 @@ def _requests_cuda(cfg) -> bool:
     return False
 
 
+def _reduce_metric_means(accum: dict, distributed: bool) -> dict:
+    """Per-metric mean of the per-batch means in ``accum``, over every rank.
+
+    A metric is reported as the mean of its per-batch means, so summing the
+    values and their counts per key and dividing afterwards gives exactly what
+    one process over the same batches would report. The keys are unioned
+    rather than assumed equal: `quant.mean()` drops a metric whose batch held
+    no finite value, and a whole rank can miss one that way.
+    (Batches are cut differently for a different rank count, so a metric still
+    moves in the last decimals between 1 and N GPUs — the same effect a changed
+    eval.batch_size already has.)
+    """
+    if not distributed:
+        return {k: sum(v) / len(v) for k, v in accum.items()}
+    from o3b import ddp
+    local_sums = {k: (float(sum(v)), len(v)) for k, v in accum.items()}
+    accum_reduced: dict[str, tuple[float, int]] = {}
+    for rank_sums in ddp.all_gather_object(local_sums):
+        for k, (s, n) in rank_sums.items():
+            s0, n0 = accum_reduced.get(k, (0.0, 0))
+            accum_reduced[k] = (s0 + s, n0 + n)
+    return {k: s / n for k, (s, n) in accum_reduced.items() if n}
+
+
+def _eval_metric_means(method, task, loader, distributed: bool, desc: str,
+                       show_bar: bool) -> tuple[dict, int]:
+    """One plain pass over ``loader``: metric means (reduced over the ranks) and
+    the global sample count. No qualitative output, no per-batch W&B rows, no
+    dump — what the final eval pass adds on top. Collective at the end, so
+    every rank has to call it."""
+    from tqdm import tqdm
+    from o3b import ddp
+
+    accum: dict[str, list] = {}
+    n_samples = 0
+    for batch in tqdm(loader, total=len(loader), unit="batch", desc=desc,
+                      disable=not show_bar):
+        if method is not None:
+            result = method(batch, return_qualit=False)
+            batch = result[0] if isinstance(result, tuple) else result
+        quant, _ = task(batch, return_qualit=False)
+        for _attr in ("src_obj_kpts3d", "rgb", "cam_tform4x4_obj", "src_rgb"):
+            _v = getattr(batch, _attr, None)
+            if _v is not None and hasattr(_v, "shape"):
+                n_samples += int(_v.shape[0])
+                break
+        for metric_name, value in quant.mean().items():
+            accum.setdefault(metric_name, []).append(value)
+    metrics = _reduce_metric_means(accum, distributed)
+    if distributed:
+        n_samples = int(ddp.all_reduce_sum(n_samples))
+    return metrics, n_samples
+
+
 def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     """Execute one benchmark evaluation pass given a fully-resolved config dict.
 
@@ -199,7 +253,33 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         if callable(needs_training) and needs_training():
             if is_main:
                 print("Train:   running method training")
-            method.train_method()
+            # A method whose train_method takes eval_fn can score itself on this
+            # run's eval set (the test split matching its training set) while it
+            # trains; it decides when (e.g. Trinity's train.eval_every_n_epochs).
+            # eval_fn is collective: every rank must call it at the same epoch.
+            # Its own loader without persistent workers, so they do not sit
+            # idle on the eval shards between passes, through the whole run.
+            import inspect
+
+            def _eval_during_training(epoch: int) -> dict:
+                _loader = DataLoader(dataset, batch_size=batch_size,
+                                     collate_fn=collate_fn, sampler=sampler,
+                                     shuffle=False, num_workers=num_workers)
+                _metrics, _n = _eval_metric_means(
+                    method, task, _loader, distributed,
+                    desc=f"eval epoch {epoch}", show_bar=is_main)
+                if is_main:
+                    print(f"Eval @ epoch {epoch} ({_n} samples): "
+                          + " ".join(f"{k}={v:.4f}" for k, v in _metrics.items()))
+                    if _wb is not None:
+                        _wb.log({**{f"val/{k}": v for k, v in _metrics.items()},
+                                 "val/n_samples": _n, "val/epoch": epoch})
+                return _metrics
+
+            if "eval_fn" in inspect.signature(method.train_method).parameters:
+                method.train_method(eval_fn=_eval_during_training)
+            else:
+                method.train_method()
         elif is_main:
             print("Train:   skipped (no train dataset or checkpoint fully trained)")
 
@@ -349,23 +429,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     # ── reduce over the ranks ─────────────────────────────────────────────────
     # This is the only collective of the eval pass, so an imbalanced shard only
     # costs the others a wait here, never a timeout mid-loop.
-    #
-    # A metric is reported as the mean of its per-batch means, so summing the
-    # values and their counts per key and dividing afterwards gives exactly
-    # what one process over the same batches would report. The keys are unioned
-    # rather than assumed equal: `quant.mean()` drops a metric whose batch held
-    # no finite value, and a whole rank can miss one that way.
-    # (Batches are cut differently for a different rank count, so a metric
-    # still moves in the last decimals between 1 and N GPUs — the same effect a
-    # changed eval.batch_size already has.)
+    metrics = _reduce_metric_means(accum, distributed)
     if distributed:
-        local_sums = {k: (float(sum(v)), len(v)) for k, v in accum.items()}
-        accum_reduced: dict[str, tuple[float, int]] = {}
-        for rank_sums in ddp.all_gather_object(local_sums):
-            for k, (s, n) in rank_sums.items():
-                s0, n0 = accum_reduced.get(k, (0.0, 0))
-                accum_reduced[k] = (s0 + s, n0 + n)
-        metrics = {k: s / n for k, (s, n) in accum_reduced.items() if n}
         n_samples      = int(ddp.all_reduce_sum(n_samples))
         t_method_total = ddp.all_reduce_sum(t_method_total)
         # the pass lasts as long as its slowest rank, and has to fit in the
@@ -379,8 +444,6 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             _peak_resv  = ddp.all_reduce_max(float(_peak_resv or 0.0))
         else:
             _peak_alloc = _peak_resv = None
-    else:
-        metrics = {k: sum(v) / len(v) for k, v in accum.items()}
 
     # nothing collective happens after this point
     ddp.cleanup_process_group()
