@@ -768,10 +768,9 @@ if _is_true "${INSTALL_ZEROSHOT}"; then
     git -C "${SAM3D_DIR}" checkout --quiet "${SAM3D_COMMIT}"
     pip install --no-deps -e "${SAM3D_DIR}"
     _install_pytorch3d_checked
-    # kaolin publishes no torch-2.6 index; od3d runs the 2.5.1 build on 2.6
-    pip install "kaolin==0.17.0" \
-        -f "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-${KAOLIN_TORCH_VERSION:-2.5.1}_${CUDA_TAG}.html" \
-        || echo "WARNING: no kaolin 0.17.0 wheel for ${CUDA_TAG} -- SAM3DMethod will not import."
+    # kaolin 0.18.0, not od3d's 0.17.0: 0.17.0's compiled ops are numpy-1 ABI
+    # ("numpy.dtype size changed"), and o3b's datasets / pyarrow need numpy 2.
+    # 0.18.0 has a torch-2.6 build; installed after MoGe (below) moves numpy.
     # MoGe: SAM3D's depth estimate where a dataset has no depth; brings utils3d
     pip install "git+https://github.com/microsoft/MoGe.git@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b"
     pip install astor easydict loguru optree pymeshfix lightning pyvista manifold3d \
@@ -801,15 +800,17 @@ if _is_true "${INSTALL_ZEROSHOT}"; then
     pip install --no-deps "vis4d==1.0.0"
     pip install "ftfy==6.1.1" "ml_collections==1.1.0" pycocotools absl-py cloudpickle
 
-    # numpy last: MoGe (above) pulls numpy 2, but kaolin 0.17.0's compiled ops
-    # are numpy-1 ABI ("numpy.dtype size changed") -- od3d's venv ran 1.26.4.
-    # opencv-python >= 4.12 requires numpy 2, hence its cap.
-    pip install "numpy==1.26.4" "opencv-python<4.12"
+    # last, against the numpy 2 MoGe brought in (see the kaolin note above); the
+    # vggt install pinned numpy 1.26 / opencv 4.11 earlier, which pyarrow rejects
+    pip install "numpy>=2" "opencv-python>=4.12"
+    pip install "kaolin==0.18.0" \
+        -f "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-${TORCH_VERSION}_${CUDA_TAG}.html" \
+        || echo "WARNING: no kaolin 0.18.0 wheel for torch ${TORCH_VERSION}/${CUDA_TAG} -- SAM3DMethod will not import."
 
     python -c "from every9dv2.method.zeroshot.orientanything import OrientAnythingMethod" \
         && echo "--- OrientAnythingMethod imports OK ---" \
         || echo "WARNING: OrientAnythingMethod does not import."
-    LIDRA_SKIP_INIT=true python -c "import torch, sam3d_objects, kaolin, kaolin.ops.mesh, pytorch3d, moge, flash_attn_2_cuda" \
+    LIDRA_SKIP_INIT=true python -c "import torch, pyarrow, sam3d_objects, kaolin, kaolin.ops.mesh, pytorch3d, moge, flash_attn_2_cuda" \
         && echo "--- SAM3D deps import OK ---" \
         || echo "WARNING: SAM3D's dependencies do not all import -- SAM3DMethod will fail."
     # (wilddet3d itself is imported only after the method's utils3d shim)
