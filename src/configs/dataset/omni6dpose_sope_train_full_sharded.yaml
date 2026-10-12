@@ -1,0 +1,18 @@
+# omni6dpose_sope_train_full_sharded — omni6dpose_sope_train_sharded without
+# od3d's 10% thinning: every valid SOPE train row (~4M crops, ~10x the 56 GB of
+# the 0.1 cache). Its own sharded_name, so the two caches never collide.
+#
+#   o3b dataset init -d omni6dpose_sope_train_full_sharded -p slurm_lmbl40 --remote --chunks 40
+#
+# frames.db needs no re-index: omni6dpose_sope_train indexed every row, and
+# subset_fraction is applied on read. MUST run on a compute node (fo_mask_amodal
+# is rasterised at build time); the 0.1 cache took 8 chunks of ~1 h each.
+
+defaults:
+  - omni6dpose_sope_train_sharded
+  - _self_
+
+extra:
+  subset_fraction: 1.0
+
+sharded_name: omni6dpose_sope_train_full_r${img_size}_all
