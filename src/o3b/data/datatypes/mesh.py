@@ -315,7 +315,7 @@ class Mesh:
 
         def _part(w, name, p):
             x = p.vert_feats.float()
-            if re.fullmatch(r".+_(mv|mvvis|mvrast)", name):
+            if re.fullmatch(r".+_(mv|mvvis|mvrast|mvinimg)", name):
                 # per-view part (H03): each view L2-normalised on its own (NaN
                 # views stay NaN), so the task's multi-view distance on this
                 # block plays the role of |d_a - d_b| in the weighted sum
@@ -324,7 +324,7 @@ class Mesh:
                 return w ** 0.5 * x
             return w ** 0.5 * (x if name.lower() in UNNORMALISED_FEATS else F.normalize(x, dim=1))
 
-        blocks = [(bool(re.fullmatch(r".+_(mv|mvvis|mvrast)", n)), _part(w, n, p))
+        blocks = [(bool(re.fullmatch(r".+_(mv|mvvis|mvrast|mvinimg)", n)), _part(w, n, p))
                   for w, n, (_, p) in zip(weights, names, parts)]
         if sum(pv for pv, _ in blocks) > 1:
             raise ValueError(f"{mesh_type}: at most one per-view part can be concatenated")
@@ -442,19 +442,25 @@ def _extract_vert_feats(
     """Render mesh from n_views uniform viewpoints, extract features with the named model,
     project mesh vertices onto each feature map, and return per-vertex mean features (V, C).
 
-    Suffixes on a rendering model's name (H03, research/tasks/H03/):
-      ``<model>_vis``    mean over the views where the vertex is *visible*: inside
-                         the image and passing a depth test against the rendered
-                         depth. Without a suffix only the image bounds are
-                         checked, so occluded views add the occluder's feature.
-      ``<model>_mv``     no mean: every view kept, (V, N*C) float16, NaN where the
-                         vertex is outside the view. The crsp3d task un-flattens
-                         it for its multi-view distances (``feat_dist``).
-      ``<model>_mvvis``  as ``_mv``, NaN also where the vertex is occluded.
-      ``<model>_vrast`` / ``<model>_mvrast``  as ``_vis`` / ``_mvvis``, but visible
-                         = corner of a triangle nvdiffrast rasterises in that view
-                         (od3d's MASK_VERTS_VSBL / DenseMatcher's pix2face test)
-                         instead of the depth comparison.
+    Visibility -- which views count for a vertex -- and whether views are
+    averaged, by suffix on a rendering model's name (H03, research/hypotheses/
+    h03-multiview-feature-distance/):
+
+      ``<model>``           mean over the views where the vertex is visible by
+                            rasterisation (default since 26-10-12): it is in the
+                            image and a corner of a triangle nvdiffrast covers a
+                            pixel with (od3d's MASK_VERTS_VSBL test).
+      ``<model>_mv``        no mean: every view kept, (V, N*C) float16, NaN where
+                            the view does not see the vertex (same visibility).
+                            The crsp3d task un-flattens it (``feat_dist``).
+      ``<model>_inimg``     the pre-26-10-12 default: mean over all views the
+                            vertex projects into, occluded or not (~100 of 100
+                            views, against ~43 rasterised-visible). H01's
+                            results were computed with it.
+      ``<model>_mvinimg``   per-view with that visibility.
+      ``<model>_vis`` / ``_mvvis``   depth test against the rendered depth
+                            (2 % bbox-diagonal tolerance) instead of rasterising.
+      ``<model>_vrast`` / ``_mvrast``  aliases of ``<model>`` / ``<model>_mv``.
     """
     import torch
     import torch.nn.functional as F
@@ -465,13 +471,14 @@ def _extract_vert_feats(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     import re
-    _m = re.fullmatch(r"(.+?)_(mvrast|mvvis|mv|vrast|vis)", feature_model_name)
+    _m = re.fullmatch(r"(.+?)_(mvinimg|mvrast|mvvis|mv|inimg|vrast|vis)", feature_model_name)
     view_mode = _m.group(2) if _m else ""
     if _m:
         feature_model_name = _m.group(1)
-    per_view = view_mode in ("mv", "mvvis", "mvrast")
-    occlusion = view_mode in ("vis", "mvvis")
-    raster_vis = view_mode in ("vrast", "mvrast")
+    per_view = view_mode in ("mv", "mvrast", "mvvis", "mvinimg")
+    occlusion = view_mode in ("vis", "mvvis")                     # depth test
+    raster_vis = view_mode in ("", "vrast", "mv", "mvrast")      # default
+
 
     print(feature_model_name, view_mode)
     
