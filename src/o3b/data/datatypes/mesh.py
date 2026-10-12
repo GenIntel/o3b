@@ -436,6 +436,10 @@ def _extract_vert_feats(
                          vertex is outside the view. The crsp3d task un-flattens
                          it for its multi-view distances (``feat_dist``).
       ``<model>_mvvis``  as ``_mv``, NaN also where the vertex is occluded.
+      ``<model>_vrast`` / ``<model>_mvrast``  as ``_vis`` / ``_mvvis``, but visible
+                         = corner of a triangle nvdiffrast rasterises in that view
+                         (od3d's MASK_VERTS_VSBL / DenseMatcher's pix2face test)
+                         instead of the depth comparison.
     """
     import torch
     import torch.nn.functional as F
@@ -446,12 +450,13 @@ def _extract_vert_feats(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     import re
-    _m = re.fullmatch(r"(.+?)_(mvvis|mv|vis)", feature_model_name)
+    _m = re.fullmatch(r"(.+?)_(mvrast|mvvis|mv|vrast|vis)", feature_model_name)
     view_mode = _m.group(2) if _m else ""
     if _m:
         feature_model_name = _m.group(1)
-    per_view = view_mode in ("mv", "mvvis")
+    per_view = view_mode in ("mv", "mvvis", "mvrast")
     occlusion = view_mode in ("vis", "mvvis")
+    raster_vis = view_mode in ("vrast", "mvrast")
 
     print(feature_model_name, view_mode)
     
@@ -532,6 +537,11 @@ def _extract_vert_feats(
         z_px = dm[torch.arange(N, device=device)[:, None], py, px]           # (N, V)
         tol = 0.02 * (verts.max(0).values - verts.min(0).values).norm()
         valid = valid & (z_px > 0) & (z_v <= z_px + tol)
+
+    if raster_vis:
+        from o3b.data.viz import rasterize_verts_visible
+        # 4x supersampled; visibility shared across co-located vertex copies (see rasterize_verts_visible)
+        valid = valid & rasterize_verts_visible(mesh.verts, mesh.faces, cam_tform4x4_obj, cam_intr4x4, H, W, supersample=4)
 
     # normalise pixel coords to [-1, 1] in feature-map space
     grid_x = (verts_2d[..., 0] / (W - 1)) * 2 - 1

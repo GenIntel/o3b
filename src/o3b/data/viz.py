@@ -549,27 +549,14 @@ def _render_mesh_pyrender(
     return {"rgb": rgb, "depth": depth_rgb, "normals": normals, "depth_metric": depth}
 
 
-def _render_mesh_nvdiffrast(
-    mesh: "Mesh",
-    cam_tform4x4_obj: "Tensor",  # (B, 4, 4)
-    cam_intr4x4: "Tensor",       # (B, 4, 4)
-    H: int,
-    W: int,
-) -> "Tensor":
-    """Render mesh from B viewpoints using nvdiffrast. Returns (B, 3, H, W) in [0, 1]."""
-    import os
+def _nvdiffrast_proj4x4(cam_tform4x4_obj: "Tensor", cam_intr4x4: "Tensor", H: int, W: int, device) -> "Tensor":
+    """(B, 4, 4) object -> clip-space projection for nvdiffrast, from o3b's
+    OpenGL cam_tform4x4_obj and pixel intrinsics (shared by the render path
+    and rasterize_verts_visible, so both see the same image)."""
     import torch
-    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
-    import nvdiffrast.torch as dr
     from o3b.cv.visual.show import OPEN3D_CAM_TFORM_CAM
 
-    device = torch.device("cuda")
-    cam_tform4x4_obj = cam_tform4x4_obj.to(device)
-    cam_intr4x4 = cam_intr4x4.to(device)
-    B = cam_tform4x4_obj.shape[0]
-
     znear, zfar = 0.001, 10000.0
-
     cams_persp4x4 = cam_intr4x4.clone().to(device=device, dtype=torch.float32)
     cams_persp4x4[:, 0, 2] = -cams_persp4x4[:, 0, 2]
     cams_persp4x4[:, 1, 2] = -cams_persp4x4[:, 1, 2]
@@ -592,7 +579,90 @@ def _render_mesh_nvdiffrast(
     ], dtype=torch.float32, device=device).unsqueeze(0)  # (1, 4, 4)
 
     open3d_tform = OPEN3D_CAM_TFORM_CAM.clone().unsqueeze(0).to(device=device, dtype=torch.float32)
-    cams_proj4x4 = (ndc_mat @ cams_persp4x4) @ (open3d_tform @ cam_tform4x4_obj)  # (B, 4, 4)
+    return (ndc_mat @ cams_persp4x4) @ (open3d_tform @ cam_tform4x4_obj.to(device=device, dtype=torch.float32))
+
+
+def rasterize_verts_visible(verts: "Tensor", faces: "Tensor", cam_tform4x4_obj: "Tensor",
+                            cam_intr4x4: "Tensor", H: int, W: int, supersample: int = 1) -> "Tensor":
+    """(B, V) bool: vertex is a corner of a triangle that covers at least one
+    pixel of the B rendered views. The rasterised-triangle test od3d uses
+    (Meshes.render, PROJECT_MODALITIES.MASK_VERTS_VSBL) and DenseMatcher's
+    projection (pix2face -> visible faces -> their vertices).
+
+    Clip space is built from the same pixel projection the feature sampling
+    uses (proj3d2d_tform4x4_intr4x4_broadcast), with w = -z_cam > 0 for o3b's
+    OpenGL cameras -- _nvdiffrast_proj4x4 yields w < 0 for them, and nvdiffrast
+    then clips every triangle. Only the set of covered triangles is used, so
+    the image's vertical orientation does not matter.
+
+    ``supersample`` rasterises at (s·H, s·W): a triangle smaller than a pixel
+    may cover no pixel centre at the feature resolution, and on seam-split
+    (texture-atlas) meshes a vertex often has only one or two triangles, so
+    it would never count as visible.
+
+    Visibility is shared between vertices at the same position: seam-split
+    meshes carry several copies of one point, and the mc remesh's snapping
+    leaves sliver triangles that cover no pixel even at 8x supersampling. A
+    copy whose only triangles are slivers would otherwise stay "never
+    visible" although the point it sits on is in view (measured on mc16
+    bread: 381 of 2207 vertices, all on the rendered surface in >= 5 views).
+    """
+    import os
+    import torch
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    import nvdiffrast.torch as dr
+    from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+
+    device = torch.device("cuda")
+    T = cam_tform4x4_obj.to(device=device, dtype=torch.float32)          # (B, 4, 4)
+    K = cam_intr4x4.to(device=device, dtype=torch.float32)               # (B, 4, 4)
+    v = verts.to(device=device, dtype=torch.float32)                     # (V, 3)
+    uv = proj3d2d_tform4x4_intr4x4_broadcast(pts3d=v[None], tform4x4=T[:, None], intr4x4=K[:, None])  # (B, V, 2)
+    v_h = torch.cat([v, torch.ones_like(v[:, :1])], dim=-1)
+    z = (T[:, None] @ v_h[None, :, :, None])[..., 2, 0]                 # (B, V) camera z, < 0 in front
+    w = -z
+    near = 0.01 * float(w.min().clamp(min=1e-6)); far = 100.0 * float(w.max())
+    z_clip = -(far + near) / (far - near) * z - 2 * far * near / (far - near)
+    verts_clip = torch.stack([(2 * uv[..., 0] / W - 1) * w, (2 * uv[..., 1] / H - 1) * w, z_clip, w], dim=-1)
+
+    f = faces.to(device=device, dtype=torch.int32)
+    glctx = dr.RasterizeCudaContext(device=device)
+    rast_out, _ = dr.rasterize(glctx, verts_clip.contiguous(), f.contiguous(),
+                               resolution=[H * supersample, W * supersample])
+    tri = rast_out[..., 3].long() - 1  # (B, sH, sW), -1 = background
+    vis = torch.zeros(T.shape[0], v.shape[0], dtype=torch.bool, device=device)
+    for b in range(T.shape[0]):
+        ids = tri[b][tri[b] >= 0].unique()
+        vis[b, f[ids].long().unique()] = True
+    # share visibility across vertices at one position (relative 1e-6 grid)
+    scale = float((v.max(0).values - v.min(0).values).max().clamp(min=1e-12))
+    _, pos_id = torch.unique(torch.round(v / scale * 1e6).long(), dim=0, return_inverse=True)
+    vis_pos = torch.zeros(T.shape[0], int(pos_id.max()) + 1, dtype=torch.bool, device=device)
+    vis_pos.index_put_((torch.arange(T.shape[0], device=device)[:, None].expand_as(vis), pos_id[None].expand_as(vis)),
+                       vis, accumulate=True)
+    return vis_pos[:, pos_id]
+
+
+def _render_mesh_nvdiffrast(
+    mesh: "Mesh",
+    cam_tform4x4_obj: "Tensor",  # (B, 4, 4)
+    cam_intr4x4: "Tensor",       # (B, 4, 4)
+    H: int,
+    W: int,
+) -> "Tensor":
+    """Render mesh from B viewpoints using nvdiffrast. Returns (B, 3, H, W) in [0, 1]."""
+    import os
+    import torch
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    import nvdiffrast.torch as dr
+    from o3b.cv.visual.show import OPEN3D_CAM_TFORM_CAM
+
+    device = torch.device("cuda")
+    cam_tform4x4_obj = cam_tform4x4_obj.to(device)
+    cam_intr4x4 = cam_intr4x4.to(device)
+    B = cam_tform4x4_obj.shape[0]
+
+    cams_proj4x4 = _nvdiffrast_proj4x4(cam_tform4x4_obj, cam_intr4x4, H, W, device)  # (B, 4, 4)
 
     verts = mesh.verts.to(device=device, dtype=torch.float32)  # (V, 3)
     V_count = verts.shape[0]
