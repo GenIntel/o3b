@@ -1,0 +1,20 @@
+defaults:
+  - slurm_lmbl40
+  - _self_
+
+# slurm_lmbl40 plus the zeroshot dependency group: the zero-shot pose baselines
+# (Orient Anything v1/v2, SAM3D, WildDet3D) of every9dv2/method/zeroshot/.
+#
+#   o3b platform setup -p slurm_lmbl40_zeroshot
+#   o3b bench rrun -p slurm_lmbl40 -b pose_every9d -a method/frame_object/sam3d.yaml,zeroshot/subset/s01.yaml
+#
+# The method configs declare `deps: [zeroshot]` and this HF_HOME themselves, so
+# rrun with plain slurm_lmbl40 lands in the same env; this file is for `platform
+# setup` (building the env once, outside a run) and interactive srun sessions.
+# `deps` names the env: <repo>_py310_cu124_torch26_zeroshot.
+deps:
+  - zeroshot
+
+# Every zero-shot checkpoint -- including the gated facebook/sam-3d-objects --
+# is already in this cache, fetched there by od3d.
+path_hf_home: ${.path_ws}/hf_cache

@@ -37,6 +37,7 @@ INSTALL_MAGICPONY="${INSTALL_MAGICPONY:-false}"
 INSTALL_PARTFIELD="${INSTALL_PARTFIELD:-false}"
 INSTALL_TRINITY="${INSTALL_TRINITY:-false}"
 INSTALL_SAM3="${INSTALL_SAM3:-false}"
+INSTALL_ZEROSHOT="${INSTALL_ZEROSHOT:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
 GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
 GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
@@ -736,6 +737,80 @@ if [ "${INSTALL_SAM3}" = "true" ] || [ "${INSTALL_SAM3}" = "True" ]; then
     python -c "from transformers import Sam3TrackerModel, Sam3TrackerProcessor" \
         && echo "--- transformers Sam3Tracker imports OK ---" \
         || echo "WARNING: transformers has no Sam3Tracker -- preprocess-mask sam3_bbox will fail."
+fi
+
+
+if _is_true "${INSTALL_ZEROSHOT}"; then
+    # The zero-shot pose baselines in every9dv2/method/zeroshot/: Orient Anything
+    # v1/v2, SAM 3D Objects and WildDet3D, ported from od3d. One group for all
+    # four: od3d ran them from one venv, so they are known to co-exist, and one
+    # env is one install rather than three. Versions and commits are the ones
+    # od3d's venv (python 3.12, torch 2.6.0+cu124) ran them with.
+    echo "--- pip install zeroshot deps (Orient Anything, SAM3D, WildDet3D) ---"
+
+    # ── Orient Anything ──────────────────────────────────────────────────────
+    # v1 is transformers' Dinov2Model + head; v2 the upstream vggt package's
+    # aggregator (its checkpoint matches that package key for key).
+    pip install "transformers>=5.0,<6"
+    pip install "vggt @ git+https://github.com/facebookresearch/vggt.git@44b3afbd1869d8bde4894dd8ea1e293112dd5eba"
+
+    # ── SAM 3D Objects ───────────────────────────────────────────────────────
+    # No usable pip package (its requirements pin a whole torch 2.5.1 env), so
+    # it is cloned into the checkout -- not a submodule, as for od3d above --
+    # installed --no-deps and given what its inference path actually imports.
+    SAM3D_DIR="${SAM3D_DIR:-third_party/sam-3d-objects}"
+    SAM3D_COMMIT="${SAM3D_COMMIT:-f91db411c50efee93d8db7aeb323885650f6f722}"
+    if [ ! -d "${SAM3D_DIR}/.git" ]; then
+        echo "--- git clone sam-3d-objects ---"
+        _git_retry git clone https://github.com/facebookresearch/sam-3d-objects.git "${SAM3D_DIR}"
+    fi
+    _git_retry git -C "${SAM3D_DIR}" fetch --quiet origin "${SAM3D_COMMIT}" || true
+    git -C "${SAM3D_DIR}" checkout --quiet "${SAM3D_COMMIT}"
+    pip install --no-deps -e "${SAM3D_DIR}"
+    _install_pytorch3d_checked
+    # kaolin publishes no torch-2.6 index; od3d runs the 2.5.1 build on 2.6
+    pip install "kaolin==0.17.0" \
+        -f "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-${KAOLIN_TORCH_VERSION:-2.5.1}_${CUDA_TAG}.html" \
+        || echo "WARNING: no kaolin 0.17.0 wheel for ${CUDA_TAG} -- SAM3DMethod will not import."
+    # MoGe: SAM3D's depth estimate where a dataset has no depth; brings utils3d
+    pip install "git+https://github.com/microsoft/MoGe.git@a8c37341bc0325ca99b9d57981cc3bb2bd3e255b"
+    pip install astor easydict loguru optree pymeshfix lightning pyvista manifold3d \
+        pygltflib plyfile igraph warp-lang usd-core iopath dataclasses-json orjson simplejson
+    # sparse convolutions + the flash_attn attention backend the pipeline selects
+    # (same wheels / pin as the trinity block, see there for why 2.7.4.post1)
+    pip install "spconv-${CUDA_TAG}" || echo "WARNING: no spconv-${CUDA_TAG} wheel -- SAM3DMethod will fail."
+    MAX_JOBS="${MAX_JOBS:-4}" pip install --no-cache-dir --no-build-isolation "flash-attn==2.7.4.post1" \
+        || echo "WARNING: flash-attn failed to build -- SAM3DMethod will fail at its first attention."
+    # only for with_layout_postprocess (JIT-compiles its kernels on first use)
+    pip install gsplat || echo "WARNING: no gsplat -- SAM3D's with_layout_postprocess is unavailable."
+
+    # ── WildDet3D ────────────────────────────────────────────────────────────
+    # No pip package: cloned with its sam3 / lingbot_depth submodules and put
+    # on sys.path by WildDet3DMethod. vis4d --no-deps: its pins are a torch
+    # 2.5.1 / pydantic<2 env, and only vis4d.op / vis4d.data.transforms are used
+    # (vis4d_cuda_ops is eval/loss code only, not needed).
+    WILDDET3D_DIR="${WILDDET3D_DIR:-third_party/WildDet3D}"
+    WILDDET3D_COMMIT="${WILDDET3D_COMMIT:-1b8aa52b6ff3f00d0ebfa07175efc0c0c440964a}"
+    if [ ! -d "${WILDDET3D_DIR}/.git" ]; then
+        echo "--- git clone WildDet3D ---"
+        _git_retry git clone https://github.com/allenai/WildDet3D.git "${WILDDET3D_DIR}"
+    fi
+    _git_retry git -C "${WILDDET3D_DIR}" fetch --quiet origin "${WILDDET3D_COMMIT}" || true
+    git -C "${WILDDET3D_DIR}" checkout --quiet "${WILDDET3D_COMMIT}"
+    _git_retry git -C "${WILDDET3D_DIR}" submodule update --init --recursive
+    pip install --no-deps "vis4d==1.0.0"
+    pip install "ftfy==6.1.1" "ml_collections==1.1.0" pycocotools absl-py cloudpickle
+
+    python -c "from every9dv2.method.zeroshot.orientanything import OrientAnythingMethod" \
+        && echo "--- OrientAnythingMethod imports OK ---" \
+        || echo "WARNING: OrientAnythingMethod does not import."
+    LIDRA_SKIP_INIT=true python -c "import sam3d_objects, kaolin, pytorch3d, moge, flash_attn_2_cuda" \
+        && echo "--- SAM3D deps import OK ---" \
+        || echo "WARNING: SAM3D's dependencies do not all import -- SAM3DMethod will fail."
+    # (wilddet3d itself is imported only after the method's utils3d shim)
+    python -c "import vis4d, ml_collections, ftfy" && [ -f "${WILDDET3D_DIR}/wilddet3d/__init__.py" ] \
+        && echo "--- WildDet3D deps OK ---" \
+        || echo "WARNING: WildDet3D's checkout or vis4d is missing -- WildDet3DMethod will fail."
 fi
 
 

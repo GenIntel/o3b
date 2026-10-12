@@ -27,7 +27,8 @@ usage: bash ${BASH_SOURCE[0]} [options]
 
   --deps a,b        optional dependency groups, as in a platform config's
                     \`deps:\` (trinity, diff3f, densematcher, genpose2,
-                    morpheus, geco, mrf3dtopo, magicpony, partfield).
+                    morpheus, geco, mrf3dtopo, magicpony, partfield,
+                    zeroshot).
                     Default: none.
   --python X.Y      python for the venv (default: the first of 3.12, 3.11, 3.13,
                     3.10 that is installed *and* can build a venv; an existing

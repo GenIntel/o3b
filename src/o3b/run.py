@@ -142,12 +142,30 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         ItemType.FRAME_OBJECT_PAIR: collate_frame_object_pairs,
         ItemType.FRAME_OBJECT:      collate_frame_objects,
     }.get(dataset_cfg.item_type, collate_object_pairs)
+    # eval.subset_fraction scores a seeded random fraction of the eval set
+    # instead of all of it — od3d's test_subset_fraction, for methods too slow
+    # for the whole set (SAM3D: seconds per frame against a 60k-frame Every9D
+    # test). The draw depends on the seed and the dataset length only, so every
+    # rank picks the same items and a rerun scores the same ones; they are kept
+    # in dataset order.
+    indices = list(range(len(dataset)))
+    subset_fraction = eval_cfg.get("subset_fraction")
+    if subset_fraction is not None and float(subset_fraction) < 1.0:
+        import torch as _torch_subset
+        n_subset = max(int(float(subset_fraction) * len(dataset)), 1)
+        generator = _torch_subset.Generator().manual_seed(
+            int(eval_cfg.get("subset_seed", 42)))
+        indices = sorted(_torch_subset.randperm(len(dataset), generator=generator)
+                         [:n_subset].tolist())
+        if is_main:
+            print(f"Eval:    subset_fraction={subset_fraction} -> "
+                  f"{n_subset}/{len(dataset)} items")
     # rank r evaluates items r, r + W, r + 2W, …  Unlike DistributedSampler
     # this pads nothing, so the union over the ranks is exactly the dataset and
     # no item is scored twice — the shard sizes then differ by at most one,
     # which is fine because nothing inside the loop is collective.
-    sampler = (list(range(rank, len(dataset), world_size)) if distributed
-               else None)
+    sampler = (indices[rank::world_size]
+               if distributed or len(indices) < len(dataset) else None)
     loader = DataLoader(
         dataset,
         # per-rank, like the training batch size: the number of items in flight
