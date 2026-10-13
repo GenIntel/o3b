@@ -4317,10 +4317,16 @@ def _run_bench_run(args) -> None:
         _method_cfg = run_raw.get("method")
         _train_cfg = _method_cfg.get("train") if isinstance(_method_cfg, dict) else None
         _ds_train = _train_cfg.get("dataset_train") if isinstance(_train_cfg, dict) else None
-        if isinstance(_ds_train, dict) and _ds_train.get("dataset_name"):
-            for _ov in overrides:
-                _key, _, _val = _ov.partition("=")
-                _ds_train.setdefault(_key, _val)
+        # several mixed training sets (method.train.datasets_train, a list of
+        # the same dataset dicts) need the same roots, or each named config
+        # resolves against default paths and its cache is not found
+        _ds_trains = [_ds_train] + list((_train_cfg or {}).get("datasets_train") or []) \
+            if isinstance(_train_cfg, dict) else []
+        for _ds in _ds_trains:
+            if isinstance(_ds, dict) and _ds.get("dataset_name"):
+                for _ov in overrides:
+                    _key, _, _val = _ov.partition("=")
+                    _ds.setdefault(_key, _val)
 
         from datetime import datetime
         timestamp = datetime.now().strftime("%m%d_%H%M%S")
