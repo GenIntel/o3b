@@ -130,6 +130,8 @@ class XAttnPool(OD3D_Model):
         tok, tok_coord, tok_mask = frames_pred.tokens, frames_pred.tokens_coord, frames_pred.tokens_mask
         if tok is None:
             raise RuntimeError("XAttnPool: no frames_pred.tokens — run LitePT with out_tokens: true")
+        # LitePT's attention runs in half precision; its tokens may come out fp16
+        tok, tok_coord = tok.float(), tok_coord.float()
         B = tok.shape[0]
         q = self.queries.expand(B, -1, -1)
         q_pos = (self.query_pos / self.rope_unit).expand(B, q.shape[1], 3)

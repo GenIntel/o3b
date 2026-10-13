@@ -47,9 +47,16 @@ class LitePT(OD3D_Model):
         out_feat_pool = "mean",
         out_feat_append_in_feat = True,
         out_feats_append_in_feats = False,
+        out_tokens = False,
     ):
         super().__init__()
 
+        # out_tokens: also hand the last stage's tokens on, padded per sample, as
+        # frames_pred.tokens (B, S, C) + tokens_coord (B, S, 3, in the input
+        # cloud's frame) + tokens_mask (B, S, True = real), for a head that
+        # attends over them (XAttnPool). out_feat_pool "none" then leaves
+        # frames_pred.feat as it came in.
+        self.out_tokens = out_tokens
         self.out_feat_pool = out_feat_pool
         self.out_feat_append_in_feat = out_feat_append_in_feat
         self.out_feats_append_in_feats = out_feats_append_in_feats
