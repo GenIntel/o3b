@@ -137,7 +137,19 @@ class LitePT(OD3D_Model):
         # use onehot encoding for batch id
 
         batch_onehot = torch.nn.functional.one_hot(res['batch'], num_classes=B).to(torch.float32)
-        if self.out_feat_pool == "max":
+        if self.out_tokens:
+            from torch.nn.utils.rnn import pad_sequence
+            counts = batch_onehot.sum(dim=0).long().tolist()
+            frames_pred.tokens = pad_sequence(
+                torch.split(res['feat'], counts, dim=0), batch_first=True)
+            frames_pred.tokens_coord = pad_sequence(
+                torch.split(res['coord'], counts, dim=0), batch_first=True)
+            frames_pred.tokens_mask = pad_sequence(
+                [torch.ones(c, dtype=torch.bool, device=res['feat'].device) for c in counts],
+                batch_first=True)
+        if self.out_feat_pool == "none":
+            feat = None
+        elif self.out_feat_pool == "max":
             feat = ((res['feat'][:, :, None] * batch_onehot[:, None]).max(dim=0).values ).permute(1, 0)  # [B, F]
         elif self.out_feat_pool == "cat":
             feat = res['feat'].reshape(*frames_pred.feats.shape[:2], -1)
@@ -145,7 +157,9 @@ class LitePT(OD3D_Model):
         else:
             feat = ((res['feat'][:, :, None] * batch_onehot[:, None]).sum(dim=0) / batch_onehot[:, None].sum(dim=0)).permute(1, 0)  # [B, F]
 
-        if self.out_feat_append_in_feat and frames_pred.feat is not None:
+        if feat is None:
+            pass
+        elif self.out_feat_append_in_feat and frames_pred.feat is not None:
             frames_pred.feat = torch.cat([feat, frames_pred.feat], dim=1) # 504 + 444  || 1024 * 72 + 444 = 74172
         else:
             frames_pred.feat = feat # 504 || 1024 * 72 = 73728
