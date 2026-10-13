@@ -20,6 +20,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MLP":             "o3b.model.mlp.model",
     "CoordMLP":        "o3b.model.coordmlp.model",
     "PoseMLP":         "o3b.model.posemlp.model",
+    "ShapeMLP":        "o3b.model.shapemlp.model",
     "Feat2Pose":       "o3b.model.feat2pose.model",
     "Feat2Mesh":       "o3b.model.feat2mesh.model",
     "Feat2Field":      "o3b.model.feat2field.model",
