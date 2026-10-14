@@ -22,6 +22,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "PoseMLP":         "o3b.model.posemlp.model",
     "ShapeMLP":        "o3b.model.shapemlp.model",
     "XAttnPool":       "o3b.model.xattnpool.model",
+    "ShapeXAttn":      "o3b.model.shapexattn.model",
     "Feat2Pose":       "o3b.model.feat2pose.model",
     "Feat2Mesh":       "o3b.model.feat2mesh.model",
     "Feat2Field":      "o3b.model.feat2field.model",
