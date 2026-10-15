@@ -21,7 +21,13 @@ gradient.
 
 Writes ``pts3d_shape_coarse`` / ``pts3d_shape_fine`` /
 ``cam_tform4x4_pts3d_shape`` like ShapeMLP, so TrinityMethod's shape metrics
-apply unchanged. A side branch like ShapeMLP: ``feat`` is left alone, and it
+apply unchanged.
+
+With ``nocs: true`` every coarse and fine point also carries its normalised
+object coordinates (``nocs_shape_coarse`` / ``nocs_shape_fine``, NCDS units:
+the object's longest side spans 2): the coarse MLP and the fold MLP each emit
+3 more numbers per point. TrinityMethod supervises them on the Chamfer
+matching (camera-space nearest neighbours) — see ``_shape_metrics``. A side branch like ShapeMLP: ``feat`` is left alone, and it
 has to sit before PoseMLP.
 """
 
@@ -55,13 +61,16 @@ class ShapeXAttn(OD3D_Model):
         rope_freq: float = 100.0,
         rope_unit: float = 0.08,
         dropout: float = 0.0,
+        nocs: bool = False,
     ):
         super().__init__()
+        self.nocs = nocs
         self.coarse_count = coarse_count
         self.fold_count = fold_count
         self.rope_unit = rope_unit
 
-        self.coarse = _mlp([in_dim, hidden_dim, hidden_dim, coarse_count * 3])
+        self.out_ch = 6 if nocs else 3          # point (+ its NOCS)
+        self.coarse = _mlp([in_dim, hidden_dim, hidden_dim, coarse_count * self.out_ch])
 
         # surface token = embed(point) + embed(global feature)
         self.embed_pt = _mlp([3, dim // 2, dim])
@@ -79,7 +88,7 @@ class ShapeXAttn(OD3D_Model):
         lin = torch.linspace(-fold_grid_scale, fold_grid_scale, side)
         grid = torch.stack(torch.meshgrid(lin, lin, indexing="ij"), dim=-1).reshape(-1, 2)
         self.register_buffer("fold_grid", grid, persistent=False)
-        self.fold = _mlp([dim + 2, fold_hidden_dim, fold_hidden_dim, 3])
+        self.fold = _mlp([dim + 2, fold_hidden_dim, fold_hidden_dim, self.out_ch])
 
     def forward(self, frames_gt, frames_pred=None):
         feat = frames_pred.feat                                   # (B, F) global
@@ -90,7 +99,8 @@ class ShapeXAttn(OD3D_Model):
         B = feat.shape[0]
         C, K = self.coarse_count, self.fold_count
 
-        coarse = self.coarse(feat).reshape(B, C, 3)               # (B, C, 3)
+        coarse_out = self.coarse(feat).reshape(B, C, self.out_ch)
+        coarse = coarse_out[..., :3]                              # (B, C, 3)
 
         q = self.embed_pt(coarse) + self.embed_glob(feat)[:, None]
         q_pos = coarse.detach() / self.rope_unit
@@ -100,8 +110,11 @@ class ShapeXAttn(OD3D_Model):
         q = self.norm_out(q)                                      # (B, C, dim)
 
         seed = self.fold_grid[None, None].expand(B, C, K, 2)
-        offset = self.fold(torch.cat([q[:, :, None].expand(B, C, K, q.shape[-1]), seed], dim=-1))
-        fine = (coarse[:, :, None] + offset).reshape(B, C * K, 3)
+        fold_out = self.fold(torch.cat([q[:, :, None].expand(B, C, K, q.shape[-1]), seed], dim=-1))
+        fine = (coarse[:, :, None] + fold_out[..., :3]).reshape(B, C * K, 3)
+        if self.nocs:
+            frames_pred.nocs_shape_coarse = coarse_out[..., 3:]
+            frames_pred.nocs_shape_fine = fold_out[..., 3:].reshape(B, C * K, 3)
 
         frames_pred.pts3d_shape_coarse = coarse
         frames_pred.pts3d_shape_fine = fine
