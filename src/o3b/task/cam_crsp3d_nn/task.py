@@ -488,8 +488,10 @@ class CamCrsp3DNNTask(OD3D_Task):
              cam_query_tform4x4_cam_target = pred_cam_q_tform_obj @ inv(pred_cam_t_tform_obj)
              cam_target_tform4x4_cam_query = inv(cam_query_tform4x4_cam_target)
 
-         (the relative cam↔cam transform is rigid, so any uniform object scale
-         embedded in the poses cancels).
+         The poses are NCDS→cam, so each embeds its object's 1D size, and the
+         relative transform is a similarity with scale ``s_trgt / s_query``, not
+         a rigid one. That scale is what maps a query instance onto a target of
+         a different size: correspondence means "same NCDS coordinate".
       3. Map the query keypoints (query-camera space) into the target camera
          space and compare against the GT target keypoints.
       4. Euclidean error, thresholded at ``0.1 * trgt_obj_size`` for PCK.
