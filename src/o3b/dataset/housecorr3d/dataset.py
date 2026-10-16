@@ -669,9 +669,10 @@ class HouseCorr3D(ConfigurableDataset):
         (d dims in all); true projects each part onto its own top d, then
         concatenates (d per part). A part's PCA is the eigendecomposition of
         its diagonal block of the concat's covariance, so both read one fit.
-        Unnormalised parts (ncds, UNNORMALISED_FEATS) pass through per-part
-        PCA untouched: 3 coordinates are no compression target, and d < 3
-        would drop an axis.
+        Unnormalised parts (ncds, UNNORMALISED_FEATS) pass through either
+        order untouched: 3 coordinates are no compression target, d < 3 would
+        drop an axis, and in a joint PCA they would compete with the learned
+        parts for the d components.
 
         Returns (mean (C,), projection (C, k)) for ``(f - mean) @ projection``.
         Mean and covariance are cached in ``mesh_pca/<mesh_type>/<category>.pt``
@@ -731,16 +732,30 @@ class HouseCorr3D(ConfigurableDataset):
                       + ", ".join(f"d={d} {ratio[d - 1]:.3f}" for d in (4, 8, 16, 32) if d <= len(ratio))
                       + " of the variance")
 
+        from o3b.data.datatypes.mesh import UNNORMALISED_FEATS
         d = int(self.cfg.extra["vert_feats_pca"])
+        names = cached.get("names") or [None] * len(cached.get("split") or [1])
         if not self.cfg.extra.get("vert_feats_pca_per_part"):
-            proj = cached["components"][:, :d]
+            raw = [n is not None and n.lower() in UNNORMALISED_FEATS for n in names]
+            if not any(raw):
+                proj = cached["components"][:, :d]
+            else:
+                # one PCA over the learned parts together; ncds passes through untouched
+                cols, keep, lo = [], [], 0
+                for w, r in zip(cached["split"], raw):
+                    (keep if r else cols).extend(range(lo, lo + w))
+                    lo += w
+                cols, keep = torch.tensor(cols), torch.tensor(keep)
+                vals, vecs = torch.linalg.eigh(cached["cov"][cols][:, cols])
+                proj = torch.zeros(lo, d + len(keep), dtype=torch.float64)
+                proj[cols, :d] = vecs[:, vals.argsort(descending=True)[:d]]
+                proj[keep, d + torch.arange(len(keep))] = 1.0
+                proj = proj.float()
         else:
             if len(cached["split"]) < 2:
                 raise ValueError(f"{self.cfg.mesh_type}: vert_feats_pca_per_part needs a concat (..._f<a>+<b>)")
             C = cached["cov"].shape[0]
             proj, lo = [], 0
-            from o3b.data.datatypes.mesh import UNNORMALISED_FEATS
-            names = cached.get("names") or [None] * len(cached["split"])
             for w, name in zip(cached["split"], names):
                 if name is not None and name.lower() in UNNORMALISED_FEATS:
                     block = torch.zeros(C, w, dtype=torch.float64)
