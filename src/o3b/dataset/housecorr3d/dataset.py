@@ -570,8 +570,12 @@ class HouseCorr3D(ConfigurableDataset):
                 mesh = Mesh.load_or_convert(converted_path, mesh_entry, self.cfg.mesh_type)
                 if (self.cfg.extra or {}).get("vert_feats_pca") and mesh is not None \
                         and mesh.vert_feats is not None:
-                    mean, proj = self._vert_feats_pca(row["category"])
-                    mesh.vert_feats = (mesh.vert_feats.float() - mean) @ proj
+                    mean, proj, learned = self._vert_feats_pca(row["category"])
+                    f = mesh.vert_feats.float()
+                    if (self.cfg.extra or {}).get("vert_feats_pca_center") == "object":
+                        # this object's own mean on the learned parts; ncds keeps the shared one
+                        mean = torch.where(learned, f.mean(0), mean)
+                    mesh.vert_feats = (f - mean) @ proj
 
         kpts3d, kpts3d_mask = None, None
         if need_kpts:
@@ -653,39 +657,57 @@ class HouseCorr3D(ConfigurableDataset):
 
         return obj
 
-    def _vert_feats_pca(self, category: str) -> "tuple[torch.Tensor, torch.Tensor]":
+    def _vert_feats_pca(self, category: str) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor]":
         """``extra.vert_feats_pca: d``: project ``mesh_type``'s vert_feats onto the category's PCA.
 
         Fit on every vertex of every object of *category* this dataset reads
         (an object-pair dataset: the objects its pairs are made of; frame
-        items: the category's objects in index.db), each vertex weighted
-        equally, on the features exactly as ``load_or_convert`` returns them
-        (a concat is L2-normalised and weighted per part first, a single
-        feature is not). Unsupervised but transductive: the evaluated objects
-        are in the fit.
+        items: the category's objects in index.db), on the features exactly as
+        ``load_or_convert`` returns them (a concat is L2-normalised and
+        weighted per part first, a single feature is not). Unsupervised but
+        transductive: the evaluated objects are in the fit.
+
+        ``extra.vert_feats_pca_cov`` chooses the covariance:
+
+        - ``total`` (default): over all vertices of all objects, each vertex
+          weighted equally. It includes the variance *between* instances (one
+          object's features shifted against another's), which spends
+          components on what the per-target nearest neighbour never needs.
+        - ``within``: each object centred on its own mean first, each object
+          weighted equally (sum over objects of its covariance / O), so the
+          components follow the variance *inside* an instance.
+
+        ``extra.vert_feats_pca_center: object`` subtracts each object's own
+        mean before projecting instead of the category's (default
+        ``category``, a pure change of basis), which also removes the instance
+        offset between source and target.
 
         ``extra.vert_feats_pca_per_part`` (concat only) chooses the order:
-        false (default) concatenates, then projects the whole onto its top d
-        (d dims in all); true projects each part onto its own top d, then
-        concatenates (d per part). A part's PCA is the eigendecomposition of
-        its diagonal block of the concat's covariance, so both read one fit.
-        Unnormalised parts (ncds, UNNORMALISED_FEATS) pass through either
-        order untouched: 3 coordinates are no compression target, d < 3 would
-        drop an axis, and in a joint PCA they would compete with the learned
-        parts for the d components.
+        false (default) concatenates, then projects the learned parts together
+        onto their top d (d dims in all); true projects each part onto its own
+        top d, then concatenates (d per part). A part's PCA is the
+        eigendecomposition of its diagonal block of the concat's covariance,
+        so both read one fit. Unnormalised parts (ncds, UNNORMALISED_FEATS)
+        pass through every variant untouched: 3 coordinates are no compression
+        target, d < 3 would drop an axis, in a joint PCA they would compete
+        with the learned parts for the d components, and they are centred on
+        the bbox already.
 
-        Returns (mean (C,), projection (C, k)) for ``(f - mean) @ projection``.
-        Mean and covariance are cached in ``mesh_pca/<mesh_type>/<category>.pt``
-        (with the full basis and its eigenvalues, for the explained variance),
-        so every d and both orders share one fit; refit when the object set
-        differs from the cached one. Accumulated in float64 one mesh at a time,
-        since a category's stacked features do not fit in memory (fc32 x
-        dinov2b+partfield: ~50 objects x 10k vertices x 1216).
+        Returns (mean (C,), projection (C, k), learned (C,) bool) for
+        ``(f - mean) @ projection``; ``learned`` marks the columns per-object
+        centring applies to. Both covariances, the mean and the between-instance
+        share of each part's variance are cached in
+        ``mesh_pca/<mesh_type>/<category>.pt`` (with the total covariance's
+        full basis and eigenvalues, for the explained variance), so every d,
+        order and variant shares one fit; refit when the object set differs
+        from the cached one or a field is missing. Accumulated in float64 one
+        mesh at a time, since a category's stacked features do not fit in
+        memory (fc32 x dinov2b+partfield: ~50 objects x 10k vertices x 1216).
         """
         memo = self.__dict__.setdefault("_vert_feats_pca_memo", {})
         if category in memo:
             return memo[category]
-        from o3b.data.datatypes.mesh import Mesh, _file_lock
+        from o3b.data.datatypes.mesh import Mesh, UNNORMALISED_FEATS, _file_lock
 
         if self.cfg.item_type == ItemType.OBJECT_PAIR:
             idxs = sorted({i for pair in self._object_rows_id for i in pair})
@@ -700,9 +722,9 @@ class HouseCorr3D(ConfigurableDataset):
         path = self.path_preprocess / "mesh_pca" / self.cfg.mesh_type / f"{category}.pt"
         with _file_lock(path.with_name(path.name + ".lock")):
             cached = torch.load(path) if path.exists() else None
-            # "cov" is missing from caches written before the per-part order existed
-            if cached is None or cached["object_ids"] != oids or "cov" not in cached:
-                n, s, ss, split, names = 0, None, None, None, None
+            # caches written before the per-part order / the within covariance lack these
+            if cached is None or cached["object_ids"] != oids or "cov_within" not in cached:
+                n, s, ss, sw, sw_vert, split, names = 0, None, None, None, None, None, None
                 for r in rows:
                     oid = r["object_id"]
                     mesh_rel = r.get("mesh_path")
@@ -715,14 +737,27 @@ class HouseCorr3D(ConfigurableDataset):
                                          f"not per-view features with NaN views ({oid})")
                     split = getattr(m, "vert_feats_split", None) or [x.shape[1]]
                     names = getattr(m, "vert_feats_names", None)
+                    xc = x - x.mean(0)
+                    xx, xcxc = x.T @ x, xc.T @ xc
                     n += x.shape[0]
                     s = x.sum(0) if s is None else s + x.sum(0)
-                    ss = x.T @ x if ss is None else ss + x.T @ x
+                    ss = xx if ss is None else ss + xx
+                    sw = xcxc / x.shape[0] if sw is None else sw + xcxc / x.shape[0]
+                    sw_vert = xcxc if sw_vert is None else sw_vert + xcxc
                 mean = s / n
                 cov = ss / n - torch.outer(mean, mean)
+                cov_within = sw / len(rows)
+                # between-instance share of each part's (vertex-weighted) variance:
+                # total = within + between, so 1 - tr(within) / tr(total)
+                between, lo = [], 0
+                for w in split:
+                    tot = cov[lo:lo + w, lo:lo + w].trace()
+                    between.append(float(1 - (sw_vert[lo:lo + w, lo:lo + w].trace() / n) / tot) if tot > 0 else 0.0)
+                    lo += w
                 eigvals, eigvecs = torch.linalg.eigh(cov)
                 order = eigvals.argsort(descending=True)
-                cached = {"object_ids": oids, "n_verts": n, "mean": mean.float(), "cov": cov, "split": split, "names": names,
+                cached = {"object_ids": oids, "n_verts": n, "mean": mean.float(), "cov": cov, "cov_within": cov_within,
+                          "between_share": between, "split": split, "names": names,
                           "components": eigvecs[:, order].float(), "eigvals": eigvals[order].clamp(min=0).float()}
                 tmp = path.with_name(path.name + ".tmp")
                 torch.save(cached, tmp)
@@ -730,46 +765,44 @@ class HouseCorr3D(ConfigurableDataset):
                 ratio = (cached["eigvals"].cumsum(0) / cached["eigvals"].sum()).tolist()
                 print(f"vert_feats_pca {self.cfg.mesh_type} {category}: {len(oids)} objects, {n} verts, "
                       + ", ".join(f"d={d} {ratio[d - 1]:.3f}" for d in (4, 8, 16, 32) if d <= len(ratio))
-                      + " of the variance")
+                      + " of the variance; between-instance share per part "
+                      + ", ".join(f"{nm or 'feats'} {b:.3f}" for nm, b in zip(names or [None] * len(between), between)))
 
-        from o3b.data.datatypes.mesh import UNNORMALISED_FEATS
-        d = int(self.cfg.extra["vert_feats_pca"])
-        names = cached.get("names") or [None] * len(cached.get("split") or [1])
-        if not self.cfg.extra.get("vert_feats_pca_per_part"):
-            raw = [n is not None and n.lower() in UNNORMALISED_FEATS for n in names]
-            if not any(raw):
-                proj = cached["components"][:, :d]
-            else:
-                # one PCA over the learned parts together; ncds passes through untouched
-                cols, keep, lo = [], [], 0
-                for w, r in zip(cached["split"], raw):
-                    (keep if r else cols).extend(range(lo, lo + w))
-                    lo += w
-                cols, keep = torch.tensor(cols), torch.tensor(keep)
-                vals, vecs = torch.linalg.eigh(cached["cov"][cols][:, cols])
-                proj = torch.zeros(lo, d + len(keep), dtype=torch.float64)
-                proj[cols, :d] = vecs[:, vals.argsort(descending=True)[:d]]
-                proj[keep, d + torch.arange(len(keep))] = 1.0
-                proj = proj.float()
-        else:
-            if len(cached["split"]) < 2:
-                raise ValueError(f"{self.cfg.mesh_type}: vert_feats_pca_per_part needs a concat (..._f<a>+<b>)")
-            C = cached["cov"].shape[0]
-            proj, lo = [], 0
-            for w, name in zip(cached["split"], names):
-                if name is not None and name.lower() in UNNORMALISED_FEATS:
-                    block = torch.zeros(C, w, dtype=torch.float64)
-                    block[lo:lo + w] = torch.eye(w, dtype=torch.float64)
-                    proj.append(block)
-                    lo += w
-                    continue
-                vals, vecs = torch.linalg.eigh(cached["cov"][lo:lo + w, lo:lo + w])
-                block = torch.zeros(C, d, dtype=torch.float64)
-                block[lo:lo + w] = vecs[:, vals.argsort(descending=True)[:d]]
-                proj.append(block)
-                lo += w
-            proj = torch.cat(proj, dim=1).float()
-        memo[category] = (cached["mean"], proj)
+        extra = self.cfg.extra
+        d = int(extra["vert_feats_pca"])
+        mode = extra.get("vert_feats_pca_cov", "total")
+        if mode not in ("total", "within"):
+            raise ValueError(f"vert_feats_pca_cov: {mode!r}, expected 'total' or 'within'")
+        cov = cached["cov_within" if mode == "within" else "cov"]
+        split = cached.get("split") or [cov.shape[0]]
+        names = cached.get("names") or [None] * len(split)
+        raw = [n is not None and n.lower() in UNNORMALISED_FEATS for n in names]
+        per_part = bool(extra.get("vert_feats_pca_per_part"))
+        if per_part and len(split) < 2:
+            raise ValueError(f"{self.cfg.mesh_type}: vert_feats_pca_per_part needs a concat (..._f<a>+<b>)")
+
+        def top(cols: torch.Tensor) -> torch.Tensor:
+            vals, vecs = torch.linalg.eigh(cov[cols][:, cols])
+            return vecs[:, vals.argsort(descending=True)[:d]]
+
+        C = cov.shape[0]
+        bounds = torch.tensor([0] + split).cumsum(0).tolist()
+        blocks = [torch.arange(bounds[i], bounds[i + 1]) for i in range(len(split))]
+        learned = torch.zeros(C, dtype=torch.bool)
+        for b, r in zip(blocks, raw):
+            learned[b] = not r
+        groups = [b for b, r in zip(blocks, raw) if not r] if per_part else [torch.nonzero(learned).flatten()]
+        proj = []
+        for cols in groups:
+            p = torch.zeros(C, d, dtype=torch.float64)
+            p[cols] = top(cols)
+            proj.append(p)
+        for b, r in zip(blocks, raw):
+            if r:
+                p = torch.zeros(C, len(b), dtype=torch.float64)
+                p[b, torch.arange(len(b))] = 1.0
+                proj.append(p)
+        memo[category] = (cached["mean"], torch.cat(proj, dim=1).float(), learned)
         return memo[category]
 
     def _load_object_pair(self, idx: int) -> ObjectPair:
