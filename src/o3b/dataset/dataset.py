@@ -458,6 +458,26 @@ class ConfigurableDataset(_TorchDataset):
             return None
         return Path(self.cfg.path_preprocess) / "sharded" / self.cfg.sharded_name
 
+    def _read_mesh_sidecar(self, path):
+        """The shard's mesh sidecar, or ``extra.mesh_sidecar_dir``'s instead.
+
+        ``extra.mesh_sidecar_dir`` names a directory holding a ``meshes/``
+        sidecar in the same format (``write_mesh_sidecar``): the items keep
+        coming from this shard, their meshes from there, matched by object_id.
+        That swaps in other meshes, e.g. remeshed ones carrying vertex features,
+        without rebuilding the frames. An object the alternative sidecar lacks
+        gets no mesh.
+        """
+        from o3b.dataset.sharding import read_mesh_sidecar
+        alt = (self.cfg.extra or {}).get("mesh_sidecar_dir")
+        if alt:
+            meshes, rows = read_mesh_sidecar(alt)
+            if meshes is None:
+                raise FileNotFoundError(f"extra.mesh_sidecar_dir: no meshes/ sidecar under {alt}")
+            print(f"Meshes from {alt}/meshes ({len(rows)} objects)")
+            return meshes, rows
+        return read_mesh_sidecar(path)
+
     def _setup_sharded(self) -> None:
         """Load the sharded dataset, building it from raw items if necessary."""
         from o3b.dataset.sharding import read_mesh_sidecar, read_sharded_dataset
@@ -469,7 +489,7 @@ class ConfigurableDataset(_TorchDataset):
         if path is not None and path.exists() and not self.cfg.sharded_override:
             print(f"Loading sharded dataset from {path}")
             self._sharded = read_sharded_dataset(path)
-            self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
+            self._sharded_meshes, self._sharded_mesh_rows = self._read_mesh_sidecar(path)
             return
 
         if self.cfg.use_huggingface:
@@ -491,7 +511,7 @@ class ConfigurableDataset(_TorchDataset):
         n = len(self)
         self._build_sharded_into(path, 0, n)
         self._sharded = read_sharded_dataset(path)
-        self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
+        self._sharded_meshes, self._sharded_mesh_rows = self._read_mesh_sidecar(path)
         print(f"Done. Wrote {len(self._sharded)} items → {path}")
 
     def _setup_sharded_chunk(self) -> None:
@@ -522,7 +542,7 @@ class ConfigurableDataset(_TorchDataset):
             print(f"Chunk {i}/{k}: items [{lo}, {hi}) of {n}")
             self._build_sharded_into(path, lo, hi)
         self._sharded = read_sharded_dataset(path)
-        self._sharded_meshes, self._sharded_mesh_rows = read_mesh_sidecar(path)
+        self._sharded_meshes, self._sharded_mesh_rows = self._read_mesh_sidecar(path)
         print(f"Done. Chunk {i}/{k} holds {len(self._sharded)} items → {path}")
 
     def _load_sharded_item_at(self, offset: int, idx: int):

@@ -32,6 +32,11 @@ what PoseMLP reads. So the pose is read *after* the surface tokens have
 informed it, and this module is no longer a side branch. ``pose_out`` is
 zero-initialised, so the chain starts out as the pose-only one.
 
+With ``point_feat_dim: k`` every coarse and fine point also carries k
+learned feature channels (``feat_shape_coarse`` / ``feat_shape_fine``), e.g.
+PCA-projected DINOv2 / PartField surface features; supervised like the NOCS on
+the Chamfer matching (``TrinityMethod._shape_metrics``, ``shape_feat_l1_*``).
+
 With ``nocs: true`` every coarse and fine point also carries its normalised
 object coordinates (``nocs_shape_coarse`` / ``nocs_shape_fine``, NCDS units:
 the object's longest side spans 2): the coarse MLP and the fold MLP each emit
@@ -72,6 +77,7 @@ class ShapeXAttn(OD3D_Model):
         dropout: float = 0.0,
         nocs: bool = False,
         pose_query: bool = False,
+        point_feat_dim: int = 0,
     ):
         super().__init__()
         self.nocs = nocs
@@ -80,7 +86,9 @@ class ShapeXAttn(OD3D_Model):
         self.fold_count = fold_count
         self.rope_unit = rope_unit
 
-        self.out_ch = 6 if nocs else 3          # point (+ its NOCS)
+        self.point_feat_dim = point_feat_dim
+        # point (+ its NOCS) (+ point_feat_dim feature channels)
+        self.out_ch = 3 + (3 if nocs else 0) + point_feat_dim
         self.coarse = _mlp([in_dim, hidden_dim, hidden_dim, coarse_count * self.out_ch])
 
         # surface token = embed(point) + embed(global feature)
@@ -136,9 +144,14 @@ class ShapeXAttn(OD3D_Model):
         seed = self.fold_grid[None, None].expand(B, C, K, 2)
         fold_out = self.fold(torch.cat([q[:, :, None].expand(B, C, K, q.shape[-1]), seed], dim=-1))
         fine = (coarse[:, :, None] + fold_out[..., :3]).reshape(B, C * K, 3)
+        o = 3
         if self.nocs:
-            frames_pred.nocs_shape_coarse = coarse_out[..., 3:]
-            frames_pred.nocs_shape_fine = fold_out[..., 3:].reshape(B, C * K, 3)
+            frames_pred.nocs_shape_coarse = coarse_out[..., o:o + 3]
+            frames_pred.nocs_shape_fine = fold_out[..., o:o + 3].reshape(B, C * K, 3)
+            o += 3
+        if self.point_feat_dim:
+            frames_pred.feat_shape_coarse = coarse_out[..., o:]
+            frames_pred.feat_shape_fine = fold_out[..., o:].reshape(B, C * K, self.point_feat_dim)
 
         frames_pred.pts3d_shape_coarse = coarse
         frames_pred.pts3d_shape_fine = fine
