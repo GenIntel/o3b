@@ -669,6 +669,9 @@ class HouseCorr3D(ConfigurableDataset):
         (d dims in all); true projects each part onto its own top d, then
         concatenates (d per part). A part's PCA is the eigendecomposition of
         its diagonal block of the concat's covariance, so both read one fit.
+        Unnormalised parts (ncds, UNNORMALISED_FEATS) pass through per-part
+        PCA untouched: 3 coordinates are no compression target, and d < 3
+        would drop an axis.
 
         Returns (mean (C,), projection (C, k)) for ``(f - mean) @ projection``.
         Mean and covariance are cached in ``mesh_pca/<mesh_type>/<category>.pt``
@@ -698,7 +701,7 @@ class HouseCorr3D(ConfigurableDataset):
             cached = torch.load(path) if path.exists() else None
             # "cov" is missing from caches written before the per-part order existed
             if cached is None or cached["object_ids"] != oids or "cov" not in cached:
-                n, s, ss, split = 0, None, None, None
+                n, s, ss, split, names = 0, None, None, None, None
                 for r in rows:
                     oid = r["object_id"]
                     mesh_rel = r.get("mesh_path")
@@ -710,6 +713,7 @@ class HouseCorr3D(ConfigurableDataset):
                         raise ValueError(f"{self.cfg.mesh_type}: vert_feats_pca needs one feature per vertex, "
                                          f"not per-view features with NaN views ({oid})")
                     split = getattr(m, "vert_feats_split", None) or [x.shape[1]]
+                    names = getattr(m, "vert_feats_names", None)
                     n += x.shape[0]
                     s = x.sum(0) if s is None else s + x.sum(0)
                     ss = x.T @ x if ss is None else ss + x.T @ x
@@ -717,7 +721,7 @@ class HouseCorr3D(ConfigurableDataset):
                 cov = ss / n - torch.outer(mean, mean)
                 eigvals, eigvecs = torch.linalg.eigh(cov)
                 order = eigvals.argsort(descending=True)
-                cached = {"object_ids": oids, "n_verts": n, "mean": mean.float(), "cov": cov, "split": split,
+                cached = {"object_ids": oids, "n_verts": n, "mean": mean.float(), "cov": cov, "split": split, "names": names,
                           "components": eigvecs[:, order].float(), "eigvals": eigvals[order].clamp(min=0).float()}
                 tmp = path.with_name(path.name + ".tmp")
                 torch.save(cached, tmp)
@@ -735,7 +739,15 @@ class HouseCorr3D(ConfigurableDataset):
                 raise ValueError(f"{self.cfg.mesh_type}: vert_feats_pca_per_part needs a concat (..._f<a>+<b>)")
             C = cached["cov"].shape[0]
             proj, lo = [], 0
-            for w in cached["split"]:
+            from o3b.data.datatypes.mesh import UNNORMALISED_FEATS
+            names = cached.get("names") or [None] * len(cached["split"])
+            for w, name in zip(cached["split"], names):
+                if name is not None and name.lower() in UNNORMALISED_FEATS:
+                    block = torch.zeros(C, w, dtype=torch.float64)
+                    block[lo:lo + w] = torch.eye(w, dtype=torch.float64)
+                    proj.append(block)
+                    lo += w
+                    continue
                 vals, vecs = torch.linalg.eigh(cached["cov"][lo:lo + w, lo:lo + w])
                 block = torch.zeros(C, d, dtype=torch.float64)
                 block[lo:lo + w] = vecs[:, vals.argsort(descending=True)[:d]]

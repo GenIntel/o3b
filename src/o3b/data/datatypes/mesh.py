@@ -330,10 +330,12 @@ class Mesh:
             raise ValueError(f"{mesh_type}: at most one per-view part can be concatenated")
         # the per-view block first: the task reads it as the first N*C channels
         # and treats the rest as one feature per vertex (Crsp3DNNTask feat_views)
-        ordered = [b for pv, b in blocks if pv] + [b for pv, b in blocks if not pv]
-        mesh.vert_feats = torch.cat(ordered, dim=1)
-        # the parts' widths in that order, for a per-part PCA (HouseCorr3D._vert_feats_pca)
-        mesh.vert_feats_split = [b.shape[1] for b in ordered]
+        blocks = [(pv, n, b) for n, (pv, b) in zip(names, blocks)]
+        ordered = [nb for pv, *nb in blocks if pv] + [nb for pv, *nb in blocks if not pv]
+        mesh.vert_feats = torch.cat([b for _, b in ordered], dim=1)
+        # the parts' names and widths in that order, for a per-part PCA (HouseCorr3D._vert_feats_pca)
+        mesh.vert_feats_names = [n for n, _ in ordered]
+        mesh.vert_feats_split = [b.shape[1] for _, b in ordered]
         return mesh
 
     @classmethod
