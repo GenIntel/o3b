@@ -23,6 +23,15 @@ Writes ``pts3d_shape_coarse`` / ``pts3d_shape_fine`` /
 ``cam_tform4x4_pts3d_shape`` like ShapeMLP, so TrinityMethod's shape metrics
 apply unchanged.
 
+With ``pose_query: true`` the decoder also refines the pose (H02-T04 variant
+b, option 2): a pose token, projected from the global feature and placed at
+the cloud centre, joins the surface tokens as one more query. It cross-attends
+over the stage-4 tokens like them and exchanges with them in the self-attention
+layers. ``feat`` then becomes ``feat + pose_out(refined pose token)``, which is
+what PoseMLP reads. So the pose is read *after* the surface tokens have
+informed it, and this module is no longer a side branch. ``pose_out`` is
+zero-initialised, so the chain starts out as the pose-only one.
+
 With ``nocs: true`` every coarse and fine point also carries its normalised
 object coordinates (``nocs_shape_coarse`` / ``nocs_shape_fine``, NCDS units:
 the object's longest side spans 2): the coarse MLP and the fold MLP each emit
@@ -62,9 +71,11 @@ class ShapeXAttn(OD3D_Model):
         rope_unit: float = 0.08,
         dropout: float = 0.0,
         nocs: bool = False,
+        pose_query: bool = False,
     ):
         super().__init__()
         self.nocs = nocs
+        self.pose_query = pose_query
         self.coarse_count = coarse_count
         self.fold_count = fold_count
         self.rope_unit = rope_unit
@@ -81,6 +92,11 @@ class ShapeXAttn(OD3D_Model):
             for i in range(num_layers)
         ])
         self.norm_out = nn.LayerNorm(dim)
+        if pose_query:
+            self.embed_pose = nn.Linear(in_dim, dim)
+            self.pose_out = nn.Linear(dim, in_dim)
+            nn.init.zeros_(self.pose_out.weight)
+            nn.init.zeros_(self.pose_out.bias)
 
         side = int(round(fold_count ** 0.5))
         if side * side != fold_count:
@@ -104,10 +120,18 @@ class ShapeXAttn(OD3D_Model):
 
         q = self.embed_pt(coarse) + self.embed_glob(feat)[:, None]
         q_pos = coarse.detach() / self.rope_unit
+        if self.pose_query:
+            # pose token first, at the cloud frame's origin (the observed
+            # cloud's median), like XAttnPool's pose query
+            q = torch.cat([self.embed_pose(feat)[:, None], q], dim=1)
+            q_pos = torch.cat([q_pos.new_zeros(B, 1, 3), q_pos], dim=1)
         tok_pos = tok_coord / self.rope_unit
         for layer in self.layers:
             q = layer(q, q_pos, tok, tok_pos, tok_mask)
-        q = self.norm_out(q)                                      # (B, C, dim)
+        q = self.norm_out(q)                                      # (B, [1 +] C, dim)
+        if self.pose_query:
+            frames_pred.feat = feat + self.pose_out(q[:, 0])
+            q = q[:, 1:]
 
         seed = self.fold_grid[None, None].expand(B, C, K, 2)
         fold_out = self.fold(torch.cat([q[:, :, None].expand(B, C, K, q.shape[-1]), seed], dim=-1))
