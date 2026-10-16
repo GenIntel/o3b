@@ -637,6 +637,8 @@ class FrameObjectPairBatch:
     trgt_pred_pts3d_shape: Optional[Tensor] = None
     src_pred_nocs_shape:   Optional[Tensor] = None  # (B, N, 3) NCDS units
     trgt_pred_nocs_shape:  Optional[Tensor] = None
+    src_pred_feat_shape:   Optional[Tensor] = None  # (B, N, k) predicted surface features
+    trgt_pred_feat_shape:  Optional[Tensor] = None
 
 
 def collate_frame_object_pairs(
