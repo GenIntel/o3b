@@ -367,6 +367,29 @@ def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt,
     return pred_kpts
 
 
+def _pred_nocs_corresp(batch, query_kpts_cam_q):
+    """Variant d: correspondence through predicted per-point NOCS.
+
+    Each side carries a predicted surface cloud in its camera space with a NOCS
+    per point (``{src,trgt}_pred_pts3d_shape`` / ``_pred_nocs_shape``). A query
+    keypoint is snapped to its nearest predicted src point, and that point's
+    NOCS is looked up among the trgt points: the trgt point with the nearest
+    NOCS is the prediction, at its own predicted camera-space position. Neither
+    predicted pose enters. Returns (B, K, 3) or None when a side has no cloud.
+    """
+    pts_s, nocs_s = batch.src_pred_pts3d_shape, batch.src_pred_nocs_shape
+    pts_t, nocs_t = batch.trgt_pred_pts3d_shape, batch.trgt_pred_nocs_shape
+    if any(x is None for x in (pts_s, nocs_s, pts_t, nocs_t)):
+        return None
+    dev = query_kpts_cam_q.device
+    pts_s, nocs_s = pts_s.float().to(dev), nocs_s.float().to(dev)
+    pts_t, nocs_t = pts_t.float().to(dev), nocs_t.float().to(dev)
+    ids_s = torch.cdist(query_kpts_cam_q.float(), pts_s).argmin(dim=-1)                # (B, K)
+    nocs_q = torch.gather(nocs_s, 1, ids_s[..., None].expand(-1, -1, 3))              # (B, K, 3)
+    ids_t = torch.cdist(nocs_q, nocs_t).argmin(dim=-1)                                # (B, K)
+    return torch.gather(pts_t, 1, ids_t[..., None].expand(-1, -1, 3))
+
+
 # ── keypoint symmetry (discrete + continuous rotational) ──────────────────────
 
 def _kpts_sym_candidates(trgt_kpts, trgt_ncds, obj_tform4x4_obj_syms):
@@ -496,6 +519,11 @@ class CamCrsp3DNNTask(OD3D_Task):
          space and compare against the GT target keypoints.
       4. Euclidean error, thresholded at ``0.1 * trgt_obj_size`` for PCK.
 
+    Variant ``nocs`` (``*_nocs`` metrics), for a method that predicts a surface
+    cloud with NOCS per point on each side: the query keypoint snaps to its
+    nearest predicted src point, and the trgt point whose predicted NOCS is
+    nearest to that point's NOCS is the prediction (see _pred_nocs_corresp).
+
     Qualitative: correspondences drawn on the query|target frame RGB, and on a
     top-down render of the target object.  Predicted poses fall back to GT when
     unavailable (oracle upper bound).
@@ -616,6 +644,9 @@ class CamCrsp3DNNTask(OD3D_Task):
             self.mesh_ncds_rescale, self.mesh_ncds_recenter,
         )
 
+        # ── variant d: predicted surface points matched through their NOCS ────
+        pred_nocs_kpts = _pred_nocs_corresp(batch, query_kpts_cam_q)
+
         # ── metrics: euclidean error + PCK @ 0.1 * trgt_obj_size, per variant ──
         threshold = 0.1 * trgt_obj_size.float().to(dev)  # (B,)
         src_vis, trgt_vis = batch.src_obj_kpts2d_mask, batch.trgt_obj_kpts2d_mask
@@ -636,7 +667,8 @@ class CamCrsp3DNNTask(OD3D_Task):
         )
 
         variant_correct = {"pose": m_pose["is_correct"]}
-        for name, pred in (("featmap2d", pred_feat2d_kpts), ("mesh", pred_mesh_kpts)):
+        for name, pred in (("featmap2d", pred_feat2d_kpts), ("mesh", pred_mesh_kpts),
+                           ("nocs", pred_nocs_kpts)):
             if pred is None:
                 continue
             dist, _ = _kpts_sym_min_dist(

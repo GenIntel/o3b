@@ -632,6 +632,11 @@ class FrameObjectPairBatch:
     trgt_featmap:   Optional[Tensor] = None
     src_pred_mesh:  Optional[list]   = None  # list of B Mesh, canonical (GL) NCDS frame
     trgt_pred_mesh: Optional[list]   = None
+    # predicted surface points in camera space, each with its predicted NOCS
+    src_pred_pts3d_shape:  Optional[Tensor] = None  # (B, N, 3)
+    trgt_pred_pts3d_shape: Optional[Tensor] = None
+    src_pred_nocs_shape:   Optional[Tensor] = None  # (B, N, 3) NCDS units
+    trgt_pred_nocs_shape:  Optional[Tensor] = None
 
 
 def collate_frame_object_pairs(
