@@ -568,6 +568,10 @@ class HouseCorr3D(ConfigurableDataset):
                     self.path_preprocess / "mesh" / self.cfg.mesh_type / f"{oid}.glb"
                 )
                 mesh = Mesh.load_or_convert(converted_path, mesh_entry, self.cfg.mesh_type)
+                pca_dim = (self.cfg.extra or {}).get("vert_feats_pca")
+                if pca_dim and mesh is not None and mesh.vert_feats is not None:
+                    mean, comps = self._vert_feats_pca(row["category"])
+                    mesh.vert_feats = (mesh.vert_feats.float() - mean) @ comps[:, : int(pca_dim)]
 
         kpts3d, kpts3d_mask = None, None
         if need_kpts:
@@ -648,6 +652,73 @@ class HouseCorr3D(ConfigurableDataset):
             obj = _r(obj, obj_size3d=_size3d, obj_bbox3d=_bbox3d)
 
         return obj
+
+    def _vert_feats_pca(self, category: str) -> "tuple[torch.Tensor, torch.Tensor]":
+        """``extra.vert_feats_pca: d``: the category's PCA basis of ``mesh_type``'s vert_feats.
+
+        Fit on every vertex of every object of *category* this dataset reads
+        (an object-pair dataset: the objects its pairs are made of; frame
+        items: the category's objects in index.db), each vertex weighted
+        equally, on the features exactly as ``load_or_convert`` returns them
+        (a concat is L2-normalised per part first, a single feature is not).
+        Returns (mean (C,), components (C, C)), components in columns by
+        descending variance, so ``(f - mean) @ components[:, :d]`` projects
+        onto the top d. Unsupervised but transductive: the evaluated objects
+        are in the fit.
+
+        The full basis is cached in ``mesh_pca/<mesh_type>/<category>.pt`` so
+        every d shares one fit, and refit when the object set differs from the
+        cached one. Accumulated as a float64 covariance, one mesh at a time,
+        since the stacked features of a category do not fit in memory (fc32 x
+        dinov2b+partfield: ~50 objects x 10k vertices x 1216).
+        """
+        memo = self.__dict__.setdefault("_vert_feats_pca_memo", {})
+        if category in memo:
+            return memo[category]
+        from o3b.data.datatypes.mesh import Mesh, _file_lock
+
+        if self.cfg.item_type == ItemType.OBJECT_PAIR:
+            idxs = sorted({i for pair in self._object_rows_id for i in pair})
+            rows = [self._object_rows[i] for i in idxs]
+        elif self.cfg.item_type == ItemType.OBJECT:
+            rows = [self._object_rows[i] for i in self._object_rows_id]
+        else:
+            rows = list(self._object_rows)
+        rows = sorted((r for r in rows if r.get("category") == category), key=lambda r: r["object_id"])
+        oids = [r["object_id"] for r in rows]
+
+        path = self.path_preprocess / "mesh_pca" / self.cfg.mesh_type / f"{category}.pt"
+        with _file_lock(path.with_name(path.name + ".lock")):
+            cached = torch.load(path) if path.exists() else None
+            if cached is None or cached["object_ids"] != oids:
+                n, s, ss = 0, None, None
+                for r in rows:
+                    oid = r["object_id"]
+                    mesh_rel = r.get("mesh_path")
+                    entry = self.path_raw / mesh_rel if mesh_rel else self.path_object_meshes / oid
+                    m = Mesh.load_or_convert(
+                        self.path_preprocess / "mesh" / self.cfg.mesh_type / f"{oid}.glb", entry, self.cfg.mesh_type)
+                    x = m.vert_feats.double()
+                    if torch.isnan(x).any():
+                        raise ValueError(f"{self.cfg.mesh_type}: vert_feats_pca needs one feature per vertex, "
+                                         f"not per-view features with NaN views ({oid})")
+                    n += x.shape[0]
+                    s = x.sum(0) if s is None else s + x.sum(0)
+                    ss = x.T @ x if ss is None else ss + x.T @ x
+                mean = s / n
+                eigvals, eigvecs = torch.linalg.eigh(ss / n - torch.outer(mean, mean))
+                order = eigvals.argsort(descending=True)
+                cached = {"object_ids": oids, "n_verts": n, "mean": mean.float(),
+                          "components": eigvecs[:, order].float(), "eigvals": eigvals[order].clamp(min=0).float()}
+                tmp = path.with_name(path.name + ".tmp")
+                torch.save(cached, tmp)
+                tmp.replace(path)
+                ratio = (cached["eigvals"].cumsum(0) / cached["eigvals"].sum()).tolist()
+                print(f"vert_feats_pca {self.cfg.mesh_type} {category}: {len(oids)} objects, {n} verts, "
+                      + ", ".join(f"d={d} {ratio[d - 1]:.3f}" for d in (4, 8, 16, 32) if d <= len(ratio))
+                      + " of the variance")
+        memo[category] = (cached["mean"], cached["components"])
+        return memo[category]
 
     def _load_object_pair(self, idx: int) -> ObjectPair:
         src_idx, trgt_idx = self._object_rows_id[idx]
