@@ -19,6 +19,24 @@ frame's origin — the observed cloud's median — by default). ``rope_unit``
 defaults to LitePT's stage-4 cell (grid_size 0.005 x stride 2^4), the unit its
 own last-stage RoPE counted in. The head dim (dim / num_heads) must be a
 multiple of 6, as in PointROPE: 504 / 28 = 18 like LitePT's stage 4.
+
+**Surface queries** (``surface_queries: 512``, H02-T04 variant c): the pooling
+also carries 512 surface queries next to the pose query, through the same
+layers (set ``self_attn_every: 1`` so pose and surface queries exchange in every
+layer). The pose feature is then the *first* query alone, not the mean. Each
+refined surface token is decoded by two MLPs: ``coarse`` maps it to one point
+(+ its NOCS), and ``fine`` reads the token *and* that output and emits
+``surface_fold`` points (offsets from the coarse point, + their NOCS): 512 x 4 =
+2048. Outputs are written like ShapeXAttn's (``pts3d_shape_coarse`` /
+``_fine``, ``nocs_shape_*``, ``cam_tform4x4_pts3d_shape``), in the normalised
+cloud frame the tokens live in, so TrinityMethod's shape metrics apply.
+
+``surface_anchor`` sets what a surface query is before the first layer:
+
+- ``learned``: a free parameter per query, at the pose query's position.
+- ``sphere``: 512 fixed anchors spread uniformly on the unit sphere in NOCS
+  units (a Fibonacci lattice); the query is MLP(anchor) and its PointROPE
+  position is the anchor.
 """
 
 import logging
@@ -97,6 +115,24 @@ class _Layer(nn.Module):
         return q + self.ffn(self.norm_ffn(q))
 
 
+def fibonacci_sphere(n: int) -> torch.Tensor:
+    """n points spread uniformly on the unit sphere (Fibonacci lattice), (n, 3)."""
+    i = torch.arange(n, dtype=torch.float64) + 0.5
+    z = 1.0 - 2.0 * i / n
+    r = (1.0 - z * z).sqrt()
+    phi = i * torch.pi * (3.0 - 5.0 ** 0.5)
+    return torch.stack([r * phi.cos(), r * phi.sin(), z], dim=-1).float()
+
+
+def _mlp(dims):
+    layers = []
+    for i in range(len(dims) - 1):
+        layers.append(nn.Linear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(nn.GELU())
+    return nn.Sequential(*layers)
+
+
 @register_model("XAttnPool")
 class XAttnPool(OD3D_Model):
     def __init__(
@@ -112,8 +148,30 @@ class XAttnPool(OD3D_Model):
         query_pos=(0.0, 0.0, 0.0),
         dropout: float = 0.0,
         out_feat_append_in_feat: bool = True,
+        surface_queries: int = 0,
+        surface_anchor: str = "learned",
+        surface_fold: int = 4,
+        surface_hidden_dim: int = 256,
+        surface_nocs: bool = False,
     ):
         super().__init__()
+        self.num_queries = num_queries
+        self.surface_queries = surface_queries
+        self.surface_anchor = surface_anchor
+        self.surface_fold = surface_fold
+        self.surface_nocs = surface_nocs
+        if surface_queries:
+            if surface_anchor == "learned":
+                self.surface_q = nn.Parameter(torch.randn(1, surface_queries, dim) * 0.02)
+            elif surface_anchor == "sphere":
+                self.register_buffer("surface_pos", fibonacci_sphere(surface_queries), persistent=False)
+                self.embed_anchor = _mlp([3, dim // 2, dim])
+            else:
+                raise ValueError(f"XAttnPool: surface_anchor must be learned or sphere, got {surface_anchor}")
+            self.out_ch = 3 + (3 if surface_nocs else 0)
+            self.coarse = _mlp([dim, surface_hidden_dim, surface_hidden_dim, self.out_ch])
+            self.fine = _mlp([dim + self.out_ch, surface_hidden_dim, surface_hidden_dim,
+                              surface_fold * self.out_ch])
         self.rope_unit = rope_unit
         self.out_feat_append_in_feat = out_feat_append_in_feat
         self.queries = nn.Parameter(torch.randn(1, num_queries, dim) * 0.02)
@@ -135,13 +193,41 @@ class XAttnPool(OD3D_Model):
         B = tok.shape[0]
         q = self.queries.expand(B, -1, -1)
         q_pos = (self.query_pos / self.rope_unit).expand(B, q.shape[1], 3)
+        if self.surface_queries:
+            S = self.surface_queries
+            if self.surface_anchor == "learned":
+                q_s = self.surface_q.expand(B, -1, -1)
+                pos_s = q_pos[:, :1].expand(B, S, 3)
+            else:
+                q_s = self.embed_anchor(self.surface_pos)[None].expand(B, -1, -1)
+                pos_s = (self.surface_pos / self.rope_unit)[None].expand(B, S, 3)
+            q = torch.cat([q, q_s], dim=1)
+            q_pos = torch.cat([q_pos, pos_s], dim=1)
         tok_pos = tok_coord / self.rope_unit
         for layer in self.layers:
             q = layer(q, q_pos, tok, tok_pos, tok_mask)
-        pooled = self.norm_out(q).mean(dim=1)                       # (B, dim)
+        q = self.norm_out(q)
+        pooled = q[:, :self.num_queries].mean(dim=1)                # (B, dim)
+
+        if self.surface_queries:
+            self._surface(q[:, self.num_queries:], frames_pred)
 
         if self.out_feat_append_in_feat and frames_pred.feat is not None:
             frames_pred.feat = torch.cat([pooled, frames_pred.feat], dim=1)
         else:
             frames_pred.feat = pooled
         return frames_gt, frames_pred
+
+    def _surface(self, t, frames_pred):
+        """Two MLPs per refined surface token: coarse point, then K fine points."""
+        B, S, _ = t.shape
+        K = self.surface_fold
+        c = self.coarse(t)                                          # (B, S, out_ch)
+        f = self.fine(torch.cat([t, c], dim=-1)).reshape(B, S, K, self.out_ch)
+        coarse = c[..., :3]
+        frames_pred.pts3d_shape_coarse = coarse
+        frames_pred.pts3d_shape_fine = (coarse[:, :, None] + f[..., :3]).reshape(B, S * K, 3)
+        if self.surface_nocs:
+            frames_pred.nocs_shape_coarse = c[..., 3:6]
+            frames_pred.nocs_shape_fine = f[..., 3:6].reshape(B, S * K, 3)
+        frames_pred.cam_tform4x4_pts3d_shape = frames_pred.obj_tform4x4_obj_nocs_0c
