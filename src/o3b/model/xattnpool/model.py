@@ -34,6 +34,10 @@ cloud frame the tokens live in, so TrinityMethod's shape metrics apply.
 ``surface_anchor`` sets what a surface query is before the first layer:
 
 - ``learned``: a free parameter per query, at the pose query's position.
+``surface_pose_attn: false`` masks self-attention between the pose queries and
+the surface queries (each group still self-attends within itself), so the pose
+query sees the surface only through the shared encoder.
+
 - ``sphere``: 512 fixed anchors spread uniformly on the unit sphere in NOCS
   units (a Fibonacci lattice); the query is MLP(anchor) and its PointROPE
   position is the anchor.
@@ -82,7 +86,8 @@ class _Attn(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.dropout = dropout
 
-    def forward(self, x, x_pos, ctx, ctx_pos, ctx_mask=None):
+    def forward(self, x, x_pos, ctx, ctx_pos, ctx_mask=None, pair_mask=None):
+        """ctx_mask: (B, S) valid keys; pair_mask: (N, S) allowed query-key pairs."""
         B, N, C = x.shape
         S = ctx.shape[1]
         q = self.q(x).reshape(B, N, self.h, -1).transpose(1, 2)
@@ -90,6 +95,8 @@ class _Attn(nn.Module):
         q = rope3d(q, x_pos, self.rope_freq)
         k = rope3d(k, ctx_pos, self.rope_freq)
         mask = ctx_mask[:, None, None, :] if ctx_mask is not None else None
+        if pair_mask is not None:
+            mask = pair_mask[None, None] if mask is None else mask & pair_mask[None, None]
         out = F.scaled_dot_product_attention(
             q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.)
         return self.proj(out.transpose(1, 2).reshape(B, N, C))
@@ -107,10 +114,10 @@ class _Layer(nn.Module):
         self.ffn = nn.Sequential(nn.Linear(dim, dim * mlp_ratio), nn.GELU(),
                                  nn.Linear(dim * mlp_ratio, dim))
 
-    def forward(self, q, q_pos, tok, tok_pos, tok_mask):
+    def forward(self, q, q_pos, tok, tok_pos, tok_mask, self_mask=None):
         if self.self_attn is not None:
             h = self.norm_sa(q)
-            q = q + self.self_attn(h, q_pos, h, q_pos)
+            q = q + self.self_attn(h, q_pos, h, q_pos, pair_mask=self_mask)
         q = q + self.cross(self.norm_q(q), q_pos, self.norm_kv(tok), tok_pos, tok_mask)
         return q + self.ffn(self.norm_ffn(q))
 
@@ -153,6 +160,7 @@ class XAttnPool(OD3D_Model):
         surface_fold: int = 4,
         surface_hidden_dim: int = 256,
         surface_nocs: bool = False,
+        surface_pose_attn: bool = True,
     ):
         super().__init__()
         self.num_queries = num_queries
@@ -160,6 +168,7 @@ class XAttnPool(OD3D_Model):
         self.surface_anchor = surface_anchor
         self.surface_fold = surface_fold
         self.surface_nocs = surface_nocs
+        self.surface_pose_attn = surface_pose_attn
         if surface_queries:
             if surface_anchor == "learned":
                 self.surface_q = nn.Parameter(torch.randn(1, surface_queries, dim) * 0.02)
@@ -204,8 +213,14 @@ class XAttnPool(OD3D_Model):
             q = torch.cat([q, q_s], dim=1)
             q_pos = torch.cat([q_pos, pos_s], dim=1)
         tok_pos = tok_coord / self.rope_unit
+        self_mask = None
+        if self.surface_queries and not self.surface_pose_attn:
+            # pose and surface queries do not see each other in self-attention;
+            # each group still attends within itself
+            g = torch.arange(q.shape[1], device=q.device) >= self.num_queries
+            self_mask = g[:, None] == g[None, :]
         for layer in self.layers:
-            q = layer(q, q_pos, tok, tok_pos, tok_mask)
+            q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask)
         q = self.norm_out(q)
         pooled = q[:, :self.num_queries].mean(dim=1)                # (B, dim)
 
