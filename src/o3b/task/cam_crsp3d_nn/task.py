@@ -397,9 +397,38 @@ def _pred_desc_corresp(batch, query_kpts_cam_q, parts):
     if any(x is None for x in [pts_s, pts_t, *ds, *dt]):
         return None
     dev = query_kpts_cam_q.device
-    pts_s, pts_t = pts_s.float().to(dev), pts_t.float().to(dev)
     desc_s = torch.cat([d.float().to(dev) for d in ds], dim=-1)
     desc_t = torch.cat([d.float().to(dev) for d in dt], dim=-1)
+    return _desc_match(query_kpts_cam_q, pts_s, desc_s, pts_t, desc_t)
+
+
+def _pred_posenocs_corresp(batch, query_kpts_cam_q):
+    """Variant posenocs: correspondence through NOCS derived from the pose.
+
+    Each predicted surface point's NOCS is taken as the inverse of that side's
+    *predicted* NCDS pose applied to the point (camera space -> NCDS), instead
+    of a NOCS the method predicts per point. Matching then runs as in
+    _pred_desc_corresp: the query snaps to its nearest predicted src point, the
+    trgt point with the nearest pose-NOCS is the prediction, at its own
+    predicted camera-space position (the error is measured in camera space).
+    Needs only the predicted surface clouds and the predicted poses; never falls
+    back to the GT pose. Returns (B, K, 3) or None.
+    """
+    pts_s, pts_t = batch.src_pred_pts3d_shape, batch.trgt_pred_pts3d_shape
+    pose_s, pose_t = batch.src_pred_cam_tform4x4_obj, batch.trgt_pred_cam_tform4x4_obj
+    if any(x is None for x in (pts_s, pts_t, pose_s, pose_t)):
+        return None
+    from o3b.cv.geometry.transform import inv_tform4x4, transf3d_broadcast
+    dev = query_kpts_cam_q.device
+    desc_s = transf3d_broadcast(pts_s.float().to(dev), inv_tform4x4(pose_s.float().to(dev))[:, None])
+    desc_t = transf3d_broadcast(pts_t.float().to(dev), inv_tform4x4(pose_t.float().to(dev))[:, None])
+    return _desc_match(query_kpts_cam_q, pts_s, desc_s, pts_t, desc_t)
+
+
+def _desc_match(query_kpts_cam_q, pts_s, desc_s, pts_t, desc_t):
+    """Snap queries to the nearest src point, match its descriptor among the trgt points."""
+    dev = query_kpts_cam_q.device
+    pts_s, pts_t = pts_s.float().to(dev), pts_t.float().to(dev)
     ids_s = torch.cdist(query_kpts_cam_q.float(), pts_s).argmin(dim=-1)                # (B, K)
     desc_q = torch.gather(desc_s, 1, ids_s[..., None].expand(-1, -1, desc_s.shape[-1]))
     ids_t = torch.cdist(desc_q, desc_t).argmin(dim=-1)                                # (B, K)
@@ -539,6 +568,10 @@ class CamCrsp3DNNTask(OD3D_Task):
     same through predicted per-point surface features (``*_pred_feat_shape``),
     alone or concatenated with the NOCS.
 
+    Variant ``posenocs`` (``*_posenocs``): as ``nocs``, but each predicted
+    point's NOCS is derived from that side's predicted pose, pose^-1(point),
+    so it needs no NOCS head (see _pred_posenocs_corresp).
+
     Variant ``nocs`` (``*_nocs`` metrics), for a method that predicts a surface
     cloud with NOCS per point on each side: the query keypoint snaps to its
     nearest predicted src point, and the trgt point whose predicted NOCS is
@@ -669,6 +702,8 @@ class CamCrsp3DNNTask(OD3D_Task):
         # ── variants e/f: through predicted surface features (+ NOCS) ─────────
         pred_feat_kpts = _pred_desc_corresp(batch, query_kpts_cam_q, ("feat",))
         pred_nocs_feat_kpts = _pred_desc_corresp(batch, query_kpts_cam_q, ("nocs", "feat"))
+        # ── variant posenocs: through NOCS = predicted pose^-1 (predicted points)
+        pred_posenocs_kpts = _pred_posenocs_corresp(batch, query_kpts_cam_q)
 
         # ── metrics: euclidean error + PCK @ 0.1 * trgt_obj_size, per variant ──
         threshold = 0.1 * trgt_obj_size.float().to(dev)  # (B,)
@@ -692,7 +727,7 @@ class CamCrsp3DNNTask(OD3D_Task):
         variant_correct = {"pose": m_pose["is_correct"]}
         for name, pred in (("featmap2d", pred_feat2d_kpts), ("mesh", pred_mesh_kpts),
                            ("nocs", pred_nocs_kpts), ("feat", pred_feat_kpts),
-                           ("nocs_feat", pred_nocs_feat_kpts)):
+                           ("nocs_feat", pred_nocs_feat_kpts), ("posenocs", pred_posenocs_kpts)):
             if pred is None:
                 continue
             dist, _ = _kpts_sym_min_dist(
