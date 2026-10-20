@@ -38,6 +38,12 @@ cloud frame the tokens live in, so TrinityMethod's shape metrics apply.
 the surface queries (each group still self-attends within itself), so the pose
 query sees the surface only through the shared encoder.
 
+- ``observed_sphere``: the same 512 Fibonacci directions u, but placed per
+  crop on a sphere around the observed cloud (``frames_pred.pts3d``, in the
+  normalised cloud frame): centre = the points' median, radius = the
+  ``surface_sphere_quantile`` quantile of their distances to it. The query is
+  MLP(u) and its PointROPE position is centre + radius * u. Positions stay
+  fixed over the layers (as ShapeXAttn's coarse points do).
 - ``sphere``: 512 fixed anchors spread uniformly on the unit sphere in NOCS
   units (a Fibonacci lattice); the query is MLP(anchor) and its PointROPE
   position is the anchor.
@@ -161,6 +167,7 @@ class XAttnPool(OD3D_Model):
         surface_hidden_dim: int = 256,
         surface_nocs: bool = False,
         surface_pose_attn: bool = True,
+        surface_sphere_quantile: float = 0.9,
     ):
         super().__init__()
         self.num_queries = num_queries
@@ -169,14 +176,16 @@ class XAttnPool(OD3D_Model):
         self.surface_fold = surface_fold
         self.surface_nocs = surface_nocs
         self.surface_pose_attn = surface_pose_attn
+        self.surface_sphere_quantile = surface_sphere_quantile
         if surface_queries:
             if surface_anchor == "learned":
                 self.surface_q = nn.Parameter(torch.randn(1, surface_queries, dim) * 0.02)
-            elif surface_anchor == "sphere":
+            elif surface_anchor in ("sphere", "observed_sphere"):
                 self.register_buffer("surface_pos", fibonacci_sphere(surface_queries), persistent=False)
                 self.embed_anchor = _mlp([3, dim // 2, dim])
             else:
-                raise ValueError(f"XAttnPool: surface_anchor must be learned or sphere, got {surface_anchor}")
+                raise ValueError("XAttnPool: surface_anchor must be learned, sphere or observed_sphere, "
+                                 f"got {surface_anchor}")
             self.out_ch = 3 + (3 if surface_nocs else 0)
             self.coarse = _mlp([dim, surface_hidden_dim, surface_hidden_dim, self.out_ch])
             self.fine = _mlp([dim + self.out_ch, surface_hidden_dim, surface_hidden_dim,
@@ -207,9 +216,12 @@ class XAttnPool(OD3D_Model):
             if self.surface_anchor == "learned":
                 q_s = self.surface_q.expand(B, -1, -1)
                 pos_s = q_pos[:, :1].expand(B, S, 3)
-            else:
+            elif self.surface_anchor == "sphere":
                 q_s = self.embed_anchor(self.surface_pos)[None].expand(B, -1, -1)
                 pos_s = (self.surface_pos / self.rope_unit)[None].expand(B, S, 3)
+            else:
+                q_s = self.embed_anchor(self.surface_pos)[None].expand(B, -1, -1)
+                pos_s = self.observed_sphere(frames_pred.pts3d) / self.rope_unit
             q = torch.cat([q, q_s], dim=1)
             q_pos = torch.cat([q_pos, pos_s], dim=1)
         tok_pos = tok_coord / self.rope_unit
@@ -232,6 +244,16 @@ class XAttnPool(OD3D_Model):
         else:
             frames_pred.feat = pooled
         return frames_gt, frames_pred
+
+    def observed_sphere(self, pts3d):
+        """(B, S, 3) anchors on a sphere around the observed cloud (B, N, 3)."""
+        if pts3d is None:
+            raise RuntimeError("XAttnPool: surface_anchor observed_sphere needs frames_pred.pts3d")
+        pts3d = pts3d.detach().float()
+        center = pts3d.median(dim=1).values                        # (B, 3)
+        radius = (pts3d - center[:, None]).norm(dim=-1).quantile(
+            self.surface_sphere_quantile, dim=1)                    # (B,)
+        return center[:, None] + radius[:, None, None] * self.surface_pos[None]
 
     def _surface(self, t, frames_pred):
         """Two MLPs per refined surface token: coarse point, then K fine points."""
