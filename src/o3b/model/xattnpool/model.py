@@ -44,6 +44,10 @@ query sees the surface only through the shared encoder.
   ``surface_sphere_quantile`` quantile of their distances to it. The query is
   MLP(u) and its PointROPE position is centre + radius * u. Positions stay
   fixed over the layers (as ShapeXAttn's coarse points do).
+``surface_cls_dim: k`` (e.g. 384 for DINOv2-S) also feeds the DINOv2 cls
+feature (``frames_pred.feat`` as it reaches this stage) into both point MLPs:
+coarse reads [t_i | cls], fine reads [t_i | cls | coarse output].
+
 - ``sphere``: 512 fixed anchors spread uniformly on the unit sphere in NOCS
   units (a Fibonacci lattice); the query is MLP(anchor) and its PointROPE
   position is the anchor.
@@ -168,6 +172,7 @@ class XAttnPool(OD3D_Model):
         surface_nocs: bool = False,
         surface_pose_attn: bool = True,
         surface_sphere_quantile: float = 0.9,
+        surface_cls_dim: int = 0,
     ):
         super().__init__()
         self.num_queries = num_queries
@@ -177,6 +182,7 @@ class XAttnPool(OD3D_Model):
         self.surface_nocs = surface_nocs
         self.surface_pose_attn = surface_pose_attn
         self.surface_sphere_quantile = surface_sphere_quantile
+        self.surface_cls_dim = surface_cls_dim
         if surface_queries:
             if surface_anchor == "learned":
                 self.surface_q = nn.Parameter(torch.randn(1, surface_queries, dim) * 0.02)
@@ -187,8 +193,9 @@ class XAttnPool(OD3D_Model):
                 raise ValueError("XAttnPool: surface_anchor must be learned, sphere or observed_sphere, "
                                  f"got {surface_anchor}")
             self.out_ch = 3 + (3 if surface_nocs else 0)
-            self.coarse = _mlp([dim, surface_hidden_dim, surface_hidden_dim, self.out_ch])
-            self.fine = _mlp([dim + self.out_ch, surface_hidden_dim, surface_hidden_dim,
+            cd = surface_cls_dim
+            self.coarse = _mlp([dim + cd, surface_hidden_dim, surface_hidden_dim, self.out_ch])
+            self.fine = _mlp([dim + cd + self.out_ch, surface_hidden_dim, surface_hidden_dim,
                               surface_fold * self.out_ch])
         self.rope_unit = rope_unit
         self.out_feat_append_in_feat = out_feat_append_in_feat
@@ -259,6 +266,14 @@ class XAttnPool(OD3D_Model):
         """Two MLPs per refined surface token: coarse point, then K fine points."""
         B, S, _ = t.shape
         K = self.surface_fold
+        if self.surface_cls_dim:
+            # the DINOv2 cls feature, still in frames_pred.feat here (the pooled
+            # feature is appended to it only after this), joins every token
+            cls = frames_pred.feat
+            if cls is None or cls.shape[-1] != self.surface_cls_dim:
+                raise RuntimeError(f"XAttnPool: surface_cls_dim {self.surface_cls_dim} but frames_pred.feat is "
+                                   f"{None if cls is None else tuple(cls.shape)}")
+            t = torch.cat([t, cls.float()[:, None].expand(B, S, -1)], dim=-1)
         c = self.coarse(t)                                          # (B, S, out_ch)
         f = self.fine(torch.cat([t, c], dim=-1)).reshape(B, S, K, self.out_ch)
         coarse = c[..., :3]
