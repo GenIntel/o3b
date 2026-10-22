@@ -499,6 +499,45 @@ def _fgw_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_ve
     return Z.argmax(dim=1)
 
 
+def _fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_verts: Tensor,
+                src_faces: Tensor, trgt_faces: Tensor, *, k: int = 50, w_descr: float = 1.0,
+                w_lap: float = 1e-2, w_dcomm: float = 1e-1, w_orient: float = 0.0,
+                zoomout: int = 0, zoomout_step: int = 5) -> Tensor:
+    """Functional-map matching with the features as descriptors, the recipe
+    od3d's DenseMatcher / Diff3F code used (``compute_surface_map`` in
+    od3d/methods/densematcher/diff3f/functional_map.py): pyFM, k = 50
+    Laplacian eigenfunctions per mesh, fit weights descriptors 1, Laplacian
+    commutativity 0.01, descriptor commutativity 0.1, no orientation term,
+    then the spectral nearest-neighbour point map. ``zoomout`` > 0 adds that
+    many ZoomOut steps of ``zoomout_step`` eigenfunctions (not in the old
+    recipe). Needs pyfmaps (``pip install pyfmaps``, imports as pyFM).
+
+    The vertices are centred and divided by their largest bbox side first, as
+    the old code meant to. The target mesh is pyFM's mesh1, so get_p2p gives a
+    target vertex per source vertex. Returns (V_src,) target vertex indices.
+    """
+    import numpy as np
+    from pyFM.functional import FunctionalMapping
+    from pyFM.mesh import TriMesh
+
+    def mesh(v, f):
+        v = v.detach().double().cpu()
+        lo, hi = v.amin(0), v.amax(0)
+        v = (v - 0.5 * (lo + hi)) / (hi - lo).max().clamp(min=1e-12)
+        return TriMesh(v.numpy(), f.detach().long().cpu().numpy())
+
+    m1, m2 = mesh(trgt_verts, trgt_faces), mesh(src_verts, src_faces)
+    model = FunctionalMapping(m1, m2)
+    model.preprocess(descr_type=None, k_process=k + zoomout * zoomout_step)
+    model.add_descriptors(trgt_feats.detach().double().cpu().numpy(),
+                          src_feats.detach().double().cpu().numpy(), normalize=True)
+    model.fit(K=(k, k), w_descr=w_descr, w_lap=w_lap, w_dcomm=w_dcomm, w_orient=w_orient)
+    if zoomout > 0:
+        model.zoomout_refine(nit=zoomout, step=zoomout_step)
+    p2p = model.get_p2p(n_jobs=1)  # (V_src,) index into the target (mesh1)
+    return torch.as_tensor(np.asarray(p2p), dtype=torch.long, device=src_feats.device)
+
+
 @register_task("Crsp3DNNTask")
 class Crsp3DNNTask(OD3D_Task):
     """Feature-based nearest-neighbour 3D correspondence.
@@ -520,11 +559,11 @@ class Crsp3DNNTask(OD3D_Task):
 
     FEAT_DISTS = ("euclidean", "view_mean", "mean_of_min", "min_of_min")
 
-    MATCHINGS = ("nn", "uot", "fgw")
+    MATCHINGS = ("nn", "uot", "fgw", "fmap")
 
     def __init__(self, feat_dist: str = "euclidean", feat_view_dim: Optional[int] = None,
                  feat_views: Optional[int] = None, matching: str = "nn", fgw: Optional[dict] = None,
-                 **kwargs):
+                 fmap: Optional[dict] = None, **kwargs):
         """``feat_dist`` -- how a source vertex is compared with target vertices:
 
         euclidean    one feature per vertex, Euclidean NN (the default).
@@ -549,11 +588,15 @@ class Crsp3DNNTask(OD3D_Task):
         fgw          Shape-of-You's fused Gromov-Wasserstein matching
                      (``_fgw_match``): Sinkhorn plans re-solved with a
                      structural term from anchors' 3-D distances.
+        fmap         functional map with the features as descriptors
+                     (``_fmap_match``, the old DenseMatcher recipe; needs the
+                     meshes' faces, i.e. the ``mesh`` modality).
 
         ``uot`` / ``fgw`` solve one plan per pair over all vertices, so they need
         ``feat_dist: euclidean``; ``fgw`` takes ``_fgw_match``'s keyword
         arguments (alpha, n_anchors, rounds, iters, rho, anchor_q, temp,
-        normalize_scale).
+        normalize_scale), ``fmap`` ``_fmap_match``'s (k, w_descr, w_lap,
+        w_dcomm, w_orient, zoomout, zoomout_step).
         """
         if feat_dist not in self.FEAT_DISTS:
             raise ValueError(f"feat_dist {feat_dist!r} not in {self.FEAT_DISTS}")
@@ -568,6 +611,7 @@ class Crsp3DNNTask(OD3D_Task):
             raise ValueError(f"matching {matching!r} needs feat_dist 'euclidean'")
         self.matching = matching
         self.fgw = dict(fgw or {})
+        self.fmap = dict(fmap or {})
         if matching == "uot":
             self.fgw["rounds"] = 0
 
@@ -634,8 +678,20 @@ class Crsp3DNNTask(OD3D_Task):
                     tm = trgt_verts_mask[b] if trgt_verts_mask is not None else \
                         torch.ones(trgt_feats.shape[1], dtype=torch.bool, device=dev)
                     s_idx, t_idx = sm.nonzero(as_tuple=True)[0], tm.nonzero(as_tuple=True)[0]
-                    pred = _fgw_match(src_feats[b, s_idx], trgt_feats[b, t_idx],
-                                      src_verts[b, s_idx], trgt_verts[b, t_idx], **self.fgw)
+                    if self.matching == "fmap":
+                        if batch.src_meshes is None or batch.trgt_meshes is None:
+                            raise ValueError("matching 'fmap' needs the meshes (object modality 'mesh')")
+                        sf, tf = batch.src_meshes[b].faces, batch.trgt_meshes[b].faces
+                        # faces index the mesh's own vertices, i.e. the unpadded prefix
+                        if not (torch.equal(s_idx.cpu(), torch.arange(len(s_idx)))
+                                and torch.equal(t_idx.cpu(), torch.arange(len(t_idx)))
+                                and int(sf.max()) < len(s_idx) and int(tf.max()) < len(t_idx)):
+                            raise ValueError("matching 'fmap': mesh faces do not index the unpadded vertices")
+                        pred = _fmap_match(src_feats[b, s_idx], trgt_feats[b, t_idx],
+                                           src_verts[b, s_idx], trgt_verts[b, t_idx], sf, tf, **self.fmap)
+                    else:
+                        pred = _fgw_match(src_feats[b, s_idx], trgt_feats[b, t_idx],
+                                          src_verts[b, s_idx], trgt_verts[b, t_idx], **self.fgw)
                     full = torch.zeros(src_feats.shape[1], dtype=torch.long, device=dev)
                     full[s_idx] = t_idx[pred]
                     plans[b] = full

@@ -51,6 +51,7 @@ dependencies = [
     "torchmetrics",     # DINOv3's torch.hub entry point (hubconf.py) imports
     "termcolor",        # its segmentation evaluator, which needs both, so no
                         # dinov3_* backbone loads without them (configs/model/dinov3b.yaml)
+    "pyfmaps",          # functional maps (imports as pyFM): Crsp3DNNTask matching: fmap
 ]
 
 [project.scripts]
