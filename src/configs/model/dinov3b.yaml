@@ -1,0 +1,14 @@
+class_name: DINOv2   # the DINO wrapper (o3b/model/dino/model.py) loads DINOv3 too, keyed on "dinov3" in hub_model
+hub_repo: facebookresearch/dinov3
+hub_model: dinov3_vitb16
+freeze: true
+downsample_rate: 16
+normalize: false
+layers_returned: [0]
+pca: false
+# DINOv3 is gated: torch.hub fetches the checkpoint from a signed Meta URL. The
+# cache is looked up by file name only, so this unsigned URL loads it from
+# ${path_torch_home}/hub/checkpoints/ (present on the cluster); where it is not
+# cached, put a signed URL from the DINOv3 request mail here.
+weights:
+  dinov3_vitb16: https://dinov3.llamameta.net/dinov3_vitb16/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth

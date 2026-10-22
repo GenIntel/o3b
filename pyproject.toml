@@ -48,6 +48,9 @@ dependencies = [
                         # a stale one in ~/.local — and that copy then shadowed
                         # the env for every process.
     "pyarrow",          # o3b.dataset.sharding writes the sharded Arrow cache
+    "torchmetrics",     # DINOv3's torch.hub entry point (hubconf.py) imports
+                        # its segmentation evaluator, which needs it, so no
+                        # dinov3_* backbone loads without it (configs/model/dinov3b.yaml)
 ]
 
 [project.scripts]
