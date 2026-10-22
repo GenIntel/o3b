@@ -1,0 +1,11 @@
+class_name: DINOv2   # the DINO wrapper (o3b/model/dino/model.py); loads DINOv3 too, keyed on "dinov3" in hub_model
+hub_repo: facebookresearch/dinov3
+hub_model: dinov3_vitl16
+freeze: true
+downsample_rate: 16
+normalize: false
+layers_returned: [0]
+pca: false
+# gated checkpoint, loaded from the torch.hub cache by file name (see dinov3b.yaml)
+weights:
+  dinov3_vitl16: https://dinov3.llamameta.net/dinov3_vitl16/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth

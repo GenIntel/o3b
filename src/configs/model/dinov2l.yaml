@@ -1,0 +1,8 @@
+class_name: DINOv2   # the DINO wrapper (o3b/model/dino/model.py); loads DINOv3 too, keyed on "dinov3" in hub_model
+hub_repo: facebookresearch/dinov2
+hub_model: dinov2_vitl14
+freeze: true
+downsample_rate: 14
+normalize: false
+layers_returned: [0]
+pca: false

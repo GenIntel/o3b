@@ -1,0 +1,12 @@
+class_name: DINOv2   # the DINO wrapper (o3b/model/dino/model.py); loads DINOv3 too, keyed on "dinov3" in hub_model
+hub_repo: facebookresearch/dinov3
+hub_model: dinov3_vith16plus
+freeze: true
+downsample_rate: 16
+normalize: false
+layers_returned: [0]
+pca: false
+# ViT-H+/16 (840M), the largest DINOv3 available here (the 7B is not). Gated; this name
+# matches the checkpoint file in ${path_torch_home}/hub/checkpoints/, which torch.hub loads by file name.
+weights:
+  dinov3_vith16plus: https://dinov3.llamameta.net/dinov3_vith16plus/dinov3_vith16plus.pth
