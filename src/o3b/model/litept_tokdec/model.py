@@ -222,7 +222,8 @@ class LitePTTokenDecoder(OD3D_Model):
         aug = Point({
             "feat": torch.cat([feat_real, feat_new.to(feat_real.dtype)])[perm],
             "coord": torch.cat([point.coord.float(), c_new.float()])[perm],
-            "grid_coord": torch.cat([point.grid_coord.long(), g_new.long()])[perm].int(),
+            # int64: LitePT's PointROPE kernel reads grid_coord as Long (its pooled stages are int64)
+            "grid_coord": torch.cat([point.grid_coord.long(), g_new.long()])[perm],
             "batch": batch[perm],
         })
         aug.serialization(order=self.order, shuffle_orders=self.training)
