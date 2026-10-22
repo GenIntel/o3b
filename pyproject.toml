@@ -49,8 +49,8 @@ dependencies = [
                         # the env for every process.
     "pyarrow",          # o3b.dataset.sharding writes the sharded Arrow cache
     "torchmetrics",     # DINOv3's torch.hub entry point (hubconf.py) imports
-                        # its segmentation evaluator, which needs it, so no
-                        # dinov3_* backbone loads without it (configs/model/dinov3b.yaml)
+    "termcolor",        # its segmentation evaluator, which needs both, so no
+                        # dinov3_* backbone loads without them (configs/model/dinov3b.yaml)
 ]
 
 [project.scripts]
