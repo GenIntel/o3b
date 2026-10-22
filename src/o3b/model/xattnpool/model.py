@@ -44,6 +44,11 @@ query sees the surface only through the shared encoder.
   ``surface_sphere_quantile`` quantile of their distances to it. The query is
   MLP(u) and its PointROPE position is centre + radius * u. Positions stay
   fixed over the layers (as ShapeXAttn's coarse points do).
+``surface_head: fold`` replaces the K-slot fine MLP by a fold head (as
+ShapeXAttn): one shared MLP reads [token (| cls) | coarse output | 2-D grid
+seed] and is evaluated once per seed of a fixed sqrt(K) x sqrt(K) grid
+(+-``surface_fold_grid_scale``); fine point k = coarse + its output.
+
 ``surface_cls_dim: k`` (e.g. 384 for DINOv2-S) also feeds the DINOv2 cls
 feature (``frames_pred.feat`` as it reaches this stage) into both point MLPs:
 coarse reads [t_i | cls], fine reads [t_i | cls | coarse output].
@@ -173,6 +178,8 @@ class XAttnPool(OD3D_Model):
         surface_pose_attn: bool = True,
         surface_sphere_quantile: float = 0.9,
         surface_cls_dim: int = 0,
+        surface_head: str = "mlp",
+        surface_fold_grid_scale: float = 0.05,
     ):
         super().__init__()
         self.num_queries = num_queries
@@ -183,6 +190,7 @@ class XAttnPool(OD3D_Model):
         self.surface_pose_attn = surface_pose_attn
         self.surface_sphere_quantile = surface_sphere_quantile
         self.surface_cls_dim = surface_cls_dim
+        self.surface_head = surface_head
         if surface_queries:
             if surface_anchor == "learned":
                 self.surface_q = nn.Parameter(torch.randn(1, surface_queries, dim) * 0.02)
@@ -195,8 +203,22 @@ class XAttnPool(OD3D_Model):
             self.out_ch = 3 + (3 if surface_nocs else 0)
             cd = surface_cls_dim
             self.coarse = _mlp([dim + cd, surface_hidden_dim, surface_hidden_dim, self.out_ch])
-            self.fine = _mlp([dim + cd + self.out_ch, surface_hidden_dim, surface_hidden_dim,
-                              surface_fold * self.out_ch])
+            if surface_head == "mlp":
+                # one pass, K output slots: fine point k = coarse + slot k
+                self.fine = _mlp([dim + cd + self.out_ch, surface_hidden_dim, surface_hidden_dim,
+                                  surface_fold * self.out_ch])
+            elif surface_head == "fold":
+                # FoldingNet / ShapeXAttn style: one shared MLP, evaluated per point of a
+                # fixed 2-D grid seed; the K points differ only through their seed
+                side = int(round(surface_fold ** 0.5))
+                if side * side != surface_fold:
+                    raise ValueError(f"XAttnPool: surface_fold must be a square for the fold head, got {surface_fold}")
+                lin = torch.linspace(-surface_fold_grid_scale, surface_fold_grid_scale, side)
+                grid = torch.stack(torch.meshgrid(lin, lin, indexing="ij"), dim=-1).reshape(-1, 2)
+                self.register_buffer("fold_grid", grid, persistent=False)
+                self.fine = _mlp([dim + cd + self.out_ch + 2, surface_hidden_dim, surface_hidden_dim, self.out_ch])
+            else:
+                raise ValueError(f"XAttnPool: surface_head must be mlp or fold, got {surface_head}")
         self.rope_unit = rope_unit
         self.out_feat_append_in_feat = out_feat_append_in_feat
         self.queries = nn.Parameter(torch.randn(1, num_queries, dim) * 0.02)
@@ -275,7 +297,12 @@ class XAttnPool(OD3D_Model):
                                    f"{None if cls is None else tuple(cls.shape)}")
             t = torch.cat([t, cls.float()[:, None].expand(B, S, -1)], dim=-1)
         c = self.coarse(t)                                          # (B, S, out_ch)
-        f = self.fine(torch.cat([t, c], dim=-1)).reshape(B, S, K, self.out_ch)
+        if self.surface_head == "fold":
+            x = torch.cat([t, c], dim=-1)[:, :, None].expand(B, S, K, t.shape[-1] + c.shape[-1])
+            seed = self.fold_grid.to(x.dtype)[None, None].expand(B, S, K, 2)
+            f = self.fine(torch.cat([x, seed], dim=-1))             # (B, S, K, out_ch)
+        else:
+            f = self.fine(torch.cat([t, c], dim=-1)).reshape(B, S, K, self.out_ch)
         coarse = c[..., :3]
         frames_pred.pts3d_shape_coarse = coarse
         frames_pred.pts3d_shape_fine = (coarse[:, :, None] + f[..., :3]).reshape(B, S * K, 3)
