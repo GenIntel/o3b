@@ -24,6 +24,15 @@ class MeshFMModel(OD3D_Model):
 
     forward(ObjectBatch) -> ObjectBatch with verts3d_feats (B, V, 1536).
     Frame batches are not supported (MeshFM is 3D-only).
+
+    Orientation: SO(3) augmentation makes MeshFM robust to rotations, not
+    invariant to them, so the input orientation still changes the features.
+    ``rotation_xyz_deg`` rotates the normalised mesh (extrinsic x, then y,
+    then z, degrees) before it is encoded and queried. The features stay
+    attached to the same vertices, so a rotation shared by all objects keeps
+    them comparable. HouseCorr3D's cached meshes are Y-up, and ``[90, 0, 0]``
+    makes them Z-up. ``tta_rotations: k`` averages the features over the
+    identity and k - 1 seeded random rotations (after ``rotation_xyz_deg``).
     """
 
     def __init__(
@@ -40,6 +49,8 @@ class MeshFMModel(OD3D_Model):
         apply_tanh: bool = True,
         seed: int | None = 0,
         freeze: bool = True,
+        rotation_xyz_deg: tuple = (0.0, 0.0, 0.0),
+        tta_rotations: int = 1,
     ):
         super().__init__()
         self.ckpt_path = ckpt_path
@@ -54,7 +65,32 @@ class MeshFMModel(OD3D_Model):
         self.apply_tanh = apply_tanh
         self.seed = seed
         self.freeze = freeze
+        self.rotation_xyz_deg = tuple(float(a) for a in rotation_xyz_deg)
+        self.tta_rotations = int(tta_rotations)
         self.out_dim = triplane_channels_high  # 1536
+
+    def _rotations(self) -> list:
+        """The (3, 3) rotations the features are averaged over, each applied as v @ R.T."""
+        import math
+
+        def axis(i, deg):
+            c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+            R = torch.eye(3, dtype=torch.float32)
+            j, k = [a for a in range(3) if a != i]
+            R[j, j], R[j, k], R[k, j], R[k, k] = c, -s, s, c
+            return R
+
+        rx, ry, rz = self.rotation_xyz_deg
+        base = axis(2, rz) @ axis(1, ry) @ axis(0, rx)
+        rots = [base]
+        g = torch.Generator().manual_seed(1234)
+        for _ in range(self.tta_rotations - 1):
+            q, r = torch.linalg.qr(torch.randn(3, 3, generator=g))
+            q = q * torch.sign(torch.diagonal(r))   # uniform on O(3) ...
+            if torch.det(q) < 0:                     # ... restricted to SO(3)
+                q[:, 0] = -q[:, 0]
+            rots.append(q @ base)
+        return rots
 
     def _ensure_ckpt(self) -> Path:
         ckpt_path = Path(self.ckpt_path)
@@ -129,25 +165,33 @@ class MeshFMModel(OD3D_Model):
             raise ValueError("MeshFM: degenerate mesh, all vertices coincide")
         verts_normed = ((verts - center) / scale).float()
 
-        generator = torch.Generator().manual_seed(int(self.seed)) if self.seed is not None else None
-        pc = sample_surface_points(verts_normed, faces, self.n_pc_points, generator=generator)
-
         model = self._build_model(device)
-        planes = model(pc.unsqueeze(0).to(device))  # (1, 3, C, H, W)
+        feats = None
+        rots = self._rotations()
+        for R in rots:
+            # a rotation about the bbox centre keeps the mesh in the unit sphere
+            verts_rot = verts_normed @ R.T
+            # the same surface samples for every rotation (re-seeded per pass)
+            generator = torch.Generator().manual_seed(int(self.seed)) if self.seed is not None else None
+            pc = sample_surface_points(verts_rot, faces, self.n_pc_points, generator=generator)
+            planes = model(pc.unsqueeze(0).to(device))  # (1, 3, C, H, W)
 
-        # query the field at the mesh vertices, chunked to bound memory
-        query = verts_normed.clamp(-1.0, 1.0).unsqueeze(0)
-        feats = torch.cat(
-            [
-                model.sample_triplane_features_from_points(
-                    planes, query[:, i : i + self.n_sample_each].to(device)
-                ).cpu()
-                for i in range(0, query.shape[1], self.n_sample_each)
-            ],
-            dim=1,
-        )[0].float()  # (V, out_dim)
+            # query the field at the mesh vertices, chunked to bound memory
+            query = verts_rot.clamp(-1.0, 1.0).unsqueeze(0)
+            f = torch.cat(
+                [
+                    model.sample_triplane_features_from_points(
+                        planes, query[:, i : i + self.n_sample_each].to(device)
+                    ).cpu()
+                    for i in range(0, query.shape[1], self.n_sample_each)
+                ],
+                dim=1,
+            )[0].float()  # (V, out_dim)
+            feats = f if feats is None else feats + f
+            del planes, pc, query
+        feats = feats / len(rots)
 
-        del model, planes, pc, query
+        del model
         torch.cuda.empty_cache()
         gc.collect()
 
