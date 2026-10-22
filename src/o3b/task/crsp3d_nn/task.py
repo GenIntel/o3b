@@ -512,30 +512,57 @@ def _fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_v
     many ZoomOut steps of ``zoomout_step`` eigenfunctions (not in the old
     recipe). Needs pyfmaps (``pip install pyfmaps``, imports as pyFM).
 
-    The vertices are centred and divided by their largest bbox side first, as
-    the old code meant to. The target mesh is pyFM's mesh1, so get_p2p gives a
-    target vertex per source vertex. Returns (V_src,) target vertex indices.
+    The cached remeshes duplicate vertices along UV seams (an fc16 mesh is
+    ~110 pieces), which leaves the Laplacian with one zero eigenvalue per
+    piece and the eigenbasis useless. So each mesh is welded first
+    (``weld_mesh``; features averaged per welded vertex) and the map is
+    computed between the largest connected pieces. The few source vertices
+    off it (floating bits of 4-8 vertices) fall back to the feature nearest
+    neighbour. Vertices are centred and divided by their largest bbox side,
+    as the old code meant to. Returns (V_src,) target vertex indices.
     """
     import numpy as np
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
     from pyFM.functional import FunctionalMapping
     from pyFM.mesh import TriMesh
 
-    def mesh(v, f):
-        v = v.detach().double().cpu()
-        lo, hi = v.amin(0), v.amax(0)
-        v = (v - 0.5 * (lo + hi)) / (hi - lo).max().clamp(min=1e-12)
-        return TriMesh(v.numpy(), f.detach().long().cpu().numpy())
+    from o3b.data.datatypes.mesh import mean_by_index, weld_mesh
 
-    m1, m2 = mesh(trgt_verts, trgt_faces), mesh(src_verts, src_faces)
+    def prep(v, f, feats):
+        v = v.detach().double().cpu().numpy()
+        f = f.detach().long().cpu().numpy()
+        vw, fw, inv, rep = weld_mesh(v, f)
+        fw = fw[(fw[:, 0] != fw[:, 1]) & (fw[:, 1] != fw[:, 2]) & (fw[:, 0] != fw[:, 2])]
+        n = len(vw)
+        adj = sp.coo_matrix((np.ones(3 * len(fw)), (fw.ravel(), np.roll(fw, 1, axis=1).ravel())), shape=(n, n))
+        _, lab = connected_components(adj, directed=False)
+        main = np.flatnonzero(lab == np.bincount(lab).argmax())          # welded ids of the largest piece
+        sub = np.full(n, -1)
+        sub[main] = np.arange(len(main))
+        fm = sub[fw]
+        fm = fm[(fm >= 0).all(1)]
+        vm = vw[main]
+        lo, hi = vm.min(0), vm.max(0)
+        vm = (vm - 0.5 * (lo + hi)) / max((hi - lo).max(), 1e-12)
+        fmain = mean_by_index(feats.detach().double().cpu().numpy(), inv, n)[main]
+        return TriMesh(vm, fm), fmain, inv, rep, main, sub
+
+    m1, d1, _, rep_t, main_t, _ = prep(trgt_verts, trgt_faces, trgt_feats)
+    m2, d2, inv_s, _, _, sub_s = prep(src_verts, src_faces, src_feats)
     model = FunctionalMapping(m1, m2)
     model.preprocess(descr_type=None, k_process=k + zoomout * zoomout_step)
-    model.add_descriptors(trgt_feats.detach().double().cpu().numpy(),
-                          src_feats.detach().double().cpu().numpy(), normalize=True)
+    model.add_descriptors(d1, d2, normalize=True)
     model.fit(K=(k, k), w_descr=w_descr, w_lap=w_lap, w_dcomm=w_dcomm, w_orient=w_orient)
     if zoomout > 0:
         model.zoomout_refine(nit=zoomout, step=zoomout_step)
-    p2p = model.get_p2p(n_jobs=1)  # (V_src,) index into the target (mesh1)
-    return torch.as_tensor(np.asarray(p2p), dtype=torch.long, device=src_feats.device)
+    p2p = np.asarray(model.get_p2p(n_jobs=1))          # (n_src_main,) index into the target's main piece
+    trgt_orig = rep_t[main_t[p2p]]                      # -> an original target vertex
+
+    pred = torch.cdist(src_feats.float(), trgt_feats.float()).argmin(dim=1).cpu().numpy()  # fallback
+    on_main = sub_s[inv_s] >= 0
+    pred[on_main] = trgt_orig[sub_s[inv_s[on_main]]]
+    return torch.as_tensor(pred, dtype=torch.long, device=src_feats.device)
 
 
 @register_task("Crsp3DNNTask")
