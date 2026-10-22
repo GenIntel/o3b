@@ -430,6 +430,75 @@ def _multiview_dists(query: Tensor, trgt: Tensor, view_dim: int, mode: str, chun
 
 # ── task ──────────────────────────────────────────────────────────────────────
 
+def _log_sinkhorn_uot(Z: Tensor, iters: int, rho: float) -> Tensor:
+    """Unbalanced log-domain Sinkhorn with uniform (log 1) marginals and KL
+    relaxation ``rho``, as Shape-of-You's ``log_sinkhorn_uot`` (stabilised)."""
+    u = Z.new_zeros(Z.shape[0])
+    v = Z.new_zeros(Z.shape[1])
+    for _ in range(iters):
+        u = rho * -torch.logsumexp(Z + v.unsqueeze(0), dim=1)
+        v = rho * -torch.logsumexp(Z + u.unsqueeze(1), dim=0)
+        u = u - u.max()
+        v = v - v.max()
+    return Z + u.unsqueeze(1) + v.unsqueeze(0)
+
+
+def _fgw_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_verts: Tensor, *,
+               alpha: float = 0.7, n_anchors: int = 64, rounds: int = 5, iters: int = 100,
+               rho: float = 0.75, anchor_q: float = 0.01, temp: float = 1.0,
+               normalize_scale: bool = True) -> Tensor:
+    """Fused Gromov-Wasserstein matching, Shape-of-You's zero-shot recipe
+    (Im et al., CVPR 2026, github.com/SpatialAILab/shapeofyou,
+    src/eval/evaluation.py), on mesh vertices instead of image patches.
+
+    Semantic reward R_sem = -|f_i - f_j|^2, so its argmax is the plain feature
+    nearest neighbour. A first unbalanced Sinkhorn on R_sem gives the plan Z.
+    Then ``rounds`` times:
+
+    - anchors: source vertices whose argmax match maps back (target -> source
+      argmax) to within the ``anchor_q`` quantile of 3-D distance, best
+      ``n_anchors`` by Z;
+    - structure: R_str[i, j] = -sum_a |d_s(i, a_s) - d_t(j, a_t)|, the L1
+      distance between the vertices' distance profiles to the anchors;
+    - Z = Sinkhorn(alpha * minmax(R_sem) + (1 - alpha) * minmax(R_str)).
+
+    d is the 3-D Euclidean distance on each shape, divided by the shape's
+    largest bbox side when ``normalize_scale`` (the repo's VGGT points share
+    one frame, two meshes need not). ``temp`` divides the rewards before each
+    Sinkhorn; 1 is the repo's. Returns (V_src,) target vertex indices, argmax Z.
+    """
+    def minmax(x):
+        return (x - x.min()) / (x.max() - x.min() + 1e-8)
+
+    fs, ft = src_feats.float(), trgt_feats.float()
+    vs, vt = src_verts.float(), trgt_verts.float()
+    if normalize_scale:
+        vs = vs / (vs.amax(0) - vs.amin(0)).max().clamp(min=1e-8)
+        vt = vt / (vt.amax(0) - vt.amin(0)).max().clamp(min=1e-8)
+    r_sem = minmax(-torch.cdist(fs, ft) ** 2)
+    Z = _log_sinkhorn_uot(r_sem / temp, iters, rho)
+    for _ in range(rounds):
+        fwd = Z.argmax(dim=1)                  # (V_s,)
+        bwd = Z.argmax(dim=0)                  # (V_t,)
+        cyc = (vs - vs[bwd[fwd]]).norm(dim=1)  # source -> target -> source drift
+        cand = None
+        for q in (anchor_q, min(2 * anchor_q, 0.5)):
+            m = cyc <= torch.quantile(cyc, q)
+            if m.any():
+                cand = m.nonzero(as_tuple=True)[0]
+                break
+        if cand is None:
+            flat = torch.topk(Z.flatten(), k=n_anchors).indices
+            a_s, a_t = flat // Z.shape[1], flat % Z.shape[1]
+        else:
+            order = Z[cand, fwd[cand]].argsort(descending=True)[:n_anchors]
+            a_s, a_t = cand[order], fwd[cand[order]]
+        # distance profiles to the anchors, compared in L1 -> (V_s, V_t)
+        r_str = minmax(-torch.cdist(torch.cdist(vs, vs[a_s]), torch.cdist(vt, vt[a_t]), p=1))
+        Z = _log_sinkhorn_uot((alpha * r_sem + (1 - alpha) * r_str) / temp, iters, rho)
+    return Z.argmax(dim=1)
+
+
 @register_task("Crsp3DNNTask")
 class Crsp3DNNTask(OD3D_Task):
     """Feature-based nearest-neighbour 3D correspondence.
@@ -451,8 +520,11 @@ class Crsp3DNNTask(OD3D_Task):
 
     FEAT_DISTS = ("euclidean", "view_mean", "mean_of_min", "min_of_min")
 
+    MATCHINGS = ("nn", "uot", "fgw")
+
     def __init__(self, feat_dist: str = "euclidean", feat_view_dim: Optional[int] = None,
-                 feat_views: Optional[int] = None, **kwargs):
+                 feat_views: Optional[int] = None, matching: str = "nn", fgw: Optional[dict] = None,
+                 **kwargs):
         """``feat_dist`` -- how a source vertex is compared with target vertices:
 
         euclidean    one feature per vertex, Euclidean NN (the default).
@@ -468,6 +540,20 @@ class Crsp3DNNTask(OD3D_Task):
         per-view; the rest is one feature per vertex (a concatenated part,
         e.g. PartField), and d = sqrt(D_views^2 + |rest_a - rest_b|^2).
         Unset: every channel is per-view.
+
+        ``matching`` -- how a query vertex gets its target vertex:
+
+        nn           feature nearest neighbour (the default).
+        uot          one unbalanced Sinkhorn on the feature reward, argmax of
+                     the plan (``_fgw_match`` with no structure rounds).
+        fgw          Shape-of-You's fused Gromov-Wasserstein matching
+                     (``_fgw_match``): Sinkhorn plans re-solved with a
+                     structural term from anchors' 3-D distances.
+
+        ``uot`` / ``fgw`` solve one plan per pair over all vertices, so they need
+        ``feat_dist: euclidean``; ``fgw`` takes ``_fgw_match``'s keyword
+        arguments (alpha, n_anchors, rounds, iters, rho, anchor_q, temp,
+        normalize_scale).
         """
         if feat_dist not in self.FEAT_DISTS:
             raise ValueError(f"feat_dist {feat_dist!r} not in {self.FEAT_DISTS}")
@@ -476,6 +562,14 @@ class Crsp3DNNTask(OD3D_Task):
         self.feat_dist = feat_dist
         self.feat_view_dim = int(feat_view_dim) if feat_view_dim else None
         self.feat_views = int(feat_views) if feat_views else None
+        if matching not in self.MATCHINGS:
+            raise ValueError(f"matching {matching!r} not in {self.MATCHINGS}")
+        if matching != "nn" and feat_dist != "euclidean":
+            raise ValueError(f"matching {matching!r} needs feat_dist 'euclidean'")
+        self.matching = matching
+        self.fgw = dict(fgw or {})
+        if matching == "uot":
+            self.fgw["rounds"] = 0
 
     def forward(self, batch: ObjectPairBatch, return_qualit: bool = True) -> Tuple[ObjectPairQuantBatch, ObjectPairQualitBatch]:
         src_verts       = batch.src_verts3d             # (B, V_src, 3)
@@ -527,8 +621,25 @@ class Crsp3DNNTask(OD3D_Task):
             trgt_max_dim = (tv.amax(dim=1) - tv.amin(dim=1)).amax(dim=1)  # (B,)
 
         # ── shared: query feats → nearest target vert ─────────────────────────
-        def feat_nn_batch(query_feats_b, b):
-            """(Q, F) → (Q,) target vert indices via feature nearest-neighbour."""
+        plans = {}  # b -> (V_src,) target vertex per source vertex (uot / fgw)
+
+        def feat_nn_batch(query_feats_b, b, query_idx_b=None):
+            """(Q, F) → (Q,) target vert indices via feature nearest-neighbour,
+            or via the pair's transport plan (``matching``), indexed by the
+            query vertices ``query_idx_b`` (Q,)."""
+            if self.matching != "nn":
+                if b not in plans:
+                    sm = src_verts_mask[b] if src_verts_mask is not None else \
+                        torch.ones(src_feats.shape[1], dtype=torch.bool, device=dev)
+                    tm = trgt_verts_mask[b] if trgt_verts_mask is not None else \
+                        torch.ones(trgt_feats.shape[1], dtype=torch.bool, device=dev)
+                    s_idx, t_idx = sm.nonzero(as_tuple=True)[0], tm.nonzero(as_tuple=True)[0]
+                    pred = _fgw_match(src_feats[b, s_idx], trgt_feats[b, t_idx],
+                                      src_verts[b, s_idx], trgt_verts[b, t_idx], **self.fgw)
+                    full = torch.zeros(src_feats.shape[1], dtype=torch.long, device=dev)
+                    full[s_idx] = t_idx[pred]
+                    plans[b] = full
+                return plans[b][query_idx_b]
             if self.feat_dist == "euclidean":
                 dists = torch.cdist(query_feats_b.float(), trgt_feats[b].float())  # (Q, V_trgt)
             else:
@@ -566,7 +677,7 @@ class Crsp3DNNTask(OD3D_Task):
             # step 2: query src feat → nearest trgt vert (feature space)
             query_feats = src_feats[B_idx, nn_src_vert]  # (B, K, F)
             pred_trgt_kpt_vert = torch.stack([
-                feat_nn_batch(query_feats[b], b) for b in range(B_k)
+                feat_nn_batch(query_feats[b], b, nn_src_vert[b]) for b in range(B_k)
             ])  # (B, K)
             pred_trgt_kpt_pos = trgt_verts[B_idx, pred_trgt_kpt_vert]  # (B, K, 3)
 
@@ -681,7 +792,7 @@ class Crsp3DNNTask(OD3D_Task):
                 query_feats_b = src_feats[b, query_idx]           # (Q, F)
 
                 # step 1: query src feat → nearest trgt vert
-                pred_trgt_vert = feat_nn_batch(query_feats_b, b)  # (Q,)
+                pred_trgt_vert = feat_nn_batch(query_feats_b, b, query_idx)  # (Q,)
                 pred_trgt_pid  = trgt_pid_b[pred_trgt_vert]       # (Q,)
 
                 # PCK: pred target vert has same part label as query source vert
