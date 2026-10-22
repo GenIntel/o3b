@@ -177,10 +177,15 @@ class LitePTTokenDecoder(OD3D_Model):
         B, T, W = h.shape
         dev = h.device
         cell = self.grid_size * STRIDE[stage]
-        g0 = torch.floor((p.reshape(-1, 3).detach().float() - origin) / self.grid_size).long().clamp(min=0)
-        g = torch.div(g0, STRIDE[stage], rounding_mode="floor").clamp(max=(1 << 16) - 1)
+        # A token's cell is bounded by the real voxels' box plus the margin the origin already
+        # leaves below it: a point that drifts (or goes NaN) far outside the cloud would otherwise
+        # blow up the sparse tensor's spatial shape and the serialisation depth.
+        pf = torch.nan_to_num(p.reshape(-1, 3).float(), nan=0.0, posinf=0.0, neginf=0.0)
+        g0 = torch.floor((pf.detach() - origin) / self.grid_size).clamp(min=0, max=(1 << 16) - 1).long()
+        g_max = point.grid_coord.long().max(0).values + max(1, self.grid_margin // STRIDE[stage])
+        g = torch.minimum(torch.div(g0, STRIDE[stage], rounding_mode="floor"), g_max)
         tb = torch.arange(B, device=dev).repeat_interleave(T)
-        sub = (p.reshape(-1, 3).float() - origin) / cell - g.float() - 0.5              # in [-0.5, 0.5)
+        sub = ((pf - origin) / cell - g.float() - 0.5).clamp(-0.5, 0.5)                 # in [-0.5, 0.5]
         x = self.proj_in[stage](h.reshape(-1, W)) + self.offset_in[stage](sub) + self.type_emb[stage]
         x = x.to(point.feat.dtype)
 
