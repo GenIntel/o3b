@@ -554,9 +554,11 @@ def _fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_v
     model.preprocess(descr_type=None, k_process=k + zoomout * zoomout_step)
     model.add_descriptors(d1, d2, normalize=True)
     model.fit(K=(k, k), w_descr=w_descr, w_lap=w_lap, w_dcomm=w_dcomm, w_orient=w_orient)
+    fm = model.FM_12
     if zoomout > 0:
-        model.zoomout_refine(nit=zoomout, step=zoomout_step)
-    p2p = np.asarray(model.get_p2p(n_jobs=1))          # (n_src_main,) index into the target's main piece
+        # pyFM 1.3 returns the refined map without storing it in FM_12
+        fm = model.zoomout_refine(nit=zoomout, step=zoomout_step)
+    p2p = np.asarray(model.get_p2p(FM=fm, n_jobs=1))   # (n_src_main,) index into the target's main piece
     trgt_orig = rep_t[main_t[p2p]]                      # -> an original target vertex
 
     pred = torch.cdist(src_feats.float(), trgt_feats.float()).argmin(dim=1).cpu().numpy()  # fallback
