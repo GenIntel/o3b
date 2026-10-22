@@ -1,0 +1,12 @@
+# SD 1.5 (runwayml repo, still on the hub and cached on the cluster)
+# DIFT features (o3b/model/sd_feat/model.py): UNet up_blocks[1] at t = 261, mean over 8 noise samples
+class_name: SDFeat
+hf_repo: runwayml/stable-diffusion-v1-5
+xl: false
+image_size: 512
+t: 261
+up_ft_index: 1
+ensemble: 8
+prompt: "a photo of an object"
+batch_size: 4
+freeze: true

@@ -1,0 +1,7 @@
+# SAM 3 (gated; cached in the cluster's hf_cache) image encoder, layer "backbone" (o3b/model/sam_feat/model.py)
+class_name: SAMFeat
+hf_repo: facebook/sam3
+version: 3
+layer: backbone
+batch_size: 8
+freeze: true

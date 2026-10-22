@@ -1,0 +1,7 @@
+# SAM 2.1 Hiera-L image encoder, layer "backbone" (o3b/model/sam_feat/model.py)
+class_name: SAMFeat
+hf_repo: facebook/sam2.1-hiera-large
+version: 2
+layer: backbone
+batch_size: 8
+freeze: true

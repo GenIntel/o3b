@@ -1,0 +1,12 @@
+# SDXL base 1.0; up_blocks[0] is its 1280-channel block at half the latent resolution
+# DIFT features (o3b/model/sd_feat/model.py): UNet up_blocks[0] at t = 261, mean over 8 noise samples
+class_name: SDFeat
+hf_repo: stabilityai/stable-diffusion-xl-base-1.0
+xl: true
+image_size: 1024
+t: 261
+up_ft_index: 0
+ensemble: 8
+prompt: "a photo of an object"
+batch_size: 4
+freeze: true

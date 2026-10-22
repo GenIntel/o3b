@@ -1,0 +1,12 @@
+# SD 2.1 (768-v). stabilityai/stable-diffusion-2-1 is gone from the hub; this is the community mirror
+# DIFT features (o3b/model/sd_feat/model.py): UNet up_blocks[1] at t = 261, mean over 8 noise samples
+class_name: SDFeat
+hf_repo: sd2-community/stable-diffusion-2-1
+xl: false
+image_size: 768
+t: 261
+up_ft_index: 1
+ensemble: 8
+prompt: "a photo of an object"
+batch_size: 4
+freeze: true
