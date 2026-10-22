@@ -32,6 +32,14 @@ Tokens keep their own width (``token_dim``) between stages; per stage a
 projection maps them to the stage's width (504 / 252 / 144 / 72 / 72) and back.
 A token-type embedding and the token's sub-voxel offset mark token voxels.
 
+Steps are bounded: a stage moves a point by at most ``step_scale / 2^i`` per axis
+(i = 0 at E4: 1.0, 0.5, 0.25, 0.125, 0.0625 in the normalised cloud frame, whose
+0.9-quantile radius is 1), ``s * tanh(.)``, and a fold places its children within
+``fold_scale / 2^i`` (0.25, 0.125, 0.0625). Unbounded, one stage could throw its
+points metres away and leave the next to pull them back (D2 Chamfer 23 against
+0.5 at D0, and tokens outside the grid). The point head's last layer starts at
+zero, so a token's first point is where it was placed.
+
 Outputs: ``pts3d_shape_coarse`` / ``nocs_shape_coarse`` = D2's 512 points,
 ``pts3d_shape_fine`` / ``nocs_shape_fine`` = D0's 2048, the other stages in
 ``pts3d_shape_aux`` / ``nocs_shape_aux`` (E4 32, D3 128, D1 2048), the final
@@ -111,6 +119,8 @@ class LitePTTokenDecoder(OD3D_Model):
         surface_tokens: int = 32,
         fold: int = 4,
         fold_grid_scale: float = 0.05,
+        step_scale: float = 1.0,
+        fold_scale: float = 0.25,
         sphere_quantile: float = 0.9,
         cls_dim: int = 384,
         head_hidden: int = 256,
@@ -124,6 +134,8 @@ class LitePTTokenDecoder(OD3D_Model):
         self.grid_margin = grid_margin
         self.nocs = nocs
         self.fold = fold
+        self.step = {s: step_scale / 2 ** i for i, s in enumerate(STAGES)}
+        self.fold_step = {s: fold_scale / 2 ** i for i, s in enumerate(STAGES)}
         self.out_ch = 3 + (3 if nocs else 0)
         self.lit = LitePT_Orig(
             in_channels=in_channels, enc_depths=enc_depths, enc_channels=enc_channels, enc_num_head=enc_num_head,
@@ -157,6 +169,9 @@ class LitePTTokenDecoder(OD3D_Model):
         self.pose_kv = nn.ModuleDict({s: nn.Linear(width[s], W) for s in STAGES})
         self.pose_attn = nn.ModuleDict({s: nn.MultiheadAttention(W, pose_heads, batch_first=True) for s in STAGES})
         self.point_head = nn.ModuleDict({s: _mlp([W + cls_dim, head_hidden, head_hidden, self.out_ch]) for s in STAGES})
+        for s in STAGES:                                               # Δp = 0, NOCS = 0 at init
+            nn.init.zeros_(self.point_head[s][-1].weight)
+            nn.init.zeros_(self.point_head[s][-1].bias)
         from omegaconf import OmegaConf
         self.pose_head = nn.ModuleDict({s: build_model(OmegaConf.create(dict(
             class_name="PoseMLP", in_dim=W + cls_dim, out_dims=[3, 6, 3], num_layers=1, hidden_dim=pose_hidden,
@@ -185,7 +200,7 @@ class LitePTTokenDecoder(OD3D_Model):
         g_max = point.grid_coord.long().max(0).values + max(1, self.grid_margin // STRIDE[stage])
         g = torch.minimum(torch.div(g0, STRIDE[stage], rounding_mode="floor"), g_max)
         tb = torch.arange(B, device=dev).repeat_interleave(T)
-        sub = ((pf - origin) / cell - g.float() - 0.5).clamp(-0.5, 0.5)                 # in [-0.5, 0.5]
+        sub = ((pf.detach() - origin) / cell - g.float() - 0.5).clamp(-0.5, 0.5)        # in [-0.5, 0.5]
         x = self.proj_in[stage](h.reshape(-1, W)) + self.offset_in[stage](sub) + self.type_emb[stage]
         x = x.to(point.feat.dtype)
 
@@ -260,7 +275,7 @@ class LitePTTokenDecoder(OD3D_Model):
     def _heads(self, stage, h, p, hp, cls, obj_tform):
         B, T, _ = h.shape
         o = self.point_head[stage](torch.cat([h, cls[:, None].expand(B, T, -1)], -1))
-        p = p + o[..., :3]
+        p = p + self.step[stage] * torch.tanh(o[..., :3])
         nocs = o[..., 3:6] if self.nocs else None
         bag = _Bag(feat=torch.cat([hp, cls], -1), obj_tform4x4_obj_nocs_0c=obj_tform)
         _, bag = self.pose_head[stage](None, bag)
@@ -272,7 +287,7 @@ class LitePTTokenDecoder(OD3D_Model):
         seed = self.fold_grid.to(h.dtype)[None, None].expand(B, T, K, 2)
         hc = h[:, :, None].expand(B, T, K, W) + self.fold_seed[stage](seed)
         off = self.fold_mlp[stage](torch.cat([h[:, :, None].expand(B, T, K, W), seed], -1))
-        pc = p[:, :, None] + off
+        pc = p[:, :, None] + self.fold_step[stage] * torch.tanh(off)
         return hc.reshape(B, T * K, W), pc.reshape(B, T * K, 3)
 
     # ── forward ──────────────────────────────────────────────────────────────
