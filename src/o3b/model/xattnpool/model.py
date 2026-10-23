@@ -12,6 +12,11 @@ masked) + FFN, with self-attention among the queries every
 ``self_attn_every`` layers (0 = never; pointless with one query, where softmax
 over a single key is the identity).
 
+With several queries (``num_queries``), ``query_pool`` decides how their
+outputs become the pooled feature: ``mean`` (default) averages them, ``concat``
+writes them side by side, (B, num_queries * dim), before the appended cls
+feature (H02-T14: a pose and a shape query, self-attending, -> 2 x 504 + 384).
+
 Positions enter as PointROPE (LitePT's rotary encoding, same frequency layout
 and base), here in torch so positions can be float: a token sits at its pooled
 ``coord`` divided by ``rope_unit``, the queries at ``query_pos`` (the cloud
@@ -180,9 +185,13 @@ class XAttnPool(OD3D_Model):
         surface_cls_dim: int = 0,
         surface_head: str = "mlp",
         surface_fold_grid_scale: float = 0.05,
+        query_pool: str = "mean",
     ):
         super().__init__()
+        if query_pool not in ("mean", "concat"):
+            raise ValueError(f"XAttnPool: query_pool must be mean or concat, got {query_pool}")
         self.num_queries = num_queries
+        self.query_pool = query_pool
         self.surface_queries = surface_queries
         self.surface_anchor = surface_anchor
         self.surface_fold = surface_fold
@@ -263,7 +272,10 @@ class XAttnPool(OD3D_Model):
         for layer in self.layers:
             q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask)
         q = self.norm_out(q)
-        pooled = q[:, :self.num_queries].mean(dim=1)                # (B, dim)
+        if self.query_pool == "concat":
+            pooled = q[:, :self.num_queries].flatten(1)              # (B, num_queries * dim)
+        else:
+            pooled = q[:, :self.num_queries].mean(dim=1)             # (B, dim)
 
         if self.surface_queries:
             self._surface(q[:, self.num_queries:], frames_pred)
