@@ -115,6 +115,11 @@ def main() -> None:
                    help="pairs beyond the clamp: 'hinge' pushes their features at least c apart, "
                         "'none' leaves them to the teacher term")
     p.add_argument("--geo-clamp", type=float, default=0.3)
+    p.add_argument("--feats-on-cpu", action="store_true",
+                   help="keep the teacher features on the CPU in fp16 and move only each step's pairs "
+                        "(500 fc32 meshes x 1728 dims are ~17 GB)")
+    p.add_argument("--eval-meshes", type=int, default=0,
+                   help="held-out check on this many meshes (fixed random subset; 0 = all)")
     p.add_argument("--min-lr-frac", type=float, default=0.0,
                    help="cosine decays to this fraction of each base lr instead of to 0")
     p.add_argument("--n-pc-points", type=int, default=100000)
@@ -150,7 +155,7 @@ def main() -> None:
         m["vn"] = normalize_verts(m["verts"])
         m["size"] = float((m["verts"].amax(0) - m["verts"].amin(0)).max())   # largest bbox side, as the PCK
         m["verts_dev"] = m["verts"].to(dev)
-        m["feats"] = m["feats"].to(dev)
+        m["feats"] = m["feats"].half() if args.feats_on_cpu else m["feats"].to(dev)
         # fixed held-out pairs per mesh for the report
         g = torch.Generator().manual_seed(hash(m["oid"] + m["geom"]) % 2**31)
         V = len(m["verts"])
@@ -203,6 +208,15 @@ def main() -> None:
         q = m["vn"][idx].clamp(-1, 1).unsqueeze(0).to(dev)
         return net.sample_triplane_features_from_points(planes, q)[0]
 
+    def tf(m, ids):
+        """teacher features of mesh m at vertex ids, float32 on the GPU"""
+        return m["feats"][ids.to(m["feats"].device)].to(dev, non_blocking=True).float()
+
+    eval_set = list(range(len(meshes)))
+    if 0 < args.eval_meshes < len(meshes):
+        eval_set = sorted(random.Random(args.seed + 7).sample(eval_set, args.eval_meshes))
+    eval_need = sorted(set(eval_set) | {meshes[k]["eval_partner"] for k in eval_set})
+
     def stress_corr(dg, df):
         return (((dg - df).pow(2).mean() / df.pow(2).mean().clamp(min=1e-12)).sqrt().item(),
                 torch.corrcoef(torch.stack([dg, df]))[0, 1].item())
@@ -212,10 +226,11 @@ def main() -> None:
         """(within stress, within corr, cross stress, cross corr), means over meshes."""
         net.eval()
         feats_at = {}
-        for k, m in enumerate(meshes):
+        for k in eval_need:
+            m = meshes[k]
             planes = field(m, torch.Generator().manual_seed(0))
             idx = torch.unique(torch.cat([m["eval_pairs"].flatten()]
-                                         + [meshes[a]["eval_cross"][1] for a in range(len(meshes))
+                                         + [meshes[a]["eval_cross"][1] for a in eval_set
                                             if meshes[a]["eval_partner"] == k]
                                          + [m["eval_cross"][0]]))
             feats_at[k] = (idx, query(planes, m, idx))
@@ -223,14 +238,13 @@ def main() -> None:
             idx, g = feats_at[k]
             return g[torch.searchsorted(idx, ids)]
         w, x = [], []
-        for k, m in enumerate(meshes):
+        for k in eval_set:
+            m = meshes[k]
             i, j = m["eval_pairs"]
-            w.append(stress_corr((g_of(k, i) - g_of(k, j)).norm(dim=1),
-                                 (m["feats"][i.to(dev)] - m["feats"][j.to(dev)]).norm(dim=1)))
+            w.append(stress_corr((g_of(k, i) - g_of(k, j)).norm(dim=1), (tf(m, i) - tf(m, j)).norm(dim=1)))
             b = m["eval_partner"]
             i, j = m["eval_cross"]
-            x.append(stress_corr((g_of(k, i) - g_of(b, j)).norm(dim=1),
-                                 (m["feats"][i.to(dev)] - meshes[b]["feats"][j.to(dev)]).norm(dim=1)))
+            x.append(stress_corr((g_of(k, i) - g_of(b, j)).norm(dim=1), (tf(m, i) - tf(meshes[b], j)).norm(dim=1)))
         net.train()
         mean = lambda v, c: sum(t[c] for t in v) / len(v)
         return mean(w, 0), mean(w, 1), mean(x, 0), mean(x, 1)
@@ -259,7 +273,7 @@ def main() -> None:
     def within(m, planes, n):
         i, j = torch.randint(0, len(m["verts"]), (2, n))
         g = query(planes, m, torch.cat([i, j]))
-        loss = pair_loss(g[:n], g[n:], m["feats"][i.to(dev)], m["feats"][j.to(dev)])
+        loss = pair_loss(g[:n], g[n:], tf(m, i), tf(m, j))
         if args.geo_weight > 0:
             # local geometry on the same pairs: closer than the clamp c, the feature
             # distance should equal the 3-D distance in units of the mesh size;
@@ -296,7 +310,7 @@ def main() -> None:
                 i = torch.randint(0, len(A["verts"]), (n_x,))
                 j = torch.randint(0, len(B["verts"]), (n_x,))
                 terms = [within(A, pa, n_w), within(B, pb, n_w),
-                         pair_loss(query(pa, A, i), query(pb, B, j), A["feats"][i.to(dev)], B["feats"][j.to(dev)])]
+                         pair_loss(query(pa, A, i), query(pb, B, j), tf(A, i), tf(B, j))]
             else:
                 m = random.choice(meshes)
                 terms = [within(m, field(m), args.pairs)]
