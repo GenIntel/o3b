@@ -50,7 +50,8 @@ def load_meshes(args) -> list[dict]:
     ``--instances eval`` (default): the benchmark's objects (keypoints,
     synthetic), i.e. training on the evaluated instances (transductive).
     ``--instances heldout:N``: N synthetic objects per category *without*
-    keypoints, drawn with ``--seed``, so disjoint from the evaluated ones.
+    keypoints, drawn with ``--seed``, so disjoint from the evaluated ones. For
+    N > 5 the set extends heldout:5's.
     """
     import random as _random
 
@@ -74,7 +75,13 @@ def load_meshes(args) -> list[dict]:
             for cat in args.categories:
                 cand = sorted((r for r in rows if r["category"] == cat and r.get("obj_kpts3d") is None),
                               key=lambda r: r["object_id"])
-                picked += _random.Random(args.seed).sample(cand, min(n, len(cand)))
+                # the first 5 are always the same draw, so heldout:N for N > 5 extends
+                # heldout:5's instances (random.sample draws a different set for
+                # another k); the rest come from the remaining instances
+                base = _random.Random(args.seed).sample(cand, min(5, n, len(cand)))
+                rest = [r for r in cand if r not in base]
+                extra = _random.Random(args.seed + 1).sample(rest, min(max(n - len(base), 0), len(rest)))
+                picked += base + extra
             rows = picked
         for row in rows:
             oid = row["object_id"]
