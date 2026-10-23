@@ -43,6 +43,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "MeshFM":          "o3b.model.meshfm.model",
     "SDFeat":          "o3b.model.sd_feat.model",
     "SAMFeat":         "o3b.model.sam_feat.model",
+    "TriplaneDistill": "o3b.model.feat_distill.model",
     "DenseMatcher":    "o3b.model.densematcher.model",
     "GenPose2":        "o3b.model.obj_pose.genpose2.model",
     "ResNetHead":      "o3b.model.resnet.model",
