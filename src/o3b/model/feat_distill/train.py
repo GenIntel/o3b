@@ -11,11 +11,22 @@ part), in the cached mesh frame the benchmark extracts features in. Pairs
 never cross instances; consistency across instances comes from the shared
 network, which only sees geometry.
 
-Each step takes one mesh, samples a fresh surface point cloud (the only
-augmentation), encodes it once and queries the field at the vertices of
-``pairs`` random pairs. Every ``eval_every`` steps it reports, on held-out
-pairs, the stress (sqrt of the mean squared distance error over the mean
-squared teacher distance) and the Pearson correlation of the distances.
+Each step encodes ``meshes_per_step`` meshes, each from a fresh surface
+point cloud (the only augmentation), and queries the field at the vertices of
+random pairs, one loss over all of them.
+
+``--cross-frac c`` > 0 adds pairs *across* instances: the meshes of a step come
+in pairs (A, B) of one category and geometry, and a fraction c of each pair's
+``pairs`` budget is (i on A, j on B) with target |f_A,i - f_B,j|, the rest
+within A and within B. Within-instance pairs only fix each instance up to a
+distance-preserving transform of its own feature space; the cross pairs ask
+the instances' features to agree, which is what matching needs.
+
+Every ``eval_every`` steps it reports, on fixed held-out pairs, the stress
+(sqrt of the mean squared distance error over the mean squared teacher
+distance) and the Pearson correlation of the distances, within instances and
+across instances (each mesh against the next instance of its category and
+geometry). ``--resume CKPT --steps 0`` only evaluates a checkpoint.
 
     python -m o3b.model.feat_distill.train --categories bread,facial_cream,hair_dryer,handbag,tooth_brush \\
         --teacher sd15+partfield --geometries fc16,fc32 --out checkpoints/feat_distill/pfd_sd15pf32.pth
@@ -76,6 +87,10 @@ def main() -> None:
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-meshfm-init", action="store_true")
+    p.add_argument("--meshes-per-step", type=int, default=1)
+    p.add_argument("--cross-frac", type=float, default=0.0,
+                   help="fraction of a mesh pair's pairs that cross the two instances (0: within only)")
+    p.add_argument("--resume", default=None, help="state dict to start from (with --steps 0: evaluate only)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -93,10 +108,24 @@ def main() -> None:
         g = torch.Generator().manual_seed(hash(m["oid"] + m["geom"]) % 2**31)
         V = len(m["verts"])
         m["eval_pairs"] = torch.randint(0, V, (2, 4096), generator=g)
-    print(f"{len(meshes)} meshes", flush=True)
+    groups = {}
+    for k, m in enumerate(meshes):
+        groups.setdefault((m["category"], m["geom"]), []).append(k)
+    for grp in groups.values():                      # held-out cross pairs: each mesh vs the next instance
+        for a, b in zip(grp, grp[1:] + grp[:1]):
+            g = torch.Generator().manual_seed(hash(meshes[a]["oid"] + meshes[b]["oid"]) % 2**31)
+            meshes[a]["eval_partner"] = b
+            meshes[a]["eval_cross"] = torch.stack([torch.randint(0, len(meshes[a]["verts"]), (4096,), generator=g),
+                                                   torch.randint(0, len(meshes[b]["verts"]), (4096,), generator=g)])
+    if args.cross_frac > 0 and args.meshes_per_step % 2:
+        raise ValueError("--cross-frac needs an even --meshes-per-step (meshes come in instance pairs)")
+    print(f"{len(meshes)} meshes, {len(groups)} category x geometry groups", flush=True)
 
     wrapper = TriplaneDistillModel(out_dim=args.out_dim, n_pc_points=args.n_pc_points)
-    net = wrapper.build_network(dev, init_from_meshfm=not args.no_meshfm_init)
+    net = wrapper.build_network(dev, init_from_meshfm=not args.no_meshfm_init and not args.resume)
+    if args.resume:
+        st = torch.load(args.resume, map_location="cpu", weights_only=False)
+        net.load_state_dict(st["model"] if "model" in st else st)
     net.train()
     head = [p_ for n, p_ in net.named_parameters()
             if n.startswith("triplane_transformer.upsampler") or n.startswith("triplane_transformer.mlp.4")]
@@ -122,42 +151,87 @@ def main() -> None:
         q = m["vn"][idx].clamp(-1, 1).unsqueeze(0).to(dev)
         return net.sample_triplane_features_from_points(planes, q)[0]
 
+    def stress_corr(dg, df):
+        return (((dg - df).pow(2).mean() / df.pow(2).mean().clamp(min=1e-12)).sqrt().item(),
+                torch.corrcoef(torch.stack([dg, df]))[0, 1].item())
+
     @torch.no_grad()
     def evaluate():
+        """(within stress, within corr, cross stress, cross corr), means over meshes."""
         net.eval()
-        stress, corr = [], []
-        for m in meshes:
+        feats_at = {}
+        for k, m in enumerate(meshes):
             planes = field(m, torch.Generator().manual_seed(0))
+            idx = torch.unique(torch.cat([m["eval_pairs"].flatten()]
+                                         + [meshes[a]["eval_cross"][1] for a in range(len(meshes))
+                                            if meshes[a]["eval_partner"] == k]
+                                         + [m["eval_cross"][0]]))
+            feats_at[k] = (idx, query(planes, m, idx))
+        def g_of(k, ids):
+            idx, g = feats_at[k]
+            return g[torch.searchsorted(idx, ids)]
+        w, x = [], []
+        for k, m in enumerate(meshes):
             i, j = m["eval_pairs"]
-            g = query(planes, m, torch.cat([i, j]))
-            dg = (g[: len(i)] - g[len(i):]).norm(dim=1)
-            df = (m["feats"][i.to(dev)] - m["feats"][j.to(dev)]).norm(dim=1)
-            stress.append(((dg - df).pow(2).mean() / df.pow(2).mean().clamp(min=1e-12)).sqrt().item())
-            corr.append(torch.corrcoef(torch.stack([dg, df]))[0, 1].item())
+            w.append(stress_corr((g_of(k, i) - g_of(k, j)).norm(dim=1),
+                                 (m["feats"][i.to(dev)] - m["feats"][j.to(dev)]).norm(dim=1)))
+            b = m["eval_partner"]
+            i, j = m["eval_cross"]
+            x.append(stress_corr((g_of(k, i) - g_of(b, j)).norm(dim=1),
+                                 (m["feats"][i.to(dev)] - meshes[b]["feats"][j.to(dev)]).norm(dim=1)))
         net.train()
-        return sum(stress) / len(stress), sum(corr) / len(corr)
+        mean = lambda v, c: sum(t[c] for t in v) / len(v)
+        return mean(w, 0), mean(w, 1), mean(x, 0), mean(x, 1)
+
+    def report(step):
+        ws, wc, xs, xc = evaluate()
+        print(f"step {step}: held-out within stress {ws:.3f} corr {wc:.3f} | across instances stress {xs:.3f} "
+              f"corr {xc:.3f}", flush=True)
+        hist.append(dict(step=step, stress=ws, corr=wc, cross_stress=xs, cross_corr=xc))
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     hist = []
     t0 = time.time()
-    s, c = evaluate()
-    print(f"step 0: held-out stress {s:.3f}, distance corr {c:.3f}", flush=True)
-    hist.append(dict(step=0, stress=s, corr=c))
+    report(0)
+    if args.steps == 0:
+        out.with_suffix(".eval.json").write_text(json.dumps({"args": vars(args), "history": hist}, indent=1))
+        return
+
+    def pair_loss(ga, gb, fa, fb):
+        dg = (ga - gb).pow(2).sum(dim=1).add(1e-12).sqrt()
+        with torch.no_grad():
+            df = (fa - fb).norm(dim=1)
+        return (dg - df).pow(2)
+
+    def within(m, planes, n):
+        i, j = torch.randint(0, len(m["verts"]), (2, n))
+        g = query(planes, m, torch.cat([i, j]))
+        return pair_loss(g[:n], g[n:], m["feats"][i.to(dev)], m["feats"][j.to(dev)])
+
     run_loss = 0.0
     for step in range(args.steps):
         for gi, pg in enumerate(opt.param_groups):
             pg["lr"] = base_lrs[gi] * lr_scale(step)
-        m = random.choice(meshes)
-        planes = field(m)
-        V = len(m["verts"])
-        i = torch.randint(0, V, (args.pairs,))
-        j = torch.randint(0, V, (args.pairs,))
-        g = query(planes, m, torch.cat([i, j]))
-        dg = (g[: args.pairs] - g[args.pairs:]).pow(2).sum(dim=1).add(1e-12).sqrt()
-        with torch.no_grad():
-            df = (m["feats"][i.to(dev)] - m["feats"][j.to(dev)]).norm(dim=1)
-        loss = (dg - df).pow(2).mean()
+        terms = []
+        if args.cross_frac > 0:
+            for _ in range(args.meshes_per_step // 2):
+                a = random.randrange(len(meshes))
+                grp = groups[(meshes[a]["category"], meshes[a]["geom"])]
+                b = random.choice([k for k in grp if k != a])
+                A, B = meshes[a], meshes[b]
+                pa, pb = field(A), field(B)
+                n_x = int(round(args.pairs * args.cross_frac))
+                n_w = (args.pairs - n_x) // 2
+                i = torch.randint(0, len(A["verts"]), (n_x,))
+                j = torch.randint(0, len(B["verts"]), (n_x,))
+                terms += [within(A, pa, n_w), within(B, pb, n_w),
+                          pair_loss(query(pa, A, i), query(pb, B, j), A["feats"][i.to(dev)], B["feats"][j.to(dev)])]
+        else:
+            for _ in range(args.meshes_per_step):
+                m = random.choice(meshes)
+                terms.append(within(m, field(m), args.pairs))
+        loss = torch.cat(terms).mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -167,9 +241,7 @@ def main() -> None:
             print(f"step {step + 1}: loss {run_loss / 50:.5f} ({time.time() - t0:.0f}s)", flush=True)
             run_loss = 0.0
         if (step + 1) % args.eval_every == 0 or step + 1 == args.steps:
-            s, c = evaluate()
-            print(f"step {step + 1}: held-out stress {s:.3f}, distance corr {c:.3f}", flush=True)
-            hist.append(dict(step=step + 1, stress=s, corr=c))
+            report(step + 1)
             torch.save({"model": net.state_dict(), "args": vars(args), "history": hist}, out)
     out.with_suffix(".json").write_text(json.dumps({"args": vars(args), "history": hist}, indent=1))
     print(f"saved {out}", flush=True)
