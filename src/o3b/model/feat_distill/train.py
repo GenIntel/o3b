@@ -101,8 +101,12 @@ def main() -> None:
     p.add_argument("--lr-head", type=float, default=1e-3, help="the two new head layers")
     p.add_argument("--warmup", type=int, default=300)
     p.add_argument("--geo-weight", type=float, default=0.0,
-                   help="local geometry term on the within-instance pairs: for pairs closer than "
-                        "--geo-clamp x the mesh's largest bbox side, (|g_i - g_j| - |x_i - x_j| / S)^2")
+                   help="local geometry term on the within-instance pairs, d = |x_i - x_j| / S (S the "
+                        "mesh's largest bbox side), c = --geo-clamp: (|g_i - g_j| - d)^2 for d < c; "
+                        "for d >= c only a push apart, max(0, c - |g_i - g_j|)^2 (--geo-far hinge)")
+    p.add_argument("--geo-far", choices=("hinge", "none"), default="hinge",
+                   help="pairs beyond the clamp: 'hinge' pushes their features at least c apart, "
+                        "'none' leaves them to the teacher term")
     p.add_argument("--geo-clamp", type=float, default=0.3)
     p.add_argument("--min-lr-frac", type=float, default=0.0,
                    help="cosine decays to this fraction of each base lr instead of to 0")
@@ -250,13 +254,17 @@ def main() -> None:
         g = query(planes, m, torch.cat([i, j]))
         loss = pair_loss(g[:n], g[n:], m["feats"][i.to(dev)], m["feats"][j.to(dev)])
         if args.geo_weight > 0:
-            # local geometry on the same pairs: closer than the clamp, the feature
-            # distance should equal the 3-D distance in units of the mesh size
+            # local geometry on the same pairs: closer than the clamp c, the feature
+            # distance should equal the 3-D distance in units of the mesh size;
+            # beyond it, features closer than c are only pushed apart to c
+            c = args.geo_clamp
             dg = (g[:n] - g[n:]).pow(2).sum(dim=1).add(1e-12).sqrt()
             with torch.no_grad():
                 dx = (m["verts_dev"][i.to(dev)] - m["verts_dev"][j.to(dev)]).norm(dim=1) / m["size"]
-                near = (dx < args.geo_clamp).float()
-            loss = loss + args.geo_weight * near * (dg - dx).pow(2)
+                near = dx < c
+            geo = torch.where(near, (dg - dx).pow(2),
+                              (c - dg).clamp(min=0).pow(2) if args.geo_far == "hinge" else torch.zeros_like(dg))
+            loss = loss + args.geo_weight * geo
         return loss
 
     run_loss = 0.0
