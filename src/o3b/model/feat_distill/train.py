@@ -44,11 +44,20 @@ import torch
 
 
 def load_meshes(args) -> list[dict]:
-    """[{oid, geom, verts (V,3) raw cached frame, faces, feats (V,F)}] for every
-    object of the categories (the benchmark's filter: keypoints, synthetic)."""
+    """[{oid, geom, verts (V,3) raw cached frame, faces, feats (V,F)}] for the
+    training instances of the categories.
+
+    ``--instances eval`` (default): the benchmark's objects (keypoints,
+    synthetic), i.e. training on the evaluated instances (transductive).
+    ``--instances heldout:N``: N synthetic objects per category *without*
+    keypoints, drawn with ``--seed``, so disjoint from the evaluated ones.
+    """
+    import random as _random
+
     from o3b.data.datatypes.mesh import Mesh
     from o3b.dataset.dataset import build_dataset_from_config_or_name
 
+    heldout = args.instances.startswith("heldout:")
     out = []
     for geom in args.geometries:
         mesh_type = f"{geom}_vuni100_r512_f{args.teacher}"
@@ -56,10 +65,18 @@ def load_meshes(args) -> list[dict]:
             "dataset_name": "hc3d_object",
             "path_datasets_raw": args.path_datasets, "path_datasets_preprocess": args.path_datasets,
             "categories": args.categories, "item_type": "object", "mesh_type": mesh_type,
-            "filter_has_kpts": True, "filter_is_real": False,
+            "filter_has_kpts": not heldout, "filter_is_real": False,
         })
-        for i in ds._object_rows_id:
-            row = ds._object_rows[i]
+        rows = [ds._object_rows[i] for i in ds._object_rows_id]
+        if heldout:
+            n = int(args.instances.split(":", 1)[1])
+            picked = []
+            for cat in args.categories:
+                cand = sorted((r for r in rows if r["category"] == cat and r.get("obj_kpts3d") is None),
+                              key=lambda r: r["object_id"])
+                picked += _random.Random(args.seed).sample(cand, min(n, len(cand)))
+            rows = picked
+        for row in rows:
             oid = row["object_id"]
             mesh_rel = row.get("mesh_path")
             entry = ds.path_raw / mesh_rel if mesh_rel else ds.path_object_meshes / oid
@@ -91,6 +108,11 @@ def main() -> None:
     p.add_argument("--cross-frac", type=float, default=0.0,
                    help="fraction of a mesh pair's pairs that cross the two instances (0: within only)")
     p.add_argument("--resume", default=None, help="state dict to start from (with --steps 0: evaluate only)")
+    p.add_argument("--instances", default="eval",
+                   help="'eval': the benchmark's (evaluated) objects; 'heldout:N': N objects per category "
+                        "without keypoints, disjoint from the evaluated ones")
+    p.add_argument("--extract-only", action="store_true",
+                   help="only load the training meshes (extracting and caching the teacher), then exit")
     p.add_argument("--init-ckpt", default=None,
                    help="plain state dict to initialise the trunk from instead of MeshFM, e.g. PartField's "
                         "(checkpoints/partfield/model_objaverse_trunk_state_dict.pth)")
@@ -104,6 +126,9 @@ def main() -> None:
 
     print(f"loading teacher '{args.teacher}' on {args.geometries} for {args.categories}", flush=True)
     meshes = load_meshes(args)
+    if args.extract_only:
+        print(f"extracted {len(meshes)} meshes: {sorted({m['oid'] for m in meshes})}", flush=True)
+        return
     for m in meshes:
         m["vn"] = normalize_verts(m["verts"])
         m["feats"] = m["feats"].to(dev)
