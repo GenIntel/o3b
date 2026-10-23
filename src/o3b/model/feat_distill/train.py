@@ -100,6 +100,8 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=1e-4, help="trunk (pretrained MeshFM)")
     p.add_argument("--lr-head", type=float, default=1e-3, help="the two new head layers")
     p.add_argument("--warmup", type=int, default=300)
+    p.add_argument("--min-lr-frac", type=float, default=0.0,
+                   help="cosine decays to this fraction of each base lr instead of to 0")
     p.add_argument("--n-pc-points", type=int, default=100000)
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
@@ -172,7 +174,7 @@ def main() -> None:
         if step < args.warmup:
             return (step + 1) / args.warmup
         t = (step - args.warmup) / max(1, args.steps - args.warmup)
-        return 0.5 * (1 + math.cos(math.pi * t))
+        return args.min_lr_frac + (1 - args.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * t))
 
     def field(m, gen=None):
         pc = sample_surface_points(m["vn"], m["faces"], args.n_pc_points, generator=gen)
