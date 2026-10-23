@@ -1,0 +1,11 @@
+# Ablation pfd_sd15pf64_k4x_fc32_pf: as pfd_sd15pf32_k4x_fc32_pf (PartField trunk, 4 meshes per step, cross-instance pairs, fc32 only, trained on the evaluated instances) with 64 output dimensions.
+# PartField-like field distilled to 32 dims from SD 1.5 + PartField (0.5 / 0.5, each L2-normalised), trained
+# to preserve the teacher's distances between vertex pairs of one instance (o3b/model/feat_distill/train.py),
+# on the 5 HouseCorr3D categories' test instances (bread, facial_cream, hair_dryer, handbag, tooth_brush),
+# fc16 + fc32. The checkpoint is written by the training job into the cluster checkout.
+class_name: TriplaneDistill
+ckpt_path: "checkpoints/feat_distill/pfd_sd15pf64_k4x_fc32_pf.pth"
+out_dim: 64
+n_pc_points: 100000
+seed: 0
+freeze: true
