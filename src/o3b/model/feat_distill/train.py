@@ -91,6 +91,9 @@ def main() -> None:
     p.add_argument("--cross-frac", type=float, default=0.0,
                    help="fraction of a mesh pair's pairs that cross the two instances (0: within only)")
     p.add_argument("--resume", default=None, help="state dict to start from (with --steps 0: evaluate only)")
+    p.add_argument("--init-ckpt", default=None,
+                   help="plain state dict to initialise the trunk from instead of MeshFM, e.g. PartField's "
+                        "(checkpoints/partfield/model_objaverse_trunk_state_dict.pth)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -122,13 +125,18 @@ def main() -> None:
     print(f"{len(meshes)} meshes, {len(groups)} category x geometry groups", flush=True)
 
     wrapper = TriplaneDistillModel(out_dim=args.out_dim, n_pc_points=args.n_pc_points)
-    net = wrapper.build_network(dev, init_from_meshfm=not args.no_meshfm_init and not args.resume)
+    net = wrapper.build_network(dev, init_from_meshfm=not args.no_meshfm_init and not args.resume,
+                                init_state_path=None if args.resume else args.init_ckpt)
+    print(f"initialised {len(net.init_loaded)} / {len(net.state_dict())} tensors from "
+          f"{args.init_ckpt or ('MeshFM' if net.init_loaded else 'nothing')}", flush=True)
     if args.resume:
         st = torch.load(args.resume, map_location="cpu", weights_only=False)
         net.load_state_dict(st["model"] if "model" in st else st)
     net.train()
-    head = [p_ for n, p_ in net.named_parameters()
-            if n.startswith("triplane_transformer.upsampler") or n.startswith("triplane_transformer.mlp.4")]
+    # parameters the initialisation did not provide get the head learning rate
+    head = [p_ for n, p_ in net.named_parameters() if net.init_loaded and n not in net.init_loaded] or \
+        [p_ for n, p_ in net.named_parameters()
+         if n.startswith("triplane_transformer.upsampler") or n.startswith("triplane_transformer.mlp.4")]
     head_ids = {id(p_) for p_ in head}
     trunk = [p_ for p_ in net.parameters() if id(p_) not in head_ids]
     opt = torch.optim.AdamW([{"params": trunk, "lr": args.lr}, {"params": head, "lr": args.lr_head}],

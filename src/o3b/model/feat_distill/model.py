@@ -46,9 +46,13 @@ class TriplaneDistillModel(MeshFMModel):
         self.distill_ckpt_path = ckpt_path
         self.out_dim = int(out_dim)
 
-    def build_network(self, device: torch.device, init_from_meshfm: bool = True):
+    def build_network(self, device: torch.device, init_from_meshfm: bool = True, init_state_path: str | None = None):
         """The network with the out_dim head. ``init_from_meshfm``: copy every
-        MeshFM weight whose shape matches (all but the two head layers)."""
+        MeshFM weight whose shape matches (all but the two head layers).
+        ``init_state_path``: instead copy every matching tensor of that plain
+        state dict, e.g. PartField's trunk (191 / 197 tensors match; its
+        triplane MLP has one layer fewer, so mlp.2, mlp.4 and the upsampler
+        stay new). ``net.init_loaded`` holds the names that were copied."""
         from o3b.model.meshfm.meshfm.model.simple_triplane_model import SimpleTriplaneModel
 
         class _Cfg(dict):
@@ -65,15 +69,18 @@ class TriplaneDistillModel(MeshFMModel):
                                      start_hidden_channels=32, use_initial_conv=False)),
         )
         net = SimpleTriplaneModel(cfg=cfg, apply_tanh=False)
-        if init_from_meshfm:
-            state = torch.load(self._ensure_ckpt(), map_location="cpu", weights_only=False)
+        net.init_loaded = set()
+        if init_state_path or init_from_meshfm:
+            src = Path(init_state_path) if init_state_path else self._ensure_ckpt()
+            state = torch.load(src, map_location="cpu", weights_only=False)
             if isinstance(state, dict) and "state_dict" in state:
                 state = state["state_dict"]
             state = {k[len("module."):] if k.startswith("module.") else k: v for k, v in state.items()}
             own = net.state_dict()
             keep = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
             net.load_state_dict(keep, strict=False)
-            logger.info("TriplaneDistill: %d / %d tensors from MeshFM; new: %s", len(keep), len(own),
+            net.init_loaded = set(keep)
+            logger.info("TriplaneDistill: %d / %d tensors from %s; new: %s", len(keep), len(own), src.name,
                         sorted(set(own) - set(keep)))
         return net.to(device)
 
