@@ -213,9 +213,14 @@ def main() -> None:
     for step in range(args.steps):
         for gi, pg in enumerate(opt.param_groups):
             pg["lr"] = base_lrs[gi] * lr_scale(step)
-        terms = []
-        if args.cross_frac > 0:
-            for _ in range(args.meshes_per_step // 2):
+        # one backward per unit (an instance pair, or one mesh), gradients
+        # accumulated: every unit has the same number of pairs, so this equals
+        # the mean over all pairs of the step, at one unit's activation memory
+        opt.zero_grad(set_to_none=True)
+        n_units = args.meshes_per_step // 2 if args.cross_frac > 0 else args.meshes_per_step
+        loss_val = 0.0
+        for _ in range(n_units):
+            if args.cross_frac > 0:
                 a = random.randrange(len(meshes))
                 grp = groups[(meshes[a]["category"], meshes[a]["geom"])]
                 b = random.choice([k for k in grp if k != a])
@@ -225,18 +230,17 @@ def main() -> None:
                 n_w = (args.pairs - n_x) // 2
                 i = torch.randint(0, len(A["verts"]), (n_x,))
                 j = torch.randint(0, len(B["verts"]), (n_x,))
-                terms += [within(A, pa, n_w), within(B, pb, n_w),
-                          pair_loss(query(pa, A, i), query(pb, B, j), A["feats"][i.to(dev)], B["feats"][j.to(dev)])]
-        else:
-            for _ in range(args.meshes_per_step):
+                terms = [within(A, pa, n_w), within(B, pb, n_w),
+                         pair_loss(query(pa, A, i), query(pb, B, j), A["feats"][i.to(dev)], B["feats"][j.to(dev)])]
+            else:
                 m = random.choice(meshes)
-                terms.append(within(m, field(m), args.pairs))
-        loss = torch.cat(terms).mean()
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
+                terms = [within(m, field(m), args.pairs)]
+            unit_loss = torch.cat(terms).mean() / n_units
+            unit_loss.backward()
+            loss_val += unit_loss.item()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
         opt.step()
-        run_loss += loss.item()
+        run_loss += loss_val
         if (step + 1) % 50 == 0:
             print(f"step {step + 1}: loss {run_loss / 50:.5f} ({time.time() - t0:.0f}s)", flush=True)
             run_loss = 0.0
