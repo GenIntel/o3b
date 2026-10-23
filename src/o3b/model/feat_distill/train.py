@@ -100,6 +100,10 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=1e-4, help="trunk (pretrained MeshFM)")
     p.add_argument("--lr-head", type=float, default=1e-3, help="the two new head layers")
     p.add_argument("--warmup", type=int, default=300)
+    p.add_argument("--geo-weight", type=float, default=0.0,
+                   help="local geometry term on the within-instance pairs: for pairs closer than "
+                        "--geo-clamp x the mesh's largest bbox side, (|g_i - g_j| - |x_i - x_j| / S)^2")
+    p.add_argument("--geo-clamp", type=float, default=0.3)
     p.add_argument("--min-lr-frac", type=float, default=0.0,
                    help="cosine decays to this fraction of each base lr instead of to 0")
     p.add_argument("--n-pc-points", type=int, default=100000)
@@ -133,6 +137,8 @@ def main() -> None:
         return
     for m in meshes:
         m["vn"] = normalize_verts(m["verts"])
+        m["size"] = float((m["verts"].amax(0) - m["verts"].amin(0)).max())   # largest bbox side, as the PCK
+        m["verts_dev"] = m["verts"].to(dev)
         m["feats"] = m["feats"].to(dev)
         # fixed held-out pairs per mesh for the report
         g = torch.Generator().manual_seed(hash(m["oid"] + m["geom"]) % 2**31)
@@ -242,7 +248,16 @@ def main() -> None:
     def within(m, planes, n):
         i, j = torch.randint(0, len(m["verts"]), (2, n))
         g = query(planes, m, torch.cat([i, j]))
-        return pair_loss(g[:n], g[n:], m["feats"][i.to(dev)], m["feats"][j.to(dev)])
+        loss = pair_loss(g[:n], g[n:], m["feats"][i.to(dev)], m["feats"][j.to(dev)])
+        if args.geo_weight > 0:
+            # local geometry on the same pairs: closer than the clamp, the feature
+            # distance should equal the 3-D distance in units of the mesh size
+            dg = (g[:n] - g[n:]).pow(2).sum(dim=1).add(1e-12).sqrt()
+            with torch.no_grad():
+                dx = (m["verts_dev"][i.to(dev)] - m["verts_dev"][j.to(dev)]).norm(dim=1) / m["size"]
+                near = (dx < args.geo_clamp).float()
+            loss = loss + args.geo_weight * near * (dg - dx).pow(2)
+        return loss
 
     run_loss = 0.0
     for step in range(args.steps):

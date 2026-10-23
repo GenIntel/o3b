@@ -1,0 +1,11 @@
+# As pfd_sd15pf32_k4x_fc32_pf_heldout (5 non-keypoint training instances per category), plus the local geometry term on the same within-instance pairs: closer than 0.3 x the mesh size, (|g_i - g_j| - |x_i - x_j|/S)^2, weight 1.
+# PartField-like field distilled to 32 dims from SD 1.5 + PartField (0.5 / 0.5, each L2-normalised), trained
+# to preserve the teacher's distances between vertex pairs of one instance (o3b/model/feat_distill/train.py),
+# on the 5 HouseCorr3D categories' test instances (bread, facial_cream, hair_dryer, handbag, tooth_brush),
+# fc16 + fc32. The checkpoint is written by the training job into the cluster checkout.
+class_name: TriplaneDistill
+ckpt_path: "checkpoints/feat_distill/pfd_sd15pf32_k4x_fc32_pf_heldout_geo.pth"
+out_dim: 32
+n_pc_points: 100000
+seed: 0
+freeze: true
