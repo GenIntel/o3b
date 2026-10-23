@@ -1166,6 +1166,9 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     walltime        = cfg.get("walltime", "24:00:00")
     partition       = cfg.get("partition", None)
     nodes_exclude   = cfg.get("nodes_exclude", None)
+    # earliest start (sbatch --begin), e.g. "2026-10-23T17:00:00" or "17:00": the
+    # job is queued now but slurm holds it until then
+    begin           = cfg.get("begin", None)
     restart         = cfg.get("restart_upon_fail", False)
     # `--requeue` (restart_upon_fail) only covers node failure and preemption: a
     # job whose GPU throws an uncorrectable ECC error exits non-zero like any
@@ -1197,6 +1200,7 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
                                                                  or resubmit     else "",
         "partition":      f"#SBATCH --partition {partition}"     if partition     else "",
         "nodes_exclude":  f"#SBATCH --exclude {nodes_exclude}"   if nodes_exclude else "",
+        "begin":          f"#SBATCH --begin={begin}"             if begin         else "",
     }
 
     env_block = "\n".join(f"export {k}={v!r}" for k, v in env_vars.items())
