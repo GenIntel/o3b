@@ -1169,6 +1169,9 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     # earliest start (sbatch --begin), e.g. "2026-10-23T17:00:00" or "17:00": the
     # job is queued now but slurm holds it until then
     begin           = cfg.get("begin", None)
+    # job dependency (sbatch --dependency), e.g. "afterok:30088326": wait for the
+    # job that builds an input this run reads
+    dependency      = cfg.get("dependency", None)
     restart         = cfg.get("restart_upon_fail", False)
     # `--requeue` (restart_upon_fail) only covers node failure and preemption: a
     # job whose GPU throws an uncorrectable ECC error exits non-zero like any
@@ -1201,6 +1204,7 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         "partition":      f"#SBATCH --partition {partition}"     if partition     else "",
         "nodes_exclude":  f"#SBATCH --exclude {nodes_exclude}"   if nodes_exclude else "",
         "begin":          f"#SBATCH --begin={begin}"             if begin         else "",
+        "dependency":     f"#SBATCH --dependency={dependency}"   if dependency    else "",
     }
 
     env_block = "\n".join(f"export {k}={v!r}" for k, v in env_vars.items())
