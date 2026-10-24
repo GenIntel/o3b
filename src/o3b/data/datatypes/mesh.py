@@ -489,7 +489,7 @@ def _extract_vert_feats(
     
     # ── Models that consume the mesh directly (own rendering or 3D encoder) ─────
     _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip", "partfield", "meshfm",
-                       "pfd"}  # pfd_*: TriplaneDistill fields (o3b/model/feat_distill)
+                       "pfd", "ppf"}  # pfd_* / ppf_*: PartPointField fields (o3b/model/feat_distill)
     # matched on the part before the first "_", so a model config's variants
     # (meshfm_zup, meshfm_tta8, ...) take the same path
     if feature_model_name.lower().split("_", 1)[0] in _SELF_RENDERING:

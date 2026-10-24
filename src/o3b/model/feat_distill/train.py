@@ -1,4 +1,4 @@
-"""Train a TriplaneDistill feature field to preserve a teacher feature's vertex distances.
+"""Train a PartPointField (PPF) feature field to preserve a teacher feature's vertex distances.
 
 For random vertex pairs (i, j) of one instance the loss is
 
@@ -143,7 +143,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     dev = torch.device("cuda")
-    from o3b.model.feat_distill.model import TriplaneDistillModel, normalize_verts
+    from o3b.model.feat_distill.model import PartPointFieldModel, normalize_verts
     from o3b.model.meshfm.meshfm.sampling import sample_surface_points
 
     print(f"loading teacher '{args.teacher}' on {args.geometries} for {args.categories}", flush=True)
@@ -173,7 +173,7 @@ def main() -> None:
         raise ValueError("--cross-frac needs an even --meshes-per-step (meshes come in instance pairs)")
     print(f"{len(meshes)} meshes, {len(groups)} category x geometry groups", flush=True)
 
-    wrapper = TriplaneDistillModel(out_dim=args.out_dim, n_pc_points=args.n_pc_points)
+    wrapper = PartPointFieldModel(out_dim=args.out_dim, n_pc_points=args.n_pc_points)
     net = wrapper.build_network(dev, init_from_meshfm=not args.no_meshfm_init and not args.resume,
                                 init_state_path=None if args.resume else args.init_ckpt)
     print(f"initialised {len(net.init_loaded)} / {len(net.state_dict())} tensors from "

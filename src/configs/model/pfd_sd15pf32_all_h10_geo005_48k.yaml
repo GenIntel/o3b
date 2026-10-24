@@ -3,7 +3,7 @@
 # to preserve the teacher's distances between vertex pairs of one instance (o3b/model/feat_distill/train.py),
 # on the 5 HouseCorr3D categories' test instances (bread, facial_cream, hair_dryer, handbag, tooth_brush),
 # fc16 + fc32. The checkpoint is written by the training job into the cluster checkout.
-class_name: TriplaneDistill
+class_name: PartPointField
 ckpt_path: "checkpoints/feat_distill/pfd_sd15pf32_all_h10_geo005_48k.pth"
 out_dim: 32
 n_pc_points: 100000

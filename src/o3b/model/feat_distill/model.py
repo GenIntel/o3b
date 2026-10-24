@@ -22,9 +22,10 @@ def normalize_verts(verts: torch.Tensor) -> torch.Tensor:
     return ((v - center) / scale).float()
 
 
-@register_model("TriplaneDistill")
-class TriplaneDistillModel(MeshFMModel):
-    """A PartField-like per-vertex feature field, distilled to ``out_dim`` channels.
+@register_model("TriplaneDistill")   # its first name; kept so existing configs still load
+@register_model("PartPointField")
+class PartPointFieldModel(MeshFMModel):
+    """PartPointField (PPF): a PartField-like per-vertex feature field, distilled to ``out_dim`` channels.
 
     MeshFM's architecture (o3b/model/meshfm), which is PartField's: surface
     point cloud -> PVCNN encoder -> triplane transformer -> features sampled
@@ -80,7 +81,7 @@ class TriplaneDistillModel(MeshFMModel):
             keep = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
             net.load_state_dict(keep, strict=False)
             net.init_loaded = set(keep)
-            logger.info("TriplaneDistill: %d / %d tensors from %s; new: %s", len(keep), len(own), src.name,
+            logger.info("PartPointField: %d / %d tensors from %s; new: %s", len(keep), len(own), src.name,
                         sorted(set(own) - set(keep)))
         return net.to(device)
 
@@ -88,7 +89,10 @@ class TriplaneDistillModel(MeshFMModel):
         net = self.build_network(device, init_from_meshfm=False)
         path = Path(self.distill_ckpt_path)
         if not path.exists():
-            raise FileNotFoundError(f"TriplaneDistill: no trained checkpoint at {path} (train.py writes it)")
+            raise FileNotFoundError(f"PartPointField: no trained checkpoint at {path} (train.py writes it)")
         state = torch.load(path, map_location="cpu", weights_only=False)
         net.load_state_dict(state["model"] if "model" in state else state)
         return net.eval()
+
+
+TriplaneDistillModel = PartPointFieldModel  # former class name
