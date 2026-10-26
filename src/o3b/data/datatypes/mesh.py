@@ -492,7 +492,9 @@ def _extract_vert_feats(
                        "pfd", "ppf"}  # pfd_* / ppf_*: PartPointField fields (o3b/model/feat_distill)
     # matched on the part before the first "_", so a model config's variants
     # (meshfm_zup, meshfm_tta8, ...) take the same path
-    if feature_model_name.lower().split("_", 1)[0] in _SELF_RENDERING:
+    _name = feature_model_name.lower()
+    if _name.split("_", 1)[0] in _SELF_RENDERING or _name.startswith(("ppf", "pfd")):
+        # PartPointField configs may carry the width without an underscore (ppf32)
         from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch
         model = OD3D_Model.create_by_name(feature_model_name)
