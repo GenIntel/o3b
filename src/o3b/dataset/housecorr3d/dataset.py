@@ -190,6 +190,13 @@ class HouseCorr3D(ConfigurableDataset):
         M = torch.tensor(ORIENT[cat], dtype=torch.float32) if cat in ORIENT else None
         mapped = bool((self.cfg.extra or {}).get("map_obj_orient_to_uco3d", False))
 
+        # obj_syms is read per axis of the raw annotation (Object.transform keeps
+        # the code as it is); the item's poses are in obj_gl_tform4x4_obj_raw's
+        # frame, so turn the code into it -- raw x / z are o3b Z / X. Without this
+        # an x-only symmetry (3 % of the Omni6DPose test rows) acted about Z.
+        if getattr(item, "obj_syms", None) is not None:
+            item.obj_syms = (T_gl[:3, :3].abs() @ item.obj_syms.float()).round().to(item.obj_syms.dtype)
+
         if mapped and M is not None:
             from o3b.dataset.obj_frame import rotate_object_frame
             T_extra = transf4x4_from_rot3x3(R_gl_u @ M) @ inv_tform4x4(T_gl)

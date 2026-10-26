@@ -55,6 +55,15 @@ class FrameObjectQuantBatch:
     pose_bbox3d_auc_25: Optional[Tensor] = None
     pose_bbox3d_auc_50: Optional[Tensor] = None
     pose_bbox3d_auc_75: Optional[Tensor] = None
+    # _sym: the predicted box turned within the object's symmetry group to the
+    # member closest to the GT rotation first (cutoop / Omni6DPose's protocol)
+    pose_bbox3d_iou_sym:    Optional[Tensor] = None
+    pose_bbox3d_acc_25_sym: Optional[Tensor] = None
+    pose_bbox3d_acc_50_sym: Optional[Tensor] = None
+    pose_bbox3d_acc_75_sym: Optional[Tensor] = None
+    pose_bbox3d_auc_25_sym: Optional[Tensor] = None
+    pose_bbox3d_auc_50_sym: Optional[Tensor] = None
+    pose_bbox3d_auc_75_sym: Optional[Tensor] = None
 
     extra: dict = field(default_factory=dict)
 
@@ -68,6 +77,9 @@ class FrameObjectQuantBatch:
         "pose_size3d_err_m", "pose_bbox3d_iou", "pose_size3d_iou",
         "pose_bbox3d_acc_25", "pose_bbox3d_acc_50", "pose_bbox3d_acc_75",
         "pose_bbox3d_auc_25", "pose_bbox3d_auc_50", "pose_bbox3d_auc_75",
+        "pose_bbox3d_iou_sym", "pose_bbox3d_acc_25_sym", "pose_bbox3d_acc_50_sym",
+        "pose_bbox3d_acc_75_sym", "pose_bbox3d_auc_25_sym", "pose_bbox3d_auc_50_sym",
+        "pose_bbox3d_auc_75_sym",
     )
 
     def mean(self) -> dict:

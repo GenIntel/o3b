@@ -50,6 +50,45 @@ def _unit_rot3x3(tform4x4: torch.Tensor) -> torch.Tensor:
     return R / n
 
 
+# cutoop samples a continuous symmetry axis at 2 pi / 100 (rot_canonical_sym)
+_SYM_CONTINUOUS_STEPS = 100
+_sym_group_cache: dict = {}
+
+
+def _sym_group(code: tuple) -> Optional[torch.Tensor]:
+    """(S, 3, 3) object-frame rotations of one ``obj_syms`` code, continuous
+    axes sampled at ``_SYM_CONTINUOUS_STEPS``; None for full rotational
+    symmetry (all three axes continuous), which cutoop handles separately."""
+    if code not in _sym_group_cache:
+        if all(c < 0 for c in code):
+            _sym_group_cache[code] = None
+        else:
+            from o3b.cv.metric.pose import get_obj_rot3x3_obj_sym
+            steps = torch.tensor([_SYM_CONTINUOUS_STEPS if c < 0 else c for c in code], dtype=torch.float)
+            _sym_group_cache[code] = get_obj_rot3x3_obj_sym(steps)
+    return _sym_group_cache[code]
+
+
+def symmetry_calibrated_rot3x3(pred_rot: torch.Tensor, gt_rot: torch.Tensor,
+                               syms: torch.Tensor) -> torch.Tensor:
+    """(B, 3, 3) predicted rotations turned, within each object's symmetry
+    group, to the member closest in angle to the GT -- cutoop's
+    ``DetectMatch.calibrate_rotation`` (Omni6DPose's IoU / AUC protocol):
+    ``R_pred @ S`` with ``S = argmin_S angle(R_gt, R_pred @ S)``; an object
+    symmetric about every axis takes the GT rotation outright. Sizes are not
+    permuted with it, as in cutoop."""
+    out = pred_rot.clone()
+    for b in range(pred_rot.shape[0]):
+        group = _sym_group(tuple(int(round(float(c))) for c in syms[b]))
+        if group is None:
+            out[b] = gt_rot[b]
+            continue
+        cand = pred_rot[b] @ group.to(pred_rot)                    # (S, 3, 3)
+        cos = ((gt_rot[b].T @ cand).diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2
+        out[b] = cand[cos.argmax()]
+    return out
+
+
 def _aabb_iou(size_a: torch.Tensor, size_b: torch.Tensor) -> torch.Tensor:
     """3-D IoU of two origin-centred, axis-aligned boxes given their side lengths.
 
@@ -195,12 +234,22 @@ class PoseTask(OD3D_Task):
             pred_corners = bbox3d_corners_from_pose(pred, pred_size)
             iou = bbox3d_iou(pred_corners, gt_corners.float())
             quant.pose_bbox3d_iou = iou
-            for thr in self.iou_acc:
-                setattr(quant, f"pose_bbox3d_acc_{int(thr*100)}", (iou > thr).float())
+            ious = {"": iou}
+            # _sym: the predicted box turned within the object's symmetry group
+            # to the member closest to the GT rotation first (cutoop's protocol)
+            if syms is not None:
+                pred_cal = pred.clone()
+                pred_cal[..., :3, :3] = symmetry_calibrated_rot3x3(
+                    _unit_rot3x3(pred), _unit_rot3x3(gt), syms.float().to(pred.device))
+                iou_sym = bbox3d_iou(bbox3d_corners_from_pose(pred_cal, pred_size), gt_corners.float())
+                quant.pose_bbox3d_iou_sym = iou_sym
+                ious["_sym"] = iou_sym
             from o3b.cv.metric.auc import calc_auc_for_vals_larger_than_thresh
-            for thr in self.iou_acc:
-                setattr(quant, f"pose_bbox3d_auc_{int(thr*100)}",
-                        calc_auc_for_vals_larger_than_thresh(
-                            iou.float(), thresh_min=thr, thresh_max=1.0, steps=100))
+            for suffix, v in ious.items():
+                for thr in self.iou_acc:
+                    setattr(quant, f"pose_bbox3d_acc_{int(thr*100)}{suffix}", (v > thr).float())
+                    setattr(quant, f"pose_bbox3d_auc_{int(thr*100)}{suffix}",
+                            calc_auc_for_vals_larger_than_thresh(
+                                v.float(), thresh_min=thr, thresh_max=1.0, steps=100))
 
         return quant, None
