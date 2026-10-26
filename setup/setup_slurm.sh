@@ -38,6 +38,7 @@ INSTALL_PARTFIELD="${INSTALL_PARTFIELD:-false}"
 INSTALL_TRINITY="${INSTALL_TRINITY:-false}"
 INSTALL_SAM3="${INSTALL_SAM3:-false}"
 INSTALL_ZEROSHOT="${INSTALL_ZEROSHOT:-false}"
+INSTALL_RECGEN="${INSTALL_RECGEN:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
 GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
 GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
@@ -820,6 +821,45 @@ if _is_true "${INSTALL_ZEROSHOT}"; then
     python -c "import vis4d, ml_collections, ftfy" && [ -f "${WILDDET3D_DIR}/wilddet3d/__init__.py" ] \
         && echo "--- WildDet3D deps OK ---" \
         || echo "WARNING: WildDet3D's checkout or vis4d is missing -- WildDet3DMethod will fail."
+fi
+
+
+if _is_true "${INSTALL_RECGEN}"; then
+    # RecGen (TRI, https://github.com/TRI-ML/recgen): RGB-D -> posed mesh, two
+    # TRELLIS-image-large fine-tunes. every9dv2/method/zeroshot/recgen.py runs
+    # it as a baseline (H02-T22); its own recgen_training trains it on SOPE
+    # (H02-T23). Cloned like sam-3d-objects, installed --no-deps (its pixi env
+    # pins numpy<2 for training reproduction only) and given what inference and
+    # training import. Weights: TRI-ML/RecGen + microsoft/TRELLIS-image-large
+    # from the HF cache (platform.path_hf_home).
+    echo "--- pip install recgen deps ---"
+    RECGEN_DIR="${RECGEN_DIR:-third_party/recgen}"
+    RECGEN_COMMIT="${RECGEN_COMMIT:-fe3c9315b439c50ada8b60c12b469d739fd722db}"
+    if [ ! -d "${RECGEN_DIR}/.git" ]; then
+        echo "--- git clone recgen ---"
+        _git_retry git clone https://github.com/TRI-ML/recgen.git "${RECGEN_DIR}"
+    fi
+    _git_retry git -C "${RECGEN_DIR}" fetch --quiet origin "${RECGEN_COMMIT}" || true
+    git -C "${RECGEN_DIR}" checkout --quiet "${RECGEN_COMMIT}"
+    pip install --no-deps -e "${RECGEN_DIR}"
+    # recgen_training pins numpy<2; under numpy 2 torch.tensor() rejects a list of
+    # numpy bools (its two CFG dropout masks). Idempotent: a patched line no
+    # longer matches.
+    sed -i 's/torch.tensor(mask, device=cond.device)/torch.tensor(np.asarray(mask), device=cond.device)/' \
+        "${RECGEN_DIR}/recgen_training/trainers/flow_matching/mixins/classifier_free_guidance.py"
+    sed -i 's/torch.tensor(list(cfg_mask), device=cond.device/torch.tensor(np.asarray(cfg_mask), device=cond.device/' \
+        "${RECGEN_DIR}/recgen_training/trainers/flow_matching/mixins/image_conditioned.py"
+    pip install easydict plyfile safetensors webdataset braceexpand einops "kornia>=0.7,<0.8" tensorboard \
+        "utils3d @ git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8"
+    pip install "spconv-${CUDA_TAG}" || echo "WARNING: no spconv-${CUDA_TAG} wheel -- RecGenMethod will fail."
+    # Sparse attention backend: xformers (flash-attn also works, but is a
+    # tens-of-minutes build; RecGen's serialized attention rejects sdpa).
+    # --no-deps: the wheel index would otherwise swap torch.
+    pip install --no-deps "xformers==0.0.29.post3" --index-url "https://download.pytorch.org/whl/${CUDA_TAG}" \
+        || echo "WARNING: no xformers wheel for ${CUDA_TAG} -- RecGenMethod needs flash-attn instead."
+    python -c "import recgen_inference, spconv.pytorch, xformers.ops, utils3d, webdataset" \
+        && echo "--- RecGen deps import OK ---" \
+        || echo "WARNING: RecGen's dependencies do not all import -- RecGenMethod will fail."
 fi
 
 
