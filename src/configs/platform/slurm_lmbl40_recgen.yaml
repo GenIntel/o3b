@@ -1,0 +1,20 @@
+defaults:
+  - slurm_lmbl40
+  - _self_
+
+# slurm_lmbl40 plus the recgen dependency group: RecGen (TRI-ML/recgen) as the
+# baseline in every9dv2/method/zeroshot/recgen.py, and its own training code.
+#
+#   o3b platform setup -p slurm_lmbl40_recgen
+#   o3b bench rrun -p slurm_lmbl40 -b pose_omni6dpose_rope -a method/frame_object/recgen.yaml,zeroshot/subset/s01.yaml
+#
+# As for slurm_lmbl40_zeroshot: method/frame_object/recgen.yaml declares
+# `deps: [recgen]` and this HF_HOME, so rrun lands in the env this file builds
+# (<repo>_py310_cu124_torch26_recgen); rrun itself does not build envs.
+deps:
+  - recgen
+
+path_hf_home: ${.path_ws}/hf_cache
+
+# off the training partition, whose per-account GPU cap the H02 runs fill
+partition: alldlc2_gpu-l40s
