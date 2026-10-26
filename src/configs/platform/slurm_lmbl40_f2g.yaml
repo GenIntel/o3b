@@ -1,0 +1,17 @@
+defaults:
+  - slurm_lmbl40
+  - _self_
+
+# slurm_lmbl40 plus the f2g dependency group: F2G-Pose (jrryzh/F2G-Pose) as the
+# baseline in every9dv2/method/zeroshot/f2gpose.py.
+#
+#   o3b platform setup -p slurm_lmbl40_f2g
+#   o3b bench rrun -p slurm_lmbl40_f2g -b pose_omni6dpose_rope -a method/frame_object/f2gpose.yaml,trinity/omni6dpose_orient/nomap.yaml
+#
+# method/frame_object/f2gpose.yaml declares `deps: [f2g]`, so rrun lands in the
+# env this file builds (<repo>_py310_cu124_torch26_f2g); rrun does not build envs.
+deps:
+  - f2g
+
+# off the training partition, whose per-account GPU cap the H02 runs fill
+partition: alldlc2_gpu-l40s

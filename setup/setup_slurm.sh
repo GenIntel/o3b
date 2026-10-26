@@ -39,6 +39,7 @@ INSTALL_TRINITY="${INSTALL_TRINITY:-false}"
 INSTALL_SAM3="${INSTALL_SAM3:-false}"
 INSTALL_ZEROSHOT="${INSTALL_ZEROSHOT:-false}"
 INSTALL_RECGEN="${INSTALL_RECGEN:-false}"
+INSTALL_F2G="${INSTALL_F2G:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
 GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
 GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
@@ -860,6 +861,42 @@ if _is_true "${INSTALL_RECGEN}"; then
     python -c "import recgen_inference, spconv.pytorch, xformers.ops, utils3d, webdataset" \
         && echo "--- RecGen deps import OK ---" \
         || echo "WARNING: RecGen's dependencies do not all import -- RecGenMethod will fail."
+fi
+
+if _is_true "${INSTALL_F2G}"; then
+    # F2G-Pose (https://github.com/jrryzh/F2G-Pose): RGB-D + mask -> pose, size
+    # and completed shape, trained on Omni6DPose SOPE. every9dv2/method/zeroshot/
+    # f2gpose.py runs its released checkpoint as a baseline (H02-T24). Cloned and
+    # installed --no-deps (it pins torch 2.4; it runs on 2.6), its two CUDA
+    # extensions built against this torch. RADIO v2.5-L (pinned commit) and both
+    # checkpoints go inside the clone, where F2GPoseMethod looks by default.
+    echo "--- pip install f2g-pose deps ---"
+    F2G_DIR="${F2G_DIR:-third_party/F2G-Pose}"
+    F2G_COMMIT="${F2G_COMMIT:-6141733}"
+    if [ ! -d "${F2G_DIR}/.git" ]; then
+        echo "--- git clone F2G-Pose ---"
+        _git_retry git clone https://github.com/jrryzh/F2G-Pose.git "${F2G_DIR}"
+    fi
+    _git_retry git -C "${F2G_DIR}" fetch --quiet origin || true
+    git -C "${F2G_DIR}" checkout --quiet "${F2G_COMMIT}"
+    pip install easydict einops timm scipy opencv-python PyYAML "cutoop==0.1.0" rich matplotlib
+    pip install --no-build-isolation --no-deps "${F2G_DIR}/third_party/pointnet2_ops" "${F2G_DIR}/third_party/chamfer"
+    pip install --no-deps -e "${F2G_DIR}"
+    if [ ! -d "${F2G_DIR}/third_party_local/RADIO/.git" ]; then
+        _git_retry git clone https://github.com/NVlabs/RADIO.git "${F2G_DIR}/third_party_local/RADIO"
+    fi
+    git -C "${F2G_DIR}/third_party_local/RADIO" checkout --quiet fbd19ec1e68483482d7d96a59cb639880a8b33ed
+    [ -f "${F2G_DIR}/weights/radio-v2.5-l_half.pth.tar" ] || python "${F2G_DIR}/scripts/download_weights.py" \
+        --url 'https://huggingface.co/nvidia/RADIO/resolve/main/radio-v2.5-l_half.pth.tar?download=true' \
+        --sha256 50324e8cb086885126a896ad9ecbac46355cf0e4c1d8363763b01693a4618ff1 \
+        --output "${F2G_DIR}/weights/radio-v2.5-l_half.pth.tar"
+    [ -f "${F2G_DIR}/weights/f2g-pose.pt" ] || python "${F2G_DIR}/scripts/download_weights.py" \
+        --url 'https://huggingface.co/J3rr1/F2G-Pose/resolve/main/f2g-pose.pt?download=true' \
+        --sha256 bff06bd58a42fd805d8232f9ab7b4612b8eb833edf6b6cccd23e5040a8c9ca18 \
+        --output "${F2G_DIR}/weights/f2g-pose.pt"
+    python -c "import f2g_pose, pointnet2_ops, cutoop" \
+        && echo "--- F2G-Pose deps import OK ---" \
+        || echo "WARNING: F2G-Pose's dependencies do not all import -- F2GPoseMethod will fail."
 fi
 
 
