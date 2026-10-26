@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional, Tuple
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -123,39 +124,82 @@ def _welded(mesh):
     return np.ascontiguousarray(vw), np.ascontiguousarray(fw.astype(np.int32)), inv
 
 
-def _geodesic_pairwise(mesh, src_indices, dst_indices) -> "np.ndarray":
+# Geodesic backend. "exact": gdist (MMP) on the welded mesh. It needs a manifold mesh: on DenseMatcher's
+# simple_mesh.obj (100s of edges shared by > 2 faces) it dumps core. "heat": potpourri3d's heat method on its
+# robust intrinsic (tufted-cover) triangulation, one single-source solve per queried vertex -- DenseMatcher's own
+# geodesic (heat_geodmat_robust). On an icosphere it is within -19 % of exact inside one edge length, -4 % at 2-4
+# edges, < 1 % beyond (the multi-source solve instead adds ~2 edge lengths, so it is not used). "auto": exact when
+# the welded mesh is edge-manifold, heat otherwise.
+GEODESIC_METHODS = ("auto", "exact", "heat")
+
+
+def _resolve_geodesic(fw, method: str) -> str:
+    if method != "auto":
+        return method
+    e = np.sort(np.concatenate([fw[:, [0, 1]], fw[:, [1, 2]], fw[:, [2, 0]]]), axis=1)
+    _, cnt = np.unique(e, axis=0, return_counts=True)
+    return "exact" if cnt.max(initial=0) <= 2 else "heat"
+
+
+def _components(vw, fw):
+    """Connected component label per welded vertex."""
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+    n = len(vw)
+    adj = sp.coo_matrix((np.ones(3 * len(fw)), (fw.ravel(), np.roll(fw, 1, axis=1).ravel())), shape=(n, n))
+    return connected_components(adj, directed=False)[1]
+
+
+def _heat_rows(vw, fw, sources):
+    """{source: (Nw,) heat-method distance from it}, one robust single-source solve each."""
+    import potpourri3d as pp3d
+    solver = pp3d.MeshHeatMethodDistanceSolver(vw, fw.astype(np.int64))
+    return {int(s_): np.maximum(solver.compute_distance(int(s_)), 0.0) for s_ in np.unique(sources)}
+
+
+def _geodesic_pairwise(mesh, src_indices, dst_indices, method: str = "auto") -> "np.ndarray":
     """Geodesic distance for each (src_indices[i], dst_indices[i]) pair on the welded mesh.
 
     Returns float32 numpy array of shape (N,) (inf: not connected).
     """
-    import numpy as np
-    from torch_geometric.utils import geodesic_distance
-
     vw, fw, inv = _welded(mesh)
+    src, dst = inv[np.asarray(src_indices)], inv[np.asarray(dst_indices)]
+    if _resolve_geodesic(fw, method) == "heat":
+        rows, comp = _heat_rows(vw, fw, src), _components(vw, fw)
+        out = np.array([0.0 if s_ == d_ else rows[int(s_)][d_] if comp[s_] == comp[d_] else np.inf
+                        for s_, d_ in zip(src, dst)])
+        return out.astype(np.float32)
+    from torch_geometric.utils import geodesic_distance
     dists = geodesic_distance(
         torch.from_numpy(vw).float(), torch.from_numpy(fw.T.copy()).long(),
-        src=torch.as_tensor(inv[np.asarray(src_indices)], dtype=torch.long),
-        dst=torch.as_tensor(inv[np.asarray(dst_indices)], dtype=torch.long),
+        src=torch.as_tensor(src, dtype=torch.long), dst=torch.as_tensor(dst, dtype=torch.long),
         norm=False,  # callers divide by _mesh_sqrt_area themselves
     )
     return dists.cpu().numpy().astype(np.float32)
 
 
-def _geodesic_to_set(mesh, set_indices) -> "np.ndarray":
-    """Geodesic distance from every vertex of mesh to the nearest vertex of set_indices, on the welded mesh.
+def _geodesic_to_set(mesh, set_indices, query_indices, method: str = "auto") -> "np.ndarray":
+    """Geodesic distance from each query vertex to the nearest vertex of set_indices, on the welded mesh.
 
-    One multi-source propagation, so the distance of a prediction to a whole GT
-    semantic group (DenseMatcher's matching distance) costs one gdist call per
-    group. Vertices on a component the set does not reach are inf.
+    DenseMatcher's matching distance of a prediction to its GT semantic group.
+    "exact": one multi-source propagation from the set. "heat": one solve per
+    distinct query vertex, minimum over the set. Set vertices are 0; a query
+    the set does not reach is inf.
 
-    Returns float32 numpy array of shape (V,).
+    Returns float32 numpy array of shape (Q,).
     """
-    import gdist
-    import numpy as np
-
     vw, fw, inv = _welded(mesh)
-    src = np.ascontiguousarray(np.unique(inv[np.asarray(set_indices)]).astype(np.int32))
-    return gdist.compute_gdist(vw, fw, source_indices=src).astype(np.float32)[inv]
+    src = np.unique(inv[np.asarray(set_indices)])
+    q = inv[np.asarray(query_indices)]
+    if _resolve_geodesic(fw, method) == "heat":
+        rows, comp = _heat_rows(vw, fw, q), _components(vw, fw)
+        reach = np.isin(comp, comp[src])
+        d = {int(x): (0.0 if x in set(src.tolist()) else float(rows[int(x)][src].min()) if reach[x] else np.inf)
+             for x in np.unique(q)}
+        return np.array([d[int(x)] for x in q], dtype=np.float32)
+    import gdist
+    d = gdist.compute_gdist(vw, fw, source_indices=np.ascontiguousarray(src.astype(np.int32)))
+    return d.astype(np.float32)[q]
 
 
 # ── part correspondence rendering ─────────────────────────────────────────────
@@ -682,7 +726,7 @@ class Crsp3DNNTask(OD3D_Task):
 
     def __init__(self, feat_dist: str = "euclidean", feat_view_dim: Optional[int] = None,
                  feat_views: Optional[int] = None, matching: str = "nn", fgw: Optional[dict] = None,
-                 fmap: Optional[dict] = None, **kwargs):
+                 fmap: Optional[dict] = None, geodesic: str = "auto", **kwargs):
         """``feat_dist`` -- how a source vertex is compared with target vertices:
 
         euclidean    one feature per vertex, Euclidean NN (the default).
@@ -714,6 +758,11 @@ class Crsp3DNNTask(OD3D_Task):
                      own pyFM (``_dm_fmap_match``; needs a DenseMatcher clone
                      and the meshes' faces).
 
+        ``geodesic`` -- how the geodesic metrics measure distance on the (welded)
+        target mesh: ``exact`` (gdist MMP, manifold meshes only), ``heat``
+        (potpourri3d's robust heat method, DenseMatcher's own) or ``auto`` (the
+        default: exact on an edge-manifold mesh, heat otherwise).
+
         ``uot`` / ``fgw`` solve one plan per pair over all vertices, so they need
         ``feat_dist: euclidean``; ``fgw`` takes ``_fgw_match``'s keyword
         arguments (alpha, n_anchors, rounds, iters, rho, anchor_q, temp,
@@ -733,6 +782,9 @@ class Crsp3DNNTask(OD3D_Task):
         if matching != "nn" and feat_dist != "euclidean":
             raise ValueError(f"matching {matching!r} needs feat_dist 'euclidean'")
         self.matching = matching
+        if geodesic not in GEODESIC_METHODS:
+            raise ValueError(f"geodesic {geodesic!r} not in {GEODESIC_METHODS}")
+        self.geodesic = geodesic
         self.fgw = dict(fgw or {})
         self.fmap = dict(fmap or {})
         if matching == "uot":
@@ -905,6 +957,7 @@ class Crsp3DNNTask(OD3D_Task):
                         batch.trgt_meshes[b],
                         pred_trgt_kpt_vert[b].cpu().numpy()[valid_idx],
                         gt_trgt_kpt_vert[b].cpu().numpy()[valid_idx],
+                        method=self.geodesic,
                     )
                     sqrt_area = _mesh_sqrt_area(batch.trgt_meshes[b])
                     for j, k_i in enumerate(valid_idx):
@@ -989,8 +1042,7 @@ class Crsp3DNNTask(OD3D_Task):
                 pred_np      = pred_trgt_vert.cpu().numpy()
 
                 # Distance of the prediction to the nearest vertex of the query's GT group
-                # (DenseMatcher's matching distance): Euclidean, and geodesic as one
-                # multi-source propagation from the group. Queries whose group is absent
+                # (DenseMatcher's matching distance): Euclidean, and geodesic (_geodesic_to_set). Queries whose group is absent
                 # from the target stay nan; inf = the group does not reach the prediction.
                 euc_errors_t = torch.full((query_idx.numel(),), float("nan"))
                 geo_errors_t = torch.full((query_idx.numel(),), float("nan"))
@@ -1006,8 +1058,8 @@ class Crsp3DNNTask(OD3D_Task):
                     d = torch.cdist(pred_pos[qi_mask], trgt_verts_b[correct_idx])  # (Q_p, C)
                     euc_errors_t[qi_mask] = d.min(dim=1).values.cpu()
                     if trgt_mesh_b is not None:
-                        d_set = _geodesic_to_set(trgt_mesh_b, correct_idx.cpu().numpy())  # (V_trgt,)
-                        geo_errors_t[qi_mask] = torch.from_numpy(d_set[pred_np[qi_mask.cpu().numpy()]])
+                        geo_errors_t[qi_mask] = torch.from_numpy(_geodesic_to_set(
+                            trgt_mesh_b, correct_idx.cpu().numpy(), pred_np[qi_mask.cpu().numpy()], method=self.geodesic))
 
                 finite_euc = euc_errors_t[torch.isfinite(euc_errors_t)]
                 parts_trgt_euc_dist_mean_list.append(
