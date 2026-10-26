@@ -17,6 +17,10 @@ outputs become the pooled feature: ``mean`` (default) averages them, ``concat``
 writes them side by side, (B, num_queries * dim), before the appended cls
 feature (H02-T14: a pose and a shape query, self-attending, -> 2 x 504 + 384).
 
+``moe_experts: 8`` (``moe_top_k: 2``) makes every layer's FFN a mixture of
+experts, as F2G-Pose's (H02-T21, ``o3b/model/moe.py``); its load-balancing
+loss is collected by the method.
+
 Positions enter as PointROPE (LitePT's rotary encoding, same frequency layout
 and base), here in torch so positions can be float: a token sits at its pooled
 ``coord`` divided by ``rope_unit``, the queries at ``query_pos`` (the cloud
@@ -123,7 +127,7 @@ class _Attn(nn.Module):
 
 
 class _Layer(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio, rope_freq, dropout, self_attn):
+    def __init__(self, dim, num_heads, mlp_ratio, rope_freq, dropout, self_attn, moe_experts=0, moe_top_k=2):
         super().__init__()
         self.self_attn = _Attn(dim, num_heads, rope_freq, dropout) if self_attn else None
         self.norm_sa = nn.LayerNorm(dim) if self_attn else None
@@ -131,8 +135,14 @@ class _Layer(nn.Module):
         self.norm_kv = nn.LayerNorm(dim)
         self.cross = _Attn(dim, num_heads, rope_freq, dropout)
         self.norm_ffn = nn.LayerNorm(dim)
-        self.ffn = nn.Sequential(nn.Linear(dim, dim * mlp_ratio), nn.GELU(),
-                                 nn.Linear(dim * mlp_ratio, dim))
+        make_ffn = lambda: nn.Sequential(nn.Linear(dim, dim * mlp_ratio), nn.GELU(),  # noqa: E731
+                                         nn.Linear(dim * mlp_ratio, dim))
+        if moe_experts:
+            # H02-T21: F2G-Pose's mixture-of-experts FFN (o3b/model/moe.py)
+            from o3b.model.moe import MoeMlp
+            self.ffn = MoeMlp(dim, make_ffn, num_experts=moe_experts, top_k=moe_top_k)
+        else:
+            self.ffn = make_ffn()
 
     def forward(self, q, q_pos, tok, tok_pos, tok_mask, self_mask=None):
         if self.self_attn is not None:
@@ -186,6 +196,8 @@ class XAttnPool(OD3D_Model):
         surface_head: str = "mlp",
         surface_fold_grid_scale: float = 0.05,
         query_pool: str = "mean",
+        moe_experts: int = 0,
+        moe_top_k: int = 2,
     ):
         super().__init__()
         if query_pool not in ("mean", "concat"):
@@ -235,7 +247,8 @@ class XAttnPool(OD3D_Model):
                              persistent=False)
         self.layers = nn.ModuleList([
             _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout,
-                   self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0)
+                   self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
+                   moe_experts=moe_experts, moe_top_k=moe_top_k)
             for i in range(num_layers)
         ])
         self.norm_out = nn.LayerNorm(dim)

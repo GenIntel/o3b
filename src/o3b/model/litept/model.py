@@ -48,6 +48,8 @@ class LitePT(OD3D_Model):
         out_feat_append_in_feat = True,
         out_feats_append_in_feats = False,
         out_tokens = False,
+        moe_experts: int = 0,
+        moe_top_k: int = 2,
     ):
         super().__init__()
 
@@ -90,9 +92,25 @@ class LitePT(OD3D_Model):
             shuffle_orders=shuffle_orders,
             enc_mode=enc_mode,
         )
+        if moe_experts:
+            self._moe_ffn(moe_experts, moe_top_k)
 
-        
         # self.nets = nn.ModuleList(nets)
+
+    def _moe_ffn(self, num_experts, top_k):
+        """H02-T21: every attention Block's MLP -> F2G-Pose's mixture of experts
+        (o3b/model/moe.py), each expert an MLP of the same shape. Conv-only blocks
+        have no MLP and stay as they are."""
+        from o3b.model.litept.litept import MLP
+        from o3b.model.moe import MoeMlp
+        for parent in list(self.model.modules()):
+            for name, child in list(parent.named_children()):
+                if isinstance(child, MLP):
+                    cin, hid = child.fc1.in_features, child.fc1.out_features
+                    cout, drop, act = child.fc2.out_features, child.drop.p, type(child.act)
+                    setattr(parent, name, MoeMlp(
+                        cin, lambda: MLP(cin, hid, cout, act_layer=act, drop=drop),
+                        num_experts=num_experts, top_k=top_k))
 
     def forward(self, frames_gt, frames_pred=None):
 

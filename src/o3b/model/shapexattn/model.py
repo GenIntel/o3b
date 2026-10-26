@@ -78,6 +78,8 @@ class ShapeXAttn(OD3D_Model):
         nocs: bool = False,
         pose_query: bool = False,
         point_feat_dim: int = 0,
+        moe_experts: int = 0,
+        moe_top_k: int = 2,
     ):
         super().__init__()
         self.nocs = nocs
@@ -96,7 +98,8 @@ class ShapeXAttn(OD3D_Model):
         self.embed_glob = nn.Linear(in_dim, dim)
         self.layers = nn.ModuleList([
             _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout,
-                   self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0)
+                   self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
+                   moe_experts=moe_experts, moe_top_k=moe_top_k)   # H02-T21: MoE FFNs (o3b/model/moe.py)
             for i in range(num_layers)
         ])
         self.norm_out = nn.LayerNorm(dim)
