@@ -380,7 +380,7 @@ def ncds_vert_feats(verts: Tensor, per_axis: bool = False) -> Tensor:
 
 
 def _parse_mc_type(type_str: str) -> dict:
-    """Parse mesh type strings like 'mc16', 'mc16_vuni4_r256_fdinov2s', 'fc16_o0'.
+    """Parse mesh type strings like 'mc16', 'mc16_vuni4_r256_fdinov2s', 'fc16_o0', 'orig_vuni100_r256_fdm'.
 
     The geometry prefix is ``mc<N>`` (marching cubes), ``dmtet<N>`` (marching
     tets) or ``fc<N>`` (FlexiCubes), N SDF samples per axis; the latter two
@@ -391,6 +391,15 @@ def _parse_mc_type(type_str: str) -> dict:
     n_views, resolution, feature_model.
     """
     import re
+    if type_str == "orig" or type_str.startswith("orig_"):
+        # the dataset's own mesh, unchanged: features on the annotated geometry (e.g. DenseMatcher's
+        # simple_mesh.obj, which its groups.txt indexes)
+        m = re.fullmatch(r"orig(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?", type_str)
+        if not m:
+            raise ValueError(f"Cannot parse mesh type: {type_str!r}")
+        return {"method": "orig", "res": None, "fit_steps": None, "geometry": "orig",
+                "view_sampling": m.group(1), "n_views": int(m.group(2)) if m.group(2) else None,
+                "resolution": int(m.group(3)) if m.group(3) else None, "feature_model": m.group(4)}
     m = re.fullmatch(
         r"((mc|dmtet|fc)(\d+)(?:_o(\d+))?)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
         type_str,
@@ -412,14 +421,16 @@ def _parse_mc_type(type_str: str) -> dict:
 
 
 def _is_remesh_type(type_str: str) -> bool:
-    return type_str.startswith(("mc", "dmtet", "fc"))
+    return type_str.startswith(("mc", "dmtet", "fc", "orig"))
 
 
 def convert_mesh(type_str: str, mesh: Mesh) -> Mesh:
     if not _is_remesh_type(type_str):
         raise ValueError(f"Unknown mesh type: {type_str}")
     params = _parse_mc_type(type_str)
-    if params["method"] == "mc":
+    if params["method"] == "orig":
+        mc_mesh = mesh
+    elif params["method"] == "mc":
         mc_mesh = convert_mesh_to_mc(mesh, params["res"])
     else:
         mc_mesh = convert_mesh_to_isosurface(mesh, params["method"], params["res"], params["fit_steps"])

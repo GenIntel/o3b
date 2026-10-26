@@ -109,27 +109,40 @@ def _mesh_sqrt_area(mesh) -> float:
     return math.sqrt(max(area, 1e-12))
 
 
-def _geodesic_pairwise(mesh, src_indices, dst_indices) -> "np.ndarray":
-    """Geodesic distance for each (src_indices[i], dst_indices[i]) pair on mesh.
+def _welded(mesh):
+    """(verts float64, faces int32, inv) of mesh with exactly-coincident vertices merged (``weld_mesh``).
 
-    Returns float32 numpy array of shape (N,).
+    Textured remeshes duplicate vertices along UV seams; an mc32 DenseMatcher mesh loads as ~1000
+    disconnected charts, on which a geodesic between charts is infinite. Geodesics are therefore
+    measured on the welded surface; ``inv`` maps an input vertex to its welded id."""
+    import numpy as np
+    from o3b.data.datatypes.mesh import weld_mesh
+
+    vw, fw, inv, _ = weld_mesh(mesh.verts.detach().cpu().double().numpy(), mesh.faces.detach().cpu().long().numpy())
+    fw = fw[(fw[:, 0] != fw[:, 1]) & (fw[:, 1] != fw[:, 2]) & (fw[:, 0] != fw[:, 2])]
+    return np.ascontiguousarray(vw), np.ascontiguousarray(fw.astype(np.int32)), inv
+
+
+def _geodesic_pairwise(mesh, src_indices, dst_indices) -> "np.ndarray":
+    """Geodesic distance for each (src_indices[i], dst_indices[i]) pair on the welded mesh.
+
+    Returns float32 numpy array of shape (N,) (inf: not connected).
     """
     import numpy as np
     from torch_geometric.utils import geodesic_distance
 
-    pos  = mesh.verts.float().cpu()
-    face = mesh.faces.t().contiguous().long().cpu()
+    vw, fw, inv = _welded(mesh)
     dists = geodesic_distance(
-        pos, face,
-        src=torch.tensor(src_indices, dtype=torch.long),
-        dst=torch.tensor(dst_indices, dtype=torch.long),
+        torch.from_numpy(vw).float(), torch.from_numpy(fw.T.copy()).long(),
+        src=torch.as_tensor(inv[np.asarray(src_indices)], dtype=torch.long),
+        dst=torch.as_tensor(inv[np.asarray(dst_indices)], dtype=torch.long),
         norm=False,  # callers divide by _mesh_sqrt_area themselves
     )
     return dists.cpu().numpy().astype(np.float32)
 
 
 def _geodesic_to_set(mesh, set_indices) -> "np.ndarray":
-    """Geodesic distance from every vertex of mesh to the nearest vertex of set_indices.
+    """Geodesic distance from every vertex of mesh to the nearest vertex of set_indices, on the welded mesh.
 
     One multi-source propagation, so the distance of a prediction to a whole GT
     semantic group (DenseMatcher's matching distance) costs one gdist call per
@@ -140,10 +153,9 @@ def _geodesic_to_set(mesh, set_indices) -> "np.ndarray":
     import gdist
     import numpy as np
 
-    pos  = np.ascontiguousarray(mesh.verts.detach().cpu().double().numpy())
-    face = np.ascontiguousarray(mesh.faces.detach().cpu().numpy().astype(np.int32))
-    src  = np.ascontiguousarray(np.asarray(set_indices, dtype=np.int32))
-    return gdist.compute_gdist(pos, face, source_indices=src).astype(np.float32)
+    vw, fw, inv = _welded(mesh)
+    src = np.ascontiguousarray(np.unique(inv[np.asarray(set_indices)]).astype(np.int32))
+    return gdist.compute_gdist(vw, fw, source_indices=src).astype(np.float32)[inv]
 
 
 # ── part correspondence rendering ─────────────────────────────────────────────
