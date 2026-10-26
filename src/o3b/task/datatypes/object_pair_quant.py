@@ -17,7 +17,7 @@ class ObjectPairQuantBatch:
 
     # ── per-keypoint tensors ──────────────────────────────────────────────────
     kpts_trgt_euc_dist:  Optional[Tensor] = None  # (B, K)  Euclidean dist on target
-    kpts_trgt_geo_dist:  Optional[Tensor] = None  # (B, K)  normalized geodesic dist on target
+    kpts_trgt_geo_dist:  Optional[Tensor] = None  # (B, K)  geodesic dist on target (inf = unreachable)
     kpts_mask:           Optional[Tensor] = None  # (B, K)  bool — valid keypoints
 
     # ── per-sample keypoint aggregates ───────────────────────────────────────
@@ -30,10 +30,13 @@ class ObjectPairQuantBatch:
 
     # ── per-sample part aggregates ────────────────────────────────────────────
     parts_trgt_euc_dist_mean:      Optional[Tensor] = None  # (B,)  mean Euclidean dist
+    # distances are to the nearest vertex of the query's GT part (DenseMatcher's matching distance)
     parts_trgt_geo_dist_mean:      Optional[Tensor] = None  # (B,)  mean geodesic dist
-    parts_trgt_geo_dist_norm_mean: Optional[Tensor] = None  # (B,)  mean geodesic dist / sqrt(surface area)
-    parts_trgt_geo_auc01:            Optional[Tensor] = None  # (B,)  AUC of PCK-geo curve [0, 0.1] normalized
-    parts_trgt_pck:                Optional[Tensor] = None  # (B,)  fraction same part predicted
+    parts_trgt_geo_dist_norm_mean: Optional[Tensor] = None  # (B,)  mean geodesic dist / sqrt(surface area) (DenseMatcher's Err / 100)
+    parts_trgt_geo_auc01:          Optional[Tensor] = None  # (B,)  AUC of PCK-geo curve [0, 0.1] normalized (DenseMatcher's AUC)
+    parts_trgt_geo_pck005:         Optional[Tensor] = None  # (B,)  fraction with normalized geodesic dist <= 0.05
+    parts_trgt_geo_pck01:          Optional[Tensor] = None  # (B,)  fraction with normalized geodesic dist <= 0.1
+    parts_trgt_pck:                Optional[Tensor] = None  # (B,)  fraction same part predicted (PCK-geo at 0)
 
     # extra per-task metrics
     extra: dict = field(default_factory=dict)
@@ -58,6 +61,8 @@ class ObjectPairQuantBatch:
             "parts_trgt_geo_dist_mean",
             "parts_trgt_geo_dist_norm_mean",
             "parts_trgt_geo_auc01",
+            "parts_trgt_geo_pck005",
+            "parts_trgt_geo_pck01",
             "parts_trgt_pck",
         ):
             val = getattr(self, fname)
@@ -75,6 +80,7 @@ class ObjectPairQuantBatch:
         out: dict = {f"{prefix}/{k}": v for k, v in self.mean().items()}
         if wb is None:
             return out
+        import numpy as np
         for fname in ("kpts_trgt_euc_dist", "kpts_trgt_geo_dist"):
             val = getattr(self, fname)
             if val is None:
@@ -83,6 +89,7 @@ class ObjectPairQuantBatch:
                 data = val[self.kpts_mask].detach().cpu().float().numpy()
             else:
                 data = val.detach().cpu().float().flatten().numpy()
+            data = data[np.isfinite(data)]
             if data.size:
                 out[f"{prefix}/{fname}"] = wb.Histogram(data)
         return out

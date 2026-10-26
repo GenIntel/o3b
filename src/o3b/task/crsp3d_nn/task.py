@@ -123,9 +123,27 @@ def _geodesic_pairwise(mesh, src_indices, dst_indices) -> "np.ndarray":
         pos, face,
         src=torch.tensor(src_indices, dtype=torch.long),
         dst=torch.tensor(dst_indices, dtype=torch.long),
-        norm=True,
+        norm=False,  # callers divide by _mesh_sqrt_area themselves
     )
     return dists.cpu().numpy().astype(np.float32)
+
+
+def _geodesic_to_set(mesh, set_indices) -> "np.ndarray":
+    """Geodesic distance from every vertex of mesh to the nearest vertex of set_indices.
+
+    One multi-source propagation, so the distance of a prediction to a whole GT
+    semantic group (DenseMatcher's matching distance) costs one gdist call per
+    group. Vertices on a component the set does not reach are inf.
+
+    Returns float32 numpy array of shape (V,).
+    """
+    import gdist
+    import numpy as np
+
+    pos  = np.ascontiguousarray(mesh.verts.detach().cpu().double().numpy())
+    face = np.ascontiguousarray(mesh.faces.detach().cpu().numpy().astype(np.int32))
+    src  = np.ascontiguousarray(np.asarray(set_indices, dtype=np.int32))
+    return gdist.compute_gdist(pos, face, source_indices=src).astype(np.float32)
 
 
 # ── part correspondence rendering ─────────────────────────────────────────────
@@ -794,9 +812,11 @@ class Crsp3DNNTask(OD3D_Task):
             kpts_trgt_pck01  = _pck(0.1)
             kpts_trgt_pck005 = _pck(0.05)
 
-            # Geodesic error (pred → GT vert on target mesh), normalized by sqrt(surface area)
-            kpts_trgt_geo_dist      = torch.zeros(B_k, K, dtype=torch.float32)
-            kpts_trgt_geo_dist_norm = torch.zeros(B_k, K, dtype=torch.float32)
+            # Geodesic error (pred → GT vert on target mesh), normalized by sqrt(surface area).
+            # nan = no target mesh; inf = GT on a component the prediction does not reach
+            # (excluded from the means, a miss for the AUC).
+            kpts_trgt_geo_dist      = torch.full((B_k, K), float("nan"), dtype=torch.float32)
+            kpts_trgt_geo_dist_norm = torch.full((B_k, K), float("nan"), dtype=torch.float32)
             if batch.trgt_meshes is not None:
                 import numpy as np
                 for b in range(B_k):
@@ -813,20 +833,23 @@ class Crsp3DNNTask(OD3D_Task):
                     sqrt_area = _mesh_sqrt_area(batch.trgt_meshes[b])
                     for j, k_i in enumerate(valid_idx):
                         d = float(geo[j])
-                        if np.isfinite(d):
-                            kpts_trgt_geo_dist[b, k_i]      = d
-                            kpts_trgt_geo_dist_norm[b, k_i] = d / sqrt_area
+                        kpts_trgt_geo_dist[b, k_i]      = d
+                        kpts_trgt_geo_dist_norm[b, k_i] = d / sqrt_area
 
             geo_t      = kpts_trgt_geo_dist.to(dev)
             geo_norm_t = kpts_trgt_geo_dist_norm.to(dev)
-            kpts_trgt_geo_dist_mean      = (geo_t      * kpts_valid.float()).sum(dim=1) / n_valid
-            kpts_trgt_geo_dist_norm_mean = (geo_norm_t * kpts_valid.float()).sum(dim=1) / n_valid
+            has_geo    = kpts_valid.bool() & ~torch.isnan(geo_t)  # (B_k, K)
+            reached    = has_geo & torch.isfinite(geo_t)
+            n_geo      = has_geo.sum(dim=1).float()            # 0 → nan below
+            n_reached  = reached.sum(dim=1).float()
+            kpts_trgt_geo_dist_mean      = torch.where(reached, geo_t,      0.).sum(dim=1) / n_reached
+            kpts_trgt_geo_dist_norm_mean = torch.where(reached, geo_norm_t, 0.).sum(dim=1) / n_reached
 
             # AUC: integrate PCK over normalized geodesic thresholds [0, 0.1]
-            thresholds = torch.linspace(0, 0.1, 1000, device=dev)
+            thresholds = torch.linspace(0, 0.1, 1001, device=dev)
             pck_per_thresh = (
-                (geo_norm_t.unsqueeze(-1) < thresholds).float() * kpts_valid.float().unsqueeze(-1)
-            ).sum(dim=1) / n_valid.unsqueeze(-1)
+                (geo_norm_t.unsqueeze(-1) <= thresholds) & has_geo.unsqueeze(-1)
+            ).float().sum(dim=1) / n_geo.unsqueeze(-1)
             kpts_trgt_geo_auc01 = pck_per_thresh.mean(dim=1)
 
             quant_kpts = dict(
@@ -852,7 +875,7 @@ class Crsp3DNNTask(OD3D_Task):
             parts_trgt_euc_dist_mean_list      = []
             parts_trgt_geo_dist_mean_list      = []
             parts_trgt_geo_dist_norm_mean_list = []
-            parts_trgt_geo_dist_norm_raw_list  = []  # normalized, for AUC
+            parts_trgt_geo_dist_norm_raw_list  = []  # normalized, for PCK / AUC
             parts_trgt_pck_list                = []
 
             for b in range(B):
@@ -880,16 +903,21 @@ class Crsp3DNNTask(OD3D_Task):
                 pred_trgt_vert = feat_nn_batch(query_feats_b, b, query_idx)  # (Q,)
                 pred_trgt_pid  = trgt_pid_b[pred_trgt_vert]       # (Q,)
 
-                # PCK: pred target vert has same part label as query source vert
+                # part accuracy: pred target vert has same part label as query source vert
                 parts_trgt_pck_list.append((pred_trgt_pid == query_parts_b).float().mean())
 
-                # Euclidean GT: nearest correct-part target vert to pred (per unique part)
                 pred_pos     = trgt_verts[b].float()[pred_trgt_vert]  # (Q, 3)
                 trgt_verts_b = trgt_verts[b].float()                  # (V_trgt, 3)
                 trgt_mask_b  = trgt_verts_mask[b] if trgt_verts_mask is not None else None
+                trgt_mesh_b  = batch.trgt_meshes[b] if batch.trgt_meshes is not None else None
+                pred_np      = pred_trgt_vert.cpu().numpy()
 
-                euc_errors_t   = torch.full((query_idx.numel(),), float("nan"))
-                geo_gt_vert_t  = torch.full((query_idx.numel(),), -1, dtype=torch.long)
+                # Distance of the prediction to the nearest vertex of the query's GT group
+                # (DenseMatcher's matching distance): Euclidean, and geodesic as one
+                # multi-source propagation from the group. Queries whose group is absent
+                # from the target stay nan; inf = the group does not reach the prediction.
+                euc_errors_t = torch.full((query_idx.numel(),), float("nan"))
+                geo_errors_t = torch.full((query_idx.numel(),), float("nan"))
 
                 for part_p in query_parts_b.unique():
                     qi_mask = (query_parts_b == part_p)
@@ -900,56 +928,51 @@ class Crsp3DNNTask(OD3D_Task):
                     if correct_idx.numel() == 0:
                         continue
                     d = torch.cdist(pred_pos[qi_mask], trgt_verts_b[correct_idx])  # (Q_p, C)
-                    min_d, min_i = d.min(dim=1)
-                    euc_errors_t[qi_mask]  = min_d
-                    geo_gt_vert_t[qi_mask] = correct_idx[min_i]
+                    euc_errors_t[qi_mask] = d.min(dim=1).values.cpu()
+                    if trgt_mesh_b is not None:
+                        d_set = _geodesic_to_set(trgt_mesh_b, correct_idx.cpu().numpy())  # (V_trgt,)
+                        geo_errors_t[qi_mask] = torch.from_numpy(d_set[pred_np[qi_mask.cpu().numpy()]])
 
                 finite_euc = euc_errors_t[torch.isfinite(euc_errors_t)]
                 parts_trgt_euc_dist_mean_list.append(
                     finite_euc.mean() if finite_euc.numel() > 0 else torch.tensor(0.0)
                 )
 
-                # Geodesic: pred → euclidean-GT vert on target mesh, normalized by sqrt(surface area)
-                if batch.trgt_meshes is not None and batch.trgt_meshes[b] is not None:
-                    valid_geo = (geo_gt_vert_t >= 0).nonzero(as_tuple=True)[0]
-                    if valid_geo.numel() > 0:
-                        geo_np = _geodesic_pairwise(
-                            batch.trgt_meshes[b],
-                            pred_trgt_vert[valid_geo].cpu().numpy(),
-                            geo_gt_vert_t[valid_geo].cpu().numpy(),
-                        )
-                        sqrt_area  = _mesh_sqrt_area(batch.trgt_meshes[b])
-                        geo_raw    = torch.from_numpy(geo_np)
-                        geo_norm   = geo_raw / sqrt_area
-                        finite_geo      = geo_raw [torch.isfinite(geo_raw)]
-                        finite_geo_norm = geo_norm[torch.isfinite(geo_norm)]
-                        parts_trgt_geo_dist_mean_list.append(
-                            finite_geo.mean() if finite_geo.numel() > 0 else torch.tensor(float("nan"))
-                        )
-                        parts_trgt_geo_dist_norm_mean_list.append(
-                            finite_geo_norm.mean() if finite_geo_norm.numel() > 0 else torch.tensor(float("nan"))
-                        )
-                        parts_trgt_geo_dist_norm_raw_list.append(
-                            finite_geo_norm if finite_geo_norm.numel() > 0 else None
-                        )
-                        continue
-                parts_trgt_geo_dist_mean_list.append(torch.tensor(float("nan")))
-                parts_trgt_geo_dist_norm_mean_list.append(torch.tensor(float("nan")))
-                parts_trgt_geo_dist_norm_raw_list.append(None)
+                has_geo = ~torch.isnan(geo_errors_t)
+                if trgt_mesh_b is None or not has_geo.any():
+                    parts_trgt_geo_dist_mean_list.append(torch.tensor(float("nan")))
+                    parts_trgt_geo_dist_norm_mean_list.append(torch.tensor(float("nan")))
+                    parts_trgt_geo_dist_norm_raw_list.append(None)
+                    continue
+                geo_raw  = geo_errors_t[has_geo]
+                geo_norm = geo_raw / _mesh_sqrt_area(trgt_mesh_b)
+                reached  = torch.isfinite(geo_raw)
+                parts_trgt_geo_dist_mean_list.append(
+                    geo_raw[reached].mean() if reached.any() else torch.tensor(float("nan"))
+                )
+                parts_trgt_geo_dist_norm_mean_list.append(
+                    geo_norm[reached].mean() if reached.any() else torch.tensor(float("nan"))
+                )
+                parts_trgt_geo_dist_norm_raw_list.append(geo_norm)  # inf kept: a miss below
 
-            # AUC: integrate PCK over normalized geodesic thresholds [0, 0.1]
-            thresholds_parts = torch.linspace(0, 0.1, 1000)
-            parts_trgt_geo_auc01_list = [
-                (geo_norm_raw.unsqueeze(0) < thresholds_parts.unsqueeze(1)).float().mean(dim=1).mean()
-                if geo_norm_raw is not None else torch.tensor(float("nan"))
-                for geo_norm_raw in parts_trgt_geo_dist_norm_raw_list
-            ]
+            # PCK / AUC over normalized geodesic thresholds, as DenseMatcher's
+            # threshold-accuracy curve: a prediction inside the GT group has error 0,
+            # so the curve starts at the part accuracy.
+            thresholds_parts = torch.linspace(0, 0.1, 1001)
+
+            def _parts_geo(fn):
+                return torch.stack([
+                    fn(g) if g is not None else torch.tensor(float("nan"))
+                    for g in parts_trgt_geo_dist_norm_raw_list
+                ]).to(dev)
 
             quant_parts = dict(
                 parts_trgt_euc_dist_mean      = torch.stack(parts_trgt_euc_dist_mean_list).to(dev),
                 parts_trgt_geo_dist_mean      = torch.stack(parts_trgt_geo_dist_mean_list).to(dev),
                 parts_trgt_geo_dist_norm_mean = torch.stack(parts_trgt_geo_dist_norm_mean_list).to(dev),
-                parts_trgt_geo_auc01            = torch.stack(parts_trgt_geo_auc01_list).to(dev),
+                parts_trgt_geo_auc01          = _parts_geo(lambda g: (g.unsqueeze(0) <= thresholds_parts.unsqueeze(1)).float().mean()),
+                parts_trgt_geo_pck005         = _parts_geo(lambda g: (g <= 0.05).float().mean()),
+                parts_trgt_geo_pck01          = _parts_geo(lambda g: (g <= 0.1).float().mean()),
                 parts_trgt_pck                = torch.stack(parts_trgt_pck_list).to(dev),
             )
 
