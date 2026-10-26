@@ -889,11 +889,13 @@ if _is_true "${INSTALL_F2G}"; then
     [ -f "${F2G_DIR}/weights/radio-v2.5-l_half.pth.tar" ] || python "${F2G_DIR}/scripts/download_weights.py" \
         --url 'https://huggingface.co/nvidia/RADIO/resolve/main/radio-v2.5-l_half.pth.tar?download=true' \
         --sha256 50324e8cb086885126a896ad9ecbac46355cf0e4c1d8363763b01693a4618ff1 \
-        --output "${F2G_DIR}/weights/radio-v2.5-l_half.pth.tar"
+        --output "${F2G_DIR}/weights/radio-v2.5-l_half.pth.tar" \
+        || echo "WARNING: no internet for python here -- copy weights/radio-v2.5-l_half.pth.tar into ${F2G_DIR} by hand."
     [ -f "${F2G_DIR}/weights/f2g-pose.pt" ] || python "${F2G_DIR}/scripts/download_weights.py" \
         --url 'https://huggingface.co/J3rr1/F2G-Pose/resolve/main/f2g-pose.pt?download=true' \
         --sha256 bff06bd58a42fd805d8232f9ab7b4612b8eb833edf6b6cccd23e5040a8c9ca18 \
-        --output "${F2G_DIR}/weights/f2g-pose.pt"
+        --output "${F2G_DIR}/weights/f2g-pose.pt" \
+        || echo "WARNING: no internet for python here -- copy weights/f2g-pose.pt into ${F2G_DIR} by hand."
     python -c "import f2g_pose, pointnet2_ops, cutoop" \
         && echo "--- F2G-Pose deps import OK ---" \
         || echo "WARNING: F2G-Pose's dependencies do not all import -- F2GPoseMethod will fail."
