@@ -517,6 +517,37 @@ def _fgw_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_ve
     return Z.argmax(dim=1)
 
 
+def _fmap_prep(v, f, feats, trimesh_cls, extent: float = 1.0):
+    """Weld a cached remesh, keep its largest connected piece, centre it on its
+    bbox and scale its largest side to ``extent``; average the features per
+    welded vertex. Returns (trimesh_cls mesh, feats on it, inv, rep, main, sub):
+    original vertex -> welded id (inv), welded id -> an original vertex (rep),
+    the welded ids of the piece (main) and welded id -> piece id or -1 (sub)."""
+    import numpy as np
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+
+    from o3b.data.datatypes.mesh import mean_by_index, weld_mesh
+
+    v = v.detach().double().cpu().numpy()
+    f = f.detach().long().cpu().numpy()
+    vw, fw, inv, rep = weld_mesh(v, f)
+    fw = fw[(fw[:, 0] != fw[:, 1]) & (fw[:, 1] != fw[:, 2]) & (fw[:, 0] != fw[:, 2])]
+    n = len(vw)
+    adj = sp.coo_matrix((np.ones(3 * len(fw)), (fw.ravel(), np.roll(fw, 1, axis=1).ravel())), shape=(n, n))
+    _, lab = connected_components(adj, directed=False)
+    main = np.flatnonzero(lab == np.bincount(lab).argmax())          # welded ids of the largest piece
+    sub = np.full(n, -1)
+    sub[main] = np.arange(len(main))
+    fm = sub[fw]
+    fm = fm[(fm >= 0).all(1)]
+    vm = vw[main]
+    lo, hi = vm.min(0), vm.max(0)
+    vm = extent * (vm - 0.5 * (lo + hi)) / max((hi - lo).max(), 1e-12)
+    fmain = mean_by_index(feats.detach().double().cpu().numpy(), inv, n)[main]
+    return trimesh_cls(vm, fm), fmain, inv, rep, main, sub
+
+
 def _fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_verts: Tensor,
                 src_faces: Tensor, trgt_faces: Tensor, *, k: int = 50, w_descr: float = 1.0,
                 w_lap: float = 1e-2, w_dcomm: float = 1e-1, w_orient: float = 0.0,
@@ -540,34 +571,11 @@ def _fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_v
     as the old code meant to. Returns (V_src,) target vertex indices.
     """
     import numpy as np
-    import scipy.sparse as sp
-    from scipy.sparse.csgraph import connected_components
     from pyFM.functional import FunctionalMapping
     from pyFM.mesh import TriMesh
 
-    from o3b.data.datatypes.mesh import mean_by_index, weld_mesh
-
-    def prep(v, f, feats):
-        v = v.detach().double().cpu().numpy()
-        f = f.detach().long().cpu().numpy()
-        vw, fw, inv, rep = weld_mesh(v, f)
-        fw = fw[(fw[:, 0] != fw[:, 1]) & (fw[:, 1] != fw[:, 2]) & (fw[:, 0] != fw[:, 2])]
-        n = len(vw)
-        adj = sp.coo_matrix((np.ones(3 * len(fw)), (fw.ravel(), np.roll(fw, 1, axis=1).ravel())), shape=(n, n))
-        _, lab = connected_components(adj, directed=False)
-        main = np.flatnonzero(lab == np.bincount(lab).argmax())          # welded ids of the largest piece
-        sub = np.full(n, -1)
-        sub[main] = np.arange(len(main))
-        fm = sub[fw]
-        fm = fm[(fm >= 0).all(1)]
-        vm = vw[main]
-        lo, hi = vm.min(0), vm.max(0)
-        vm = (vm - 0.5 * (lo + hi)) / max((hi - lo).max(), 1e-12)
-        fmain = mean_by_index(feats.detach().double().cpu().numpy(), inv, n)[main]
-        return TriMesh(vm, fm), fmain, inv, rep, main, sub
-
-    m1, d1, _, rep_t, main_t, _ = prep(trgt_verts, trgt_faces, trgt_feats)
-    m2, d2, inv_s, _, _, sub_s = prep(src_verts, src_faces, src_feats)
+    m1, d1, _, rep_t, main_t, _ = _fmap_prep(trgt_verts, trgt_faces, trgt_feats, TriMesh)
+    m2, d2, inv_s, _, _, sub_s = _fmap_prep(src_verts, src_faces, src_feats, TriMesh)
     model = FunctionalMapping(m1, m2)
     model.preprocess(descr_type=None, k_process=k + zoomout * zoomout_step)
     model.add_descriptors(d1, d2, normalize=True)
@@ -580,6 +588,58 @@ def _fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_v
     trgt_orig = rep_t[main_t[p2p]]                      # -> an original target vertex
 
     pred = torch.cdist(src_feats.float(), trgt_feats.float()).argmin(dim=1).cpu().numpy()  # fallback
+    on_main = sub_s[inv_s] >= 0
+    pred[on_main] = trgt_orig[sub_s[inv_s[on_main]]]
+    return torch.as_tensor(pred, dtype=torch.long, device=src_feats.device)
+
+
+# DenseMatcher's example.ipynb settings for compute_surface_map
+_DM_FMAP_FIT = dict(w_descr=1e4, w_lap=1e3, w_dcomm=0.0, w_orient=0, w_area=0, w_conformal=0.0, w_p2p=0,
+                    w_stochastic=0, w_ent=1e-1, w_range01=0, w_sumto1=1e1, optinit="zeros", maxiter=5000)
+
+
+def _dm_fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_verts: Tensor,
+                   src_faces: Tensor, trgt_faces: Tensor, *, n_ev: int = 15, fit: Optional[dict] = None) -> Tensor:
+    """DenseMatcher's functional-map pipeline (``compute_surface_map`` in
+    densematcher/functional_map.py, TEA-Lab/DenseMatcher fc3a2e3), on its own
+    modified pyFM: ``n_ev`` = 15 eigenfunctions per mesh, the features as
+    "neural" descriptors, the fit weights of its example notebook
+    (``_DM_FMAP_FIT``, L-BFGS-B), and the source -> target map read off the
+    soft map, ``(mapped_indicator * eta).argmax(axis=0)`` (its ``p2p_12``; the
+    ICP / Hungarian extras are not used). Meshes are welded and cut to the
+    largest piece as in ``_fmap_match``, and centred with the largest side
+    0.3, as DenseMatcher normalises its assets.
+
+    Needs a clone of the repo: ``$O3B_DENSEMATCHER_ROOT``, default
+    ``third_party/DenseMatcher`` next to o3b in the superproject
+    (``git clone https://github.com/TEA-Lab/DenseMatcher.git``). Returns
+    (V_src,) target vertex indices."""
+    import os
+    import sys
+    from pathlib import Path
+
+    import numpy as np
+
+    root = Path(os.environ.get("O3B_DENSEMATCHER_ROOT", Path(__file__).resolve().parents[5] / "DenseMatcher"))
+    if not (root / "densematcher" / "pyFM").is_dir():
+        raise FileNotFoundError(f"matching 'dm_fmap' needs a TEA-Lab/DenseMatcher clone at {root} "
+                                f"(or set O3B_DENSEMATCHER_ROOT)")
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from densematcher.pyFM.functional import FunctionalMapping
+    from densematcher.pyFM.mesh import TriMesh
+
+    m1, d1, inv_s, _, _, sub_s = _fmap_prep(src_verts, src_faces, src_feats, TriMesh, extent=0.3)
+    m2, d2, _, rep_t, main_t, _ = _fmap_prep(trgt_verts, trgt_faces, trgt_feats, TriMesh, extent=0.3)
+    model = FunctionalMapping(m1, m2, partial=False, optimizer="L-BFGS-B")
+    model.preprocess(n_ev=(n_ev, n_ev), n_descr=d1.shape[1], landmarks=None, descr1=d1, descr2=d2,
+                     subsample_step=1)
+    model.fit(**{**_DM_FMAP_FIT, **(fit or {})})
+    model.get_p2p(n_jobs=1)                                               # sets mapped_indicator (n2, n1)
+    p2p_12 = (model.mapped_indicator * model.eta[..., None]).argmax(axis=0)  # (n_src_main,) target piece ids
+    trgt_orig = rep_t[main_t[p2p_12]]
+
+    pred = torch.cdist(src_feats.float(), trgt_feats.float()).argmin(dim=1).cpu().numpy()  # off-piece fallback
     on_main = sub_s[inv_s] >= 0
     pred[on_main] = trgt_orig[sub_s[inv_s[on_main]]]
     return torch.as_tensor(pred, dtype=torch.long, device=src_feats.device)
@@ -606,7 +666,7 @@ class Crsp3DNNTask(OD3D_Task):
 
     FEAT_DISTS = ("euclidean", "view_mean", "mean_of_min", "min_of_min")
 
-    MATCHINGS = ("nn", "uot", "fgw", "fmap")
+    MATCHINGS = ("nn", "uot", "fgw", "fmap", "dm_fmap")
 
     def __init__(self, feat_dist: str = "euclidean", feat_view_dim: Optional[int] = None,
                  feat_views: Optional[int] = None, matching: str = "nn", fgw: Optional[dict] = None,
@@ -638,12 +698,16 @@ class Crsp3DNNTask(OD3D_Task):
         fmap         functional map with the features as descriptors
                      (``_fmap_match``, the old DenseMatcher recipe; needs the
                      meshes' faces, i.e. the ``mesh`` modality).
+        dm_fmap      DenseMatcher's released functional-map pipeline on its
+                     own pyFM (``_dm_fmap_match``; needs a DenseMatcher clone
+                     and the meshes' faces).
 
         ``uot`` / ``fgw`` solve one plan per pair over all vertices, so they need
         ``feat_dist: euclidean``; ``fgw`` takes ``_fgw_match``'s keyword
         arguments (alpha, n_anchors, rounds, iters, rho, anchor_q, temp,
         normalize_scale), ``fmap`` ``_fmap_match``'s (k, w_descr, w_lap,
-        w_dcomm, w_orient, zoomout, zoomout_step).
+        w_dcomm, w_orient, zoomout, zoomout_step), ``dm_fmap`` the same
+        ``fmap`` dict with ``_dm_fmap_match``'s (n_ev, fit).
         """
         if feat_dist not in self.FEAT_DISTS:
             raise ValueError(f"feat_dist {feat_dist!r} not in {self.FEAT_DISTS}")
@@ -725,16 +789,16 @@ class Crsp3DNNTask(OD3D_Task):
                     tm = trgt_verts_mask[b] if trgt_verts_mask is not None else \
                         torch.ones(trgt_feats.shape[1], dtype=torch.bool, device=dev)
                     s_idx, t_idx = sm.nonzero(as_tuple=True)[0], tm.nonzero(as_tuple=True)[0]
-                    if self.matching == "fmap":
+                    if self.matching in ("fmap", "dm_fmap"):
                         if batch.src_meshes is None or batch.trgt_meshes is None:
-                            raise ValueError("matching 'fmap' needs the meshes (object modality 'mesh')")
+                            raise ValueError(f"matching {self.matching!r} needs the meshes (object modality 'mesh')")
                         sf, tf = batch.src_meshes[b].faces, batch.trgt_meshes[b].faces
                         # faces index the mesh's own vertices, i.e. the unpadded prefix
                         if not (torch.equal(s_idx.cpu(), torch.arange(len(s_idx)))
                                 and torch.equal(t_idx.cpu(), torch.arange(len(t_idx)))
                                 and int(sf.max()) < len(s_idx) and int(tf.max()) < len(t_idx)):
-                            raise ValueError("matching 'fmap': mesh faces do not index the unpadded vertices")
-                        pred = _fmap_match(src_feats[b, s_idx], trgt_feats[b, t_idx],
+                            raise ValueError(f"matching {self.matching!r}: mesh faces do not index the unpadded vertices")
+                        pred = (_fmap_match if self.matching == "fmap" else _dm_fmap_match)(src_feats[b, s_idx], trgt_feats[b, t_idx],
                                            src_verts[b, s_idx], trgt_verts[b, t_idx], sf, tf, **self.fmap)
                     else:
                         pred = _fgw_match(src_feats[b, s_idx], trgt_feats[b, t_idx],
