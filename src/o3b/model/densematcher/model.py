@@ -98,6 +98,24 @@ def _visualize_features(pt3d_mesh, mv_features, out_norm, cameras, viz_dir, *, o
 
 
 @register_model("DenseMatcher")
+def diff3f_cameras(mesh, num_views: int = 100, device=None):
+    """Diff3F's camera grid (o3b/model/diff3f/diff3f/render.py) for a pytorch3d mesh: sqrt(N) azimuths x
+    sqrt(N) elevations, both over [0, 360) (elevation wraps over the poles), at 0.65 x the bbox diagonal,
+    looking at the bbox centre. Returns DenseMatcher's camera format [R, T]."""
+    import math
+    from pytorch3d.renderer.cameras import look_at_view_transform
+    bbox = mesh.get_bounding_boxes()
+    bmin, bmax = bbox.min(dim=-1).values[0], bbox.max(dim=-1).values[0]
+    distance = torch.sqrt(((bmax - bmin) ** 2).sum()) * 0.65
+    steps = int(math.sqrt(num_views))
+    end = 360 - 360 / steps
+    elevation = torch.linspace(0, end, steps).repeat(steps)
+    azimuth = torch.repeat_interleave(torch.linspace(0, end, steps), steps)
+    R, T = look_at_view_transform(dist=distance, azim=azimuth, elev=elevation, device=device,
+                                  at=((bmin + bmax) / 2).unsqueeze(0))
+    return [R, T]
+
+
 class DenseMatcherModel(OD3D_Model):
     """Per-vertex feature extractor using the full DenseMatcher pipeline.
 
@@ -116,6 +134,11 @@ class DenseMatcherModel(OD3D_Model):
     welded duplicates (mean_by_index), the whole pipeline then runs on the
     welded mesh, and the output features are broadcast back to full
     resolution via the weld index map.
+
+    camera_layout: "densematcher" (default) renders num_views_azimuth x
+    num_views_elevation + 2 poles, as DenseMatcher was trained; "diff3f" renders
+    Diff3F's num_views_diff3f-view grid instead (diff3f_cameras), at
+    DenseMatcher's own image size.
 
     mesh_flip: if true, face winding is flipped before extraction — useful to
     correct/ablate vertex-normal orientation (and thus DiffusionNet operator
@@ -136,6 +159,8 @@ class DenseMatcherModel(OD3D_Model):
         freeze: bool = True,
         mesh_weld: bool = False,
         mesh_flip: bool = False,
+        camera_layout: str = "densematcher",
+        num_views_diff3f: int = 100,
     ):
         super().__init__()
         self.pretrained_upsampler_path = pretrained_upsampler_path
@@ -149,6 +174,10 @@ class DenseMatcherModel(OD3D_Model):
         self.freeze = freeze
         self.mesh_weld = mesh_weld
         self.mesh_flip = mesh_flip
+        if camera_layout not in ("densematcher", "diff3f"):
+            raise ValueError(f"camera_layout must be 'densematcher' or 'diff3f', got {camera_layout!r}")
+        self.camera_layout = camera_layout
+        self.num_views_diff3f = num_views_diff3f
         # out_dim: 768 (raw SDDINO mv_features) or width (DiffusionNet output)
         self.out_dim = 768 if use_mv_features else width
         self._mesh_featurizer = None
@@ -270,6 +299,8 @@ class DenseMatcherModel(OD3D_Model):
             device=device,
         )
         cameras = [Rs, ts]
+        if self.camera_layout == "diff3f":
+            cameras = diff3f_cameras(pt3d_mesh, self.num_views_diff3f, device=device)
 
         with torch.autocast("cuda"):
             with torch.no_grad():
