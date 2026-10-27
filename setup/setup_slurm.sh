@@ -693,13 +693,31 @@ if [ "${INSTALL_TRINITY}" = "true" ] || [ "${INSTALL_TRINITY}" = "True" ]; then
     # on, so on aarch64 (JUPITER) neither install can succeed -- hence the
     # second one is best-effort too, rather than killing the whole setup.
     # LitePT then stays unavailable there; use trinity/pcl_encoder/pointnet.yaml.
-    if ! pip install "spconv-${CUDA_TAG}"; then
+    #
+    # Unless spconv was built from source into the env already, which works on
+    # JUPITER (cumm v0.7.11 + spconv v2.3.8, 26-10-27). It has to run on a
+    # compute node: the login nodes kill long compiles, and they have no CUDA
+    # driver to test against. With the venv active, CUDA_HOME from the Lmod
+    # module, TORCH_CUDA_ARCH_LIST=CUMM_CUDA_ARCH_LIST=9.0 and the two tags
+    # cloned on the login node:
+    #   cumm:   sed -i 's|Path("/usr/local/cuda")|Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))|'
+    #           cumm/common.py   (+ `import os`; cumm only looks under targets/x86_64-linux
+    #           or /usr/local/cuda), then CUMM_DISABLE_JIT=1 pip install --no-build-isolation .
+    #   spconv: CUMM_INCLUDE_PATH=<cumm clone>/include SPCONV_DISABLE_JIT=1
+    #           pip install --no-build-isolation .   (the installed cumm ships no tensorview headers)
+    # flash-attn 2.7.4.post1 builds the same way from its sdist (FLASH_ATTENTION_FORCE_BUILD=TRUE).
+    if python -c "import spconv.pytorch" >/dev/null 2>&1; then
+        echo "--- spconv already importable, kept ---"
+    elif ! pip install "spconv-${CUDA_TAG}"; then
         echo "WARNING: no spconv-${CUDA_TAG} wheel for $(uname -m); trying CPU-only spconv."
-        pip install spconv || echo "WARNING: no spconv at all for $(uname -m) -- LitePT will be unavailable."
+        pip install spconv || echo "WARNING: no spconv at all for $(uname -m) -- LitePT will be unavailable (see above for the source build)."
     fi
 
-    # pre-built wheel matching the torch+cuda combo, e.g. torch-2.6.0+cu124
-    pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html"
+    # pre-built wheel matching the torch+cuda combo, e.g. torch-2.6.0+cu124.
+    # PyG publishes none for aarch64: there the sdist is built against the env's
+    # torch, which needs --no-build-isolation (isolated, the build sees no torch).
+    pip install torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html" \
+        || pip install --no-build-isolation torch-scatter
 
     # LitePT's attention blocks (enc_attn) call flash_attn at forward time, on
     # an import inside the function — so a missing flash-attn is a crash mid
