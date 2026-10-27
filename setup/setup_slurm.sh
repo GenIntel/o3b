@@ -573,6 +573,21 @@ if [ "${INSTALL_MORPHEUS}" = "true" ] || [ "${INSTALL_MORPHEUS}" = "True" ]; the
     _install_pytorch3d_checked
     # The complete GenPose2 setup is handled by the INSTALL_GENPOSE2 block
     # below (forced on by INSTALL_MORPHEUS).
+    # MorpheusMethod lives in the housecorr3d package. In any other superproject
+    # (Every9Dv2, H02's category-agnostic Morpheus) clone it, gitignored, and
+    # install it --no-deps on top of this o3b: its o3b.methods entry points then
+    # register MorpheusMethod here.
+    if ! python -c "import housecorr3d" >/dev/null 2>&1; then
+        HC3D_DIR="${HC3D_DIR:-third_party/housecorr3d}"
+        HC3D_COMMIT="${HC3D_COMMIT:-5d0f12f}"
+        if [ ! -d "${HC3D_DIR}/.git" ]; then
+            echo "--- git clone HouseCorr3D (MorpheusMethod) ---"
+            _git_retry git clone https://github.com/GenIntel/HouseCorr3D.git "${HC3D_DIR}"
+        fi
+        _git_retry git -C "${HC3D_DIR}" fetch --quiet origin || true
+        git -C "${HC3D_DIR}" checkout --quiet "${HC3D_COMMIT}"
+        pip install --no-deps -e "${HC3D_DIR}"
+    fi
 fi
 
 
