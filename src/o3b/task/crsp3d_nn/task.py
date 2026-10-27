@@ -659,15 +659,24 @@ _DM_FMAP_FIT = dict(w_descr=1e4, w_lap=1e3, w_dcomm=0.0, w_orient=0, w_area=0, w
                     w_stochastic=0, w_ent=1e-1, w_range01=0, w_sumto1=1e1, optinit="zeros", maxiter=5000)
 
 
+DM_FMAP_OUTS = ("p2p", "icp", "hungarian", "hungarian_icp")
+
+
 def _dm_fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trgt_verts: Tensor,
-                   src_faces: Tensor, trgt_faces: Tensor, *, n_ev: int = 15, fit: Optional[dict] = None) -> Tensor:
+                   src_faces: Tensor, trgt_faces: Tensor, *, n_ev: int = 15, fit: Optional[dict] = None,
+                   out: str = "p2p") -> Tensor:
     """DenseMatcher's functional-map pipeline (``compute_surface_map`` in
     densematcher/functional_map.py, TEA-Lab/DenseMatcher fc3a2e3), on its own
     modified pyFM: ``n_ev`` = 15 eigenfunctions per mesh, the features as
     "neural" descriptors, the fit weights of its example notebook
     (``_DM_FMAP_FIT``, L-BFGS-B), and the source -> target map read off the
-    soft map, ``(mapped_indicator * eta).argmax(axis=0)`` (its ``p2p_12``; the
-    ICP / Hungarian extras are not used). Meshes are welded and cut to the
+    soft map, ``(mapped_indicator * eta).argmax(axis=0)`` (its ``p2p_12``).
+
+    ``out`` picks which of ``compute_surface_map``'s maps is scored (the notebook's cell 12 shows ten; its default
+    is the Hungarian one): "p2p" the plain map above (notebook method 2), "icp" the same after ``icp_refine``
+    (method 3), "hungarian" / "hungarian_icp" the one-to-one assignment ``linear_sum_assignment(mapped_indicator *
+    eta - 1000 * (1 - eta), maximize=True)`` on the plain / ICP-refined soft map (methods 5 / 4). The assignment
+    covers min(n_src, n_trgt) vertices; a source vertex it leaves out takes the matching plain / ICP map. Meshes are welded and cut to the
     largest piece as in ``_fmap_match``, and centred with the largest side
     0.3, as DenseMatcher normalises its assets.
 
@@ -696,8 +705,19 @@ def _dm_fmap_match(src_feats: Tensor, trgt_feats: Tensor, src_verts: Tensor, trg
     model.preprocess(n_ev=(n_ev, n_ev), n_descr=d1.shape[1], landmarks=None, descr1=d1, descr2=d2,
                      subsample_step=1)
     model.fit(**{**_DM_FMAP_FIT, **(fit or {})})
+    if out not in DM_FMAP_OUTS:
+        raise ValueError(f"dm_fmap out {out!r} not in {DM_FMAP_OUTS}")
     model.get_p2p(n_jobs=1)                                               # sets mapped_indicator (n2, n1)
-    p2p_12 = (model.mapped_indicator * model.eta[..., None]).argmax(axis=0)  # (n_src_main,) target piece ids
+    if out in ("icp", "hungarian_icp"):
+        model.icp_refine()
+        model.get_p2p(n_jobs=1)
+    soft = model.mapped_indicator * model.eta[..., None]
+    p2p_12 = soft.argmax(axis=0)                                          # (n_src_main,) target piece ids
+    if out.startswith("hungarian"):
+        from scipy.optimize import linear_sum_assignment
+        t_ids, s_ids = linear_sum_assignment(soft - 1000 * (1 - model.eta[..., None]), maximize=True)
+        p2p_12 = p2p_12.copy()
+        p2p_12[s_ids] = t_ids
     trgt_orig = rep_t[main_t[p2p_12]]
 
     pred = torch.cdist(src_feats.float(), trgt_feats.float()).argmin(dim=1).cpu().numpy()  # off-piece fallback
@@ -773,7 +793,7 @@ class Crsp3DNNTask(OD3D_Task):
         arguments (alpha, n_anchors, rounds, iters, rho, anchor_q, temp,
         normalize_scale), ``fmap`` ``_fmap_match``'s (k, w_descr, w_lap,
         w_dcomm, w_orient, zoomout, zoomout_step), ``dm_fmap`` the same
-        ``fmap`` dict with ``_dm_fmap_match``'s (n_ev, fit).
+        ``fmap`` dict with ``_dm_fmap_match``'s (n_ev, fit, out).
         """
         if feat_dist not in self.FEAT_DISTS:
             raise ValueError(f"feat_dist {feat_dist!r} not in {self.FEAT_DISTS}")
