@@ -1,0 +1,8 @@
+class_name: Diff3F
+prompt: "a photo of an object"
+use_normal_map: true   # as Diff3F's test_correspondence.ipynb (depth + normal ControlNet)
+num_images_per_prompt: 1
+num_views: 100
+resolution: 512
+tolerance: 0.004
+freeze: true
