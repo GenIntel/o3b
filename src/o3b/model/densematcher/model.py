@@ -103,6 +103,7 @@ def diff3f_cameras(mesh, num_views: int = 100, device=None):
     looking at the bbox centre. Returns DenseMatcher's camera format [R, T]."""
     import math
     from pytorch3d.renderer.cameras import look_at_view_transform
+    device = device if device is not None else mesh.device
     bbox = mesh.get_bounding_boxes()
     bmin, bmax = bbox.min(dim=-1).values[0], bbox.max(dim=-1).values[0]
     distance = torch.sqrt(((bmax - bmin) ** 2).sum()) * 0.65
