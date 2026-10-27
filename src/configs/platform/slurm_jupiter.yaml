@@ -131,6 +131,10 @@ pull_submodules: True
 
 setup: False
 restart_upon_fail: False   # JSC accounting charges a requeued job again
+# The GPU-fault retry requeues the job too, and JSC's job_submit_filter rejects
+# every script carrying --requeue ("--requeue option is not supported"), so it
+# must be off here: the code default is on.
+resubmit_on_gpu_error: False
 
 deps:
   #- diff3f
