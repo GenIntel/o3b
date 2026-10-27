@@ -97,7 +97,6 @@ def _visualize_features(pt3d_mesh, mv_features, out_norm, cameras, viz_dir, *, o
         _render_and_save(_pca_mesh(out_norm),    "dm")
 
 
-@register_model("DenseMatcher")
 def diff3f_cameras(mesh, num_views: int = 100, device=None):
     """Diff3F's camera grid (o3b/model/diff3f/diff3f/render.py) for a pytorch3d mesh: sqrt(N) azimuths x
     sqrt(N) elevations, both over [0, 360) (elevation wraps over the poles), at 0.65 x the bbox diagonal,
@@ -116,6 +115,7 @@ def diff3f_cameras(mesh, num_views: int = 100, device=None):
     return [R, T]
 
 
+@register_model("DenseMatcher")
 class DenseMatcherModel(OD3D_Model):
     """Per-vertex feature extractor using the full DenseMatcher pipeline.
 
