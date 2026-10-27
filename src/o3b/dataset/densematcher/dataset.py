@@ -133,19 +133,26 @@ class DenseMatcher(ConfigurableDataset):
         if need_mesh or need_verts3d or need_verts3d_feats or need_tform or need_kpts or need_part_id:
             mesh_rel   = row.get("mesh_path")
             mesh_entry = self.path_raw / mesh_rel if mesh_rel else self.path_object_meshes / oid
+            # extra.mesh_file: build from another file of the object directory than the indexed one
+            # (e.g. color_mesh.obj, the full-resolution scan); its remeshes are cached under mesh_<stem>/
+            mesh_file = self.cfg.extra.get("mesh_file")
+            mesh_dir  = "mesh"
+            if mesh_file:
+                mesh_entry = mesh_entry.parent / mesh_file
+                mesh_dir   = f"mesh_{Path(mesh_file).stem}"
             mesh, tform = _load_mesh(mesh_entry)
 
             if (need_mesh or need_verts3d or need_verts3d_feats) and \
                     self.cfg.mesh_type != "default" and mesh is not None:
                 from o3b.data.datatypes.mesh import Mesh
-                converted_path = self.path_preprocess / "mesh" / self.cfg.mesh_type / f"{oid}.glb"
+                converted_path = self.path_preprocess / mesh_dir / self.cfg.mesh_type / f"{oid}.glb"
                 mesh = Mesh.load_or_convert(converted_path, mesh_entry, self.cfg.mesh_type)
 
         obj_verts_part_id = None
         if need_part_id and mesh is not None:
             mesh_rel = row.get("mesh_path")
             obj_dir  = (self.path_raw / mesh_rel).parent if mesh_rel else self.path_object_meshes / oid
-            if self.cfg.mesh_type == "default":
+            if self.cfg.mesh_type == "default" and not self.cfg.extra.get("mesh_file"):
                 # simple_mesh.obj is the loaded mesh — groups.txt indices apply directly
                 obj_verts_part_id = _load_groups_txt(obj_dir, n_verts=len(mesh.verts))
             else:
@@ -153,12 +160,18 @@ class DenseMatcher(ConfigurableDataset):
                 simple_file = obj_dir / "simple_mesh.obj"
                 if simple_file.exists():
                     from o3b.io import _load_mesh as _lm
-                    simple_mesh, _ = _lm(simple_file)
+                    simple_mesh, simple_tform = _lm(simple_file)
                     if simple_mesh is not None:
                         simple_part_id = _load_groups_txt(obj_dir, n_verts=len(simple_mesh.verts))
                         if simple_part_id is not None:
-                            nn = torch.cdist(mesh.verts.float().cpu(),
-                                             simple_mesh.verts.float().cpu()).argmin(dim=1)
+                            # each file is normalised by its own bbox: bring simple_mesh into the
+                            # source's frame (identity when the source is simple_mesh itself)
+                            simple_verts = simple_mesh.verts.float().cpu()
+                            if tform is not None and simple_tform is not None:
+                                s_s, c_s = simple_tform[0, 0], simple_tform[:3, 3]
+                                s, c = tform[0, 0], tform[:3, 3]
+                                simple_verts = (simple_verts * s_s + c_s - c) / s
+                            nn = torch.cdist(mesh.verts.float().cpu(), simple_verts).argmin(dim=1)
                             obj_verts_part_id = simple_part_id[nn]
 
         kpts3d, kpts3d_mask = None, None
