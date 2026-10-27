@@ -685,7 +685,8 @@ if [ "${INSTALL_TRINITY}" = "true" ] || [ "${INSTALL_TRINITY}" = "True" ]; then
     # logs a warning if any of them is missing, so a partial install here turns
     # into "Unknown model 'LitePT'" at run time rather than an error now.
     echo "--- pip install litept deps ---"
-    pip install addict timm colorhash
+    # torchmetrics: imported by the DINOv3 torch.hub code (trinity/backbone/dinov3_*.yaml)
+    pip install addict timm colorhash torchmetrics
 
     # spconv publishes one wheel per CUDA minor (spconv-cu124, -cu118, …); the
     # generic `spconv` package is CPU-only. Both are published for
