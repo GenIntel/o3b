@@ -593,6 +593,11 @@ def _fmap_prep(v, f, feats, trimesh_cls, extent: float = 1.0):
     adj = sp.coo_matrix((np.ones(3 * len(fw)), (fw.ravel(), np.roll(fw, 1, axis=1).ravel())), shape=(n, n))
     _, lab = connected_components(adj, directed=False)
     main = np.flatnonzero(lab == np.bincount(lab).argmax())          # welded ids of the largest piece
+    if len(main) < 0.9 * n:
+        # still in pieces after the weld (not UV seams: a truly fragmented mesh): the map only covers the largest
+        # piece; a query vertex elsewhere falls back to feature nearest neighbour
+        logger.warning("functional map: largest connected piece after welding holds %d / %d vertices (%d pieces)",
+                       len(main), n, lab.max() + 1)
     sub = np.full(n, -1)
     sub[main] = np.arange(len(main))
     fm = sub[fw]

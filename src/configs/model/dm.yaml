@@ -22,3 +22,7 @@ num_blocks: 8
 use_mv_features: false
 
 freeze: true
+
+# Unwelded on purpose: reproduces the runs on the UV-seam fragments (o3b < mesh_weld default true).
+# dmweld.yaml is the welded model.
+mesh_weld: false

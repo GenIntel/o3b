@@ -126,15 +126,17 @@ class DenseMatcherModel(OD3D_Model):
     forward(ObjectBatch) -> ObjectBatch with verts3d_feats (B, V, width) set.
     Requires the mesh to be present in the ObjectBatch.
 
-    mesh_weld: textured mc* meshes carry xatlas UV-seam vertex duplicates that
-    cut the surface into charts, which the DiffusionNet Laplacian sees as
-    boundary cuts. If true, the mesh is welded back to watertight
+    mesh_weld (default true): textured mc* meshes carry xatlas UV-seam vertex
+    duplicates that cut the surface into charts, which the DiffusionNet
+    Laplacian sees as boundary cuts (an mc32 mesh loads as ~1000 pieces;
+    unwelded features lose ~0.10 AUC on DenseCorr3D). If true, the mesh is welded back to watertight
     connectivity (the same weld the spectral/functional-map methods apply)
     before feature extraction: per-vertex colour is
     resolved (sampled from the texture atlas if needed) and averaged over
     welded duplicates (mean_by_index), the whole pipeline then runs on the
     welded mesh, and the output features are broadcast back to full
-    resolution via the weld index map.
+    resolution via the weld index map. False only to reproduce the old
+    fragment runs (configs/model/dm.yaml, dmmv.yaml).
 
     camera_layout: "densematcher" (default) renders num_views_azimuth x
     num_views_elevation + 2 poles, as DenseMatcher was trained; "diff3f" renders
@@ -158,7 +160,7 @@ class DenseMatcherModel(OD3D_Model):
         num_blocks: int = 8,
         use_mv_features: bool = False,
         freeze: bool = True,
-        mesh_weld: bool = False,
+        mesh_weld: bool = True,
         mesh_flip: bool = False,
         camera_layout: str = "densematcher",
         num_views_diff3f: int = 100,
