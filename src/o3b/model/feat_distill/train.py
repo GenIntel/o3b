@@ -301,8 +301,10 @@ def main() -> None:
             with torch.no_grad():
                 dx = (m["verts_dev"][i.to(dev)] - m["verts_dev"][j.to(dev)]).norm(dim=1) / m["size"]
                 near = dx < c
+            # no hinge branch at c = inf: where() would backpropagate 0 * inf = nan through it
+            hinge = args.geo_far == "hinge" and math.isfinite(c)
             geo = torch.where(near, (dg - m["geo_scale"] * dx).pow(2),
-                              (c - dg).clamp(min=0).pow(2) if args.geo_far == "hinge" else torch.zeros_like(dg))
+                              (c - dg).clamp(min=0).pow(2) if hinge else torch.zeros_like(dg))
             loss = loss + args.geo_weight * geo
         return loss
 
