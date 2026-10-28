@@ -43,6 +43,19 @@ the object's longest side spans 2): the coarse MLP and the fold MLP each emit
 3 more numbers per point. TrinityMethod supervises them on the Chamfer
 matching (camera-space nearest neighbours) — see ``_shape_metrics``. A side branch like ShapeMLP: ``feat`` is left alone, and it
 has to sit before PoseMLP.
+
+With ``mask_tokens: true`` (H07, needs ``point_feat_dim``) the decoder also
+carries training-only *masked tokens* built from GT surface points, which the
+method puts on ``frames_gt`` (``mask_pts3d_cam`` (B, K, 3) in camera space,
+``mask_feat`` (B, K, point_feat_dim)). The first half knows a point's XYZ and
+predicts its features (``mask_pred_ppf``); the second half knows the features
+and predicts the XYZ (``mask_pred_xyz``, normalised cloud frame, at the cloud
+origin for PointROPE). Targets go to ``mask_tgt_ppf`` / ``mask_tgt_xyz``. They
+run through the same layers next to the surface tokens, with a self-attention
+mask: surface tokens never see them (so their outputs equal a pass without
+them) and masked tokens never see each other; with ``mask_see_surface: true``
+they see the surface tokens and themselves, otherwise only themselves. Without
+``mask_pts3d_cam`` (evaluation) nothing changes.
 """
 
 import logging
@@ -80,6 +93,8 @@ class ShapeXAttn(OD3D_Model):
         point_feat_dim: int = 0,
         moe_experts: int = 0,
         moe_top_k: int = 2,
+        mask_tokens: bool = False,
+        mask_see_surface: bool = True,
     ):
         super().__init__()
         self.nocs = nocs
@@ -109,6 +124,16 @@ class ShapeXAttn(OD3D_Model):
             nn.init.zeros_(self.pose_out.weight)
             nn.init.zeros_(self.pose_out.bias)
 
+        self.mask_tokens = mask_tokens
+        self.mask_see_surface = mask_see_surface
+        if mask_tokens:
+            if not point_feat_dim:
+                raise ValueError("ShapeXAttn: mask_tokens needs point_feat_dim")
+            self.embed_mask_feat = _mlp([point_feat_dim, dim // 2, dim])
+            self.mask_type = nn.Parameter(torch.zeros(2, dim))   # 0: XYZ known, 1: features known
+            nn.init.normal_(self.mask_type, std=0.02)
+            self.mask_head = _mlp([dim, fold_hidden_dim, 3 + point_feat_dim])
+
         side = int(round(fold_count ** 0.5))
         if side * side != fold_count:
             raise ValueError(f"ShapeXAttn: fold_count must be a square, got {fold_count}")
@@ -137,9 +162,19 @@ class ShapeXAttn(OD3D_Model):
             q = torch.cat([self.embed_pose(feat)[:, None], q], dim=1)
             q_pos = torch.cat([q_pos.new_zeros(B, 1, 3), q_pos], dim=1)
         tok_pos = tok_coord / self.rope_unit
+        n_main, self_mask = q.shape[1], None
+        mask_pts = getattr(frames_gt, "mask_pts3d_cam", None) if self.mask_tokens else None
+        if mask_pts is not None:
+            q, q_pos, self_mask, mask_tgt = self._add_mask_tokens(frames_gt, frames_pred, feat, q, q_pos)
         for layer in self.layers:
-            q = layer(q, q_pos, tok, tok_pos, tok_mask)
-        q = self.norm_out(q)                                      # (B, [1 +] C, dim)
+            q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask=self_mask)
+        q = self.norm_out(q)                                      # (B, [1 +] C [+ K], dim)
+        if mask_pts is not None:
+            out = self.mask_head(q[:, n_main:])
+            k1 = mask_tgt[0].shape[1]
+            frames_pred.mask_pred_ppf, frames_pred.mask_tgt_ppf = out[:, :k1, 3:], mask_tgt[0]
+            frames_pred.mask_pred_xyz, frames_pred.mask_tgt_xyz = out[:, k1:, :3], mask_tgt[1]
+            q = q[:, :n_main]
         if self.pose_query:
             frames_pred.feat = feat + self.pose_out(q[:, 0])
             q = q[:, 1:]
@@ -160,3 +195,28 @@ class ShapeXAttn(OD3D_Model):
         frames_pred.pts3d_shape_fine = fine
         frames_pred.cam_tform4x4_pts3d_shape = frames_pred.obj_tform4x4_obj_nocs_0c
         return frames_gt, frames_pred
+
+    def _add_mask_tokens(self, frames_gt, frames_pred, feat, q, q_pos):
+        """Append the H07 masked tokens to the queries; returns the queries, their
+        positions, the self-attention mask and the (features, XYZ) targets."""
+        from o3b.cv.geometry.transform import inv_tform4x4, transf3d_broadcast
+        pts = frames_gt.mask_pts3d_cam.float()
+        ppf = frames_gt.mask_feat.float()
+        B, K = pts.shape[:2]
+        k1 = K // 2
+        # camera -> the normalised cloud frame the surface points live in
+        pts = transf3d_broadcast(pts3d=pts, transf4x4=inv_tform4x4(
+            frames_pred.obj_tform4x4_obj_nocs_0c.detach().float())[:, None])
+        glob = self.embed_glob(feat)[:, None]
+        m_xyz = self.embed_pt(pts[:, :k1]) + glob + self.mask_type[0]
+        m_ppf = self.embed_mask_feat(ppf[:, k1:]) + glob + self.mask_type[1]
+        m_pos = torch.cat([pts[:, :k1] / self.rope_unit, pts.new_zeros(B, K - k1, 3)], dim=1)
+
+        n, dev = q.shape[1], q.device
+        allow = torch.zeros(n + K, n + K, dtype=torch.bool, device=dev)
+        allow[:n, :n] = True                                  # main tokens: each other only
+        if self.mask_see_surface:
+            allow[n:, :n] = True                              # masked tokens: the main tokens ...
+        allow[n:, n:] = torch.eye(K, dtype=torch.bool, device=dev)   # ... and themselves
+        return (torch.cat([q, m_xyz, m_ppf], dim=1), torch.cat([q_pos, m_pos], dim=1),
+                allow, (ppf[:, :k1], pts[:, k1:]))
