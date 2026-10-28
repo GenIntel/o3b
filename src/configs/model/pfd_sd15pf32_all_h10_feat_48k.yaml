@@ -1,0 +1,12 @@
+# H04 ablation of PPF-32's objectives (= pfd_sd15pf32_all_h10_geo005_48k otherwise): feature distance preserving only (no geometry term): --geo-weight 0.
+# One field for all 50 HouseCorr3D categories: 10 non-keypoint training instances per category (500, heldout:10), PartField trunk, 4 meshes per step, cross-instance pairs, geometry term c = 0.05 with push apart, fc32 only, 32 dims, 48k steps, cosine floored at 10 %.
+# PartField-like field distilled to 32 dims from SD 1.5 + PartField (0.5 / 0.5, each L2-normalised), trained
+# to preserve the teacher's distances between vertex pairs of one instance (o3b/model/feat_distill/train.py),
+# on the 5 HouseCorr3D categories' test instances (bread, facial_cream, hair_dryer, handbag, tooth_brush),
+# fc16 + fc32. The checkpoint is written by the training job into the cluster checkout.
+class_name: PartPointField
+ckpt_path: "checkpoints/feat_distill/pfd_sd15pf32_all_h10_feat_48k.pth"
+out_dim: 32
+n_pc_points: 100000
+seed: 0
+freeze: true

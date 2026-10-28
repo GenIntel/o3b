@@ -107,10 +107,18 @@ def main() -> None:
     p.add_argument("--lr", type=float, default=1e-4, help="trunk (pretrained MeshFM)")
     p.add_argument("--lr-head", type=float, default=1e-3, help="the two new head layers")
     p.add_argument("--warmup", type=int, default=300)
+    p.add_argument("--feat-weight", type=float, default=1.0,
+                   help="weight of the teacher term (|g_i - g_j| - |f_i - f_j|)^2, within and across "
+                        "instances; 0 trains on the geometry term alone")
     p.add_argument("--geo-weight", type=float, default=0.0,
                    help="local geometry term on the within-instance pairs, d = |x_i - x_j| / S (S the "
                         "mesh's largest bbox side), c = --geo-clamp: (|g_i - g_j| - d)^2 for d < c; "
-                        "for d >= c only a push apart, max(0, c - |g_i - g_j|)^2 (--geo-far hinge)")
+                        "for d >= c only a push apart, max(0, c - |g_i - g_j|)^2 (--geo-far hinge). "
+                        "--geo-clamp inf makes it global: every pair, no hinge")
+    p.add_argument("--geo-scale", default="1",
+                   help="the geometry term's target is scale * d: a number, or 'auto' = per mesh, the mean "
+                        "teacher distance over the mean d of its held-out pairs, so that both terms ask "
+                        "for distances of the same scale")
     p.add_argument("--geo-far", choices=("hinge", "none"), default="hinge",
                    help="pairs beyond the clamp: 'hinge' pushes their features at least c apart, "
                         "'none' leaves them to the teacher term")
@@ -160,6 +168,15 @@ def main() -> None:
         g = torch.Generator().manual_seed(hash(m["oid"] + m["geom"]) % 2**31)
         V = len(m["verts"])
         m["eval_pairs"] = torch.randint(0, V, (2, 4096), generator=g)
+        if args.geo_scale == "auto":
+            i, j = m["eval_pairs"]
+            dx = (m["verts"][i] - m["verts"][j]).norm(dim=1) / m["size"]
+            m["geo_scale"] = float((m["feats"][i].float() - m["feats"][j].float()).norm(dim=1).mean().cpu() / dx.mean())
+        else:
+            m["geo_scale"] = float(args.geo_scale)
+    if args.geo_scale == "auto":
+        sc = torch.tensor([m["geo_scale"] for m in meshes])
+        print(f"geometry scale (auto): mean {sc.mean():.3f}, min {sc.min():.3f}, max {sc.max():.3f}", flush=True)
     groups = {}
     for k, m in enumerate(meshes):
         groups.setdefault((m["category"], m["geom"]), []).append(k)
@@ -268,7 +285,7 @@ def main() -> None:
         dg = (ga - gb).pow(2).sum(dim=1).add(1e-12).sqrt()
         with torch.no_grad():
             df = (fa - fb).norm(dim=1)
-        return (dg - df).pow(2)
+        return args.feat_weight * (dg - df).pow(2)
 
     def within(m, planes, n):
         i, j = torch.randint(0, len(m["verts"]), (2, n))
@@ -278,12 +295,13 @@ def main() -> None:
             # local geometry on the same pairs: closer than the clamp c, the feature
             # distance should equal the 3-D distance in units of the mesh size;
             # beyond it, features closer than c are only pushed apart to c
+            # (c = inf: every pair, target scale * d; see --geo-scale)
             c = args.geo_clamp
             dg = (g[:n] - g[n:]).pow(2).sum(dim=1).add(1e-12).sqrt()
             with torch.no_grad():
                 dx = (m["verts_dev"][i.to(dev)] - m["verts_dev"][j.to(dev)]).norm(dim=1) / m["size"]
                 near = dx < c
-            geo = torch.where(near, (dg - dx).pow(2),
+            geo = torch.where(near, (dg - m["geo_scale"] * dx).pow(2),
                               (c - dg).clamp(min=0).pow(2) if args.geo_far == "hinge" else torch.zeros_like(dg))
             loss = loss + args.geo_weight * geo
         return loss
