@@ -3358,7 +3358,7 @@ def _run_bench_wbsync(args) -> None:
     # remote ~/.netrc, so exporting it here is only a fallback
     api_key = _credential(cfg, "wandb.api_key")
 
-    sync_args = ["--sync-all"]
+    sync_args = []
     if args.entity:
         sync_args += ["--entity", args.entity]
     if args.project:
@@ -3400,7 +3400,11 @@ def _run_bench_wbsync(args) -> None:
             # below the cwd, so stand in the *parent*. Standing in wandb_dir
             # itself makes it search wandb/wandb and report "No runs to sync".
             f"cd $(dirname {wandb_dir})",
-            f"wandb sync {' '.join(sync_args)}",
+            # newer wandb dropped --sync-all: a bare `wandb sync` syncs everything
+            # and --yes skips its confirmation prompt; older ones need --sync-all
+            "if wandb sync --help 2>/dev/null | grep -q -- --sync-all; "
+            f"then wandb sync --sync-all {' '.join(sync_args)}; "
+            f"else wandb sync --yes {' '.join(sync_args)}; fi",
         ]
 
     # ── which runs are over? ──────────────────────────────────────────────────
