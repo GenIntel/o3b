@@ -572,6 +572,10 @@ class CamCrsp3DNNTask(OD3D_Task):
     point's NOCS is derived from that side's predicted pose, pose^-1(point),
     so it needs no NOCS head (see _pred_posenocs_corresp).
 
+    Variant ``direct`` (``*_direct``): the method writes the target keypoints
+    itself into ``trgt_pred_kpts3d_cam`` (B, K, 3, target camera), from the
+    query keypoints — no matching step here.
+
     Variant ``nocs`` (``*_nocs`` metrics), for a method that predicts a surface
     cloud with NOCS per point on each side: the query keypoint snaps to its
     nearest predicted src point, and the trgt point whose predicted NOCS is
@@ -704,6 +708,8 @@ class CamCrsp3DNNTask(OD3D_Task):
         pred_nocs_feat_kpts = _pred_desc_corresp(batch, query_kpts_cam_q, ("nocs", "feat"))
         # ── variant posenocs: through NOCS = predicted pose^-1 (predicted points)
         pred_posenocs_kpts = _pred_posenocs_corresp(batch, query_kpts_cam_q)
+        # ── variant direct: the method predicted the target keypoints itself ──
+        pred_direct_kpts = getattr(batch, "trgt_pred_kpts3d_cam", None)
 
         # ── metrics: euclidean error + PCK @ 0.1 * trgt_obj_size, per variant ──
         threshold = 0.1 * trgt_obj_size.float().to(dev)  # (B,)
@@ -727,7 +733,8 @@ class CamCrsp3DNNTask(OD3D_Task):
         variant_correct = {"pose": m_pose["is_correct"]}
         for name, pred in (("featmap2d", pred_feat2d_kpts), ("mesh", pred_mesh_kpts),
                            ("nocs", pred_nocs_kpts), ("feat", pred_feat_kpts),
-                           ("nocs_feat", pred_nocs_feat_kpts), ("posenocs", pred_posenocs_kpts)):
+                           ("nocs_feat", pred_nocs_feat_kpts), ("posenocs", pred_posenocs_kpts),
+                           ("direct", pred_direct_kpts)):
             if pred is None:
                 continue
             dist, _ = _kpts_sym_min_dist(

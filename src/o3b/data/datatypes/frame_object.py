@@ -639,6 +639,9 @@ class FrameObjectPairBatch:
     trgt_pred_nocs_shape:  Optional[Tensor] = None
     src_pred_feat_shape:   Optional[Tensor] = None  # (B, N, k) predicted surface features
     trgt_pred_feat_shape:  Optional[Tensor] = None
+    # target keypoints predicted directly from the query keypoints, camera space
+    # (e.g. Trinity's masked tokens: query xyz -> feature -> target xyz)
+    trgt_pred_kpts3d_cam:  Optional[Tensor] = None  # (B, K, 3)
 
 
 def collate_frame_object_pairs(

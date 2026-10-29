@@ -56,6 +56,15 @@ mask: surface tokens never see them (so their outputs equal a pass without
 them) and masked tokens never see each other; with ``mask_see_surface: true``
 they see the surface tokens and themselves, otherwise only themselves. Without
 ``mask_pts3d_cam`` (evaluation) nothing changes.
+
+The same tokens answer queries at test time: ``query_pts3d_cam`` (B, Q, 3,
+camera space) on ``frames_gt`` gives XYZ-known tokens whose predicted
+features land in ``query_pred_feat`` (B, Q, point_feat_dim), and
+``query_feat`` (B, Q, point_feat_dim) gives feature-known tokens whose
+predicted XYZ lands in ``query_pred_pts3d_cam`` (B, Q, 3, camera space). Either
+may be given alone. TrinityMethod chains them for 3-D correspondence: the
+query frame turns keypoints into features, the target frame turns those
+features into its keypoints.
 """
 
 import logging
@@ -164,8 +173,14 @@ class ShapeXAttn(OD3D_Model):
         tok_pos = tok_coord / self.rope_unit
         n_main, self_mask = q.shape[1], None
         mask_pts = getattr(frames_gt, "mask_pts3d_cam", None) if self.mask_tokens else None
+        qry_pts = getattr(frames_gt, "query_pts3d_cam", None) if self.mask_tokens else None
+        qry_feat = getattr(frames_gt, "query_feat", None) if self.mask_tokens else None
         if mask_pts is not None:
             q, q_pos, self_mask, mask_tgt = self._add_mask_tokens(frames_gt, frames_pred, feat, q, q_pos)
+        elif qry_pts is not None or qry_feat is not None:
+            xyz = None if qry_pts is None else self._cam_to_cloud(frames_pred, qry_pts.float())
+            q, q_pos, self_mask = self._mask_tokens(feat, q, q_pos, xyz,
+                                                    None if qry_feat is None else qry_feat.float())
         for layer in self.layers:
             q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask=self_mask)
         q = self.norm_out(q)                                      # (B, [1 +] C [+ K], dim)
@@ -174,6 +189,17 @@ class ShapeXAttn(OD3D_Model):
             k1 = mask_tgt[0].shape[1]
             frames_pred.mask_pred_ppf, frames_pred.mask_tgt_ppf = out[:, :k1, 3:], mask_tgt[0]
             frames_pred.mask_pred_xyz, frames_pred.mask_tgt_xyz = out[:, k1:, :3], mask_tgt[1]
+            q = q[:, :n_main]
+        elif qry_pts is not None or qry_feat is not None:
+            out = self.mask_head(q[:, n_main:])
+            k1 = 0 if qry_pts is None else qry_pts.shape[1]
+            if qry_pts is not None:
+                frames_pred.query_pred_feat = out[:, :k1, 3:]
+            if qry_feat is not None:
+                from o3b.cv.geometry.transform import transf3d_broadcast
+                frames_pred.query_pred_pts3d_cam = transf3d_broadcast(
+                    pts3d=out[:, k1:, :3],
+                    transf4x4=frames_pred.obj_tform4x4_obj_nocs_0c.float()[:, None])
             q = q[:, :n_main]
         if self.pose_query:
             frames_pred.feat = feat + self.pose_out(q[:, 0])
@@ -199,24 +225,38 @@ class ShapeXAttn(OD3D_Model):
     def _add_mask_tokens(self, frames_gt, frames_pred, feat, q, q_pos):
         """Append the H07 masked tokens to the queries; returns the queries, their
         positions, the self-attention mask and the (features, XYZ) targets."""
-        from o3b.cv.geometry.transform import inv_tform4x4, transf3d_broadcast
-        pts = frames_gt.mask_pts3d_cam.float()
+        pts = self._cam_to_cloud(frames_pred, frames_gt.mask_pts3d_cam.float())
         ppf = frames_gt.mask_feat.float()
-        B, K = pts.shape[:2]
-        k1 = K // 2
-        # camera -> the normalised cloud frame the surface points live in
-        pts = transf3d_broadcast(pts3d=pts, transf4x4=inv_tform4x4(
+        k1 = pts.shape[1] // 2
+        q, q_pos, allow = self._mask_tokens(feat, q, q_pos, pts[:, :k1], ppf[:, k1:])
+        return q, q_pos, allow, (ppf[:, :k1], pts[:, k1:])
+
+    @staticmethod
+    def _cam_to_cloud(frames_pred, pts):
+        """Camera -> the normalised cloud frame the surface points live in."""
+        from o3b.cv.geometry.transform import inv_tform4x4, transf3d_broadcast
+        return transf3d_broadcast(pts3d=pts, transf4x4=inv_tform4x4(
             frames_pred.obj_tform4x4_obj_nocs_0c.detach().float())[:, None])
+
+    def _mask_tokens(self, feat, q, q_pos, xyz, ppf):
+        """Append XYZ-known tokens (``xyz``, cloud frame) then feature-known tokens
+        (``ppf``) after the queries; either may be None. Returns the queries,
+        their positions and the self-attention mask."""
+        B = q.shape[0]
         glob = self.embed_glob(feat)[:, None]
-        m_xyz = self.embed_pt(pts[:, :k1]) + glob + self.mask_type[0]
-        m_ppf = self.embed_mask_feat(ppf[:, k1:]) + glob + self.mask_type[1]
-        m_pos = torch.cat([pts[:, :k1] / self.rope_unit, pts.new_zeros(B, K - k1, 3)], dim=1)
+        toks, pos = [q], [q_pos]
+        if xyz is not None:
+            toks.append(self.embed_pt(xyz) + glob + self.mask_type[0])
+            pos.append(xyz / self.rope_unit)
+        if ppf is not None:
+            toks.append(self.embed_mask_feat(ppf) + glob + self.mask_type[1])
+            pos.append(ppf.new_zeros(B, ppf.shape[1], 3))
 
         n, dev = q.shape[1], q.device
+        K = sum(t.shape[1] for t in toks[1:])
         allow = torch.zeros(n + K, n + K, dtype=torch.bool, device=dev)
         allow[:n, :n] = True                                  # main tokens: each other only
         if self.mask_see_surface:
             allow[n:, :n] = True                              # masked tokens: the main tokens ...
         allow[n:, n:] = torch.eye(K, dtype=torch.bool, device=dev)   # ... and themselves
-        return (torch.cat([q, m_xyz, m_ppf], dim=1), torch.cat([q_pos, m_pos], dim=1),
-                allow, (ppf[:, :k1], pts[:, k1:]))
+        return torch.cat(toks, dim=1), torch.cat(pos, dim=1), allow
