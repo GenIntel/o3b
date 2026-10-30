@@ -129,6 +129,7 @@ class ShapeXAttn(OD3D_Model):
         learned_queries: bool = False,
         num_passes: int = 1,
         anchor_extent: float = 0.5,
+        learned_anchors: bool = True,
     ):
         super().__init__()
         self.nocs = nocs
@@ -151,7 +152,11 @@ class ShapeXAttn(OD3D_Model):
             # (offset + NOCS / features per surface token) and a pose head.
             g = torch.Generator().manual_seed(0)
             self.query = nn.Parameter(torch.randn(coarse_count, dim, generator=g) * 0.02)
-            self.anchor = nn.Parameter((torch.rand(coarse_count, 3, generator=g) * 2 - 1) * anchor_extent)
+            anchor = (torch.rand(coarse_count, 3, generator=g) * 2 - 1) * anchor_extent
+            if learned_anchors:
+                self.anchor = nn.Parameter(anchor)
+            else:                                     # all queries start at the cloud origin
+                self.register_buffer("anchor", torch.zeros_like(anchor), persistent=False)
             self.pass_embed = nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
             self.point_head = nn.Linear(dim, self.out_ch)
             if pose_query:
