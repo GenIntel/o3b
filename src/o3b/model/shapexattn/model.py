@@ -78,6 +78,8 @@ as the queries' PointROPE positions. Earlier passes are deep supervision
 ``num_init_layers`` adds a block of layers with their own weights that runs once
 before the passes, to give them their initial tokens and points; it ends like a
 pass (same heads, deep supervision) and has no pass embedding.
+``surface_sees_pose: false`` makes self-attention one-way: the pose token still
+attends to the surface tokens, the surface tokens no longer attend to it.
 The pose is written as ``cam_tform4x4_obj`` / ``obj_size3d`` directly, so the
 chain needs no MLP or PoseMLP after this module.
 """
@@ -132,6 +134,7 @@ class ShapeXAttn(OD3D_Model):
         learned_queries: bool = False,
         num_passes: int = 1,
         num_init_layers: int = 0,
+        surface_sees_pose: bool = True,
         anchor_extent: float = 0.5,
         learned_anchors: bool = True,
     ):
@@ -147,6 +150,9 @@ class ShapeXAttn(OD3D_Model):
             raise ValueError("ShapeXAttn: num_passes > 1 needs learned_queries")
         if num_init_layers and not learned_queries:
             raise ValueError("ShapeXAttn: num_init_layers needs learned_queries")
+        if not surface_sees_pose and not (learned_queries and pose_query):
+            raise ValueError("ShapeXAttn: surface_sees_pose false needs learned_queries and pose_query")
+        self.surface_sees_pose = surface_sees_pose
 
         self.point_feat_dim = point_feat_dim
         # point (+ its NOCS) (+ point_feat_dim feature channels)
@@ -313,6 +319,11 @@ class ShapeXAttn(OD3D_Model):
             xyz = None if qry_pts is None else self._cam_to_cloud(frames_pred, qry_pts.float())
             q, q_pos, self_mask = self._mask_tokens(feat, q, q_pos, xyz,
                                                     None if qry_feat is None else qry_feat.float())
+
+        if not self.surface_sees_pose:
+            if self_mask is None:
+                self_mask = torch.ones(q.shape[1], q.shape[1], dtype=torch.bool, device=q.device)
+            self_mask[p0:n_main, 0] = False                       # row: who attends, column: to whom
 
         aux_pts, aux_extra, aux_pose = [], [], []
         stages = [(self.layers, self.pass_embed[p]) for p in range(self.num_passes)]
