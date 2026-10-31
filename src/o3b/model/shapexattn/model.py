@@ -75,6 +75,9 @@ an offset (and gives its NOCS / features) and an own PoseMLP reads the pose
 token, and the next pass takes those points (and the predicted object centre)
 as the queries' PointROPE positions. Earlier passes are deep supervision
 (``pts3d_shape_aux`` / ``feat_shape_aux`` / ``nocs_shape_aux`` / ``pose_aux``).
+``num_init_layers`` adds a block of layers with their own weights that runs once
+before the passes, to give them their initial tokens and points; it ends like a
+pass (same heads, deep supervision) and has no pass embedding.
 The pose is written as ``cam_tform4x4_obj`` / ``obj_size3d`` directly, so the
 chain needs no MLP or PoseMLP after this module.
 """
@@ -128,6 +131,7 @@ class ShapeXAttn(OD3D_Model):
         mask_see_surface: bool = True,
         learned_queries: bool = False,
         num_passes: int = 1,
+        num_init_layers: int = 0,
         anchor_extent: float = 0.5,
         learned_anchors: bool = True,
     ):
@@ -141,6 +145,8 @@ class ShapeXAttn(OD3D_Model):
         self.num_passes = num_passes
         if num_passes > 1 and not learned_queries:
             raise ValueError("ShapeXAttn: num_passes > 1 needs learned_queries")
+        if num_init_layers and not learned_queries:
+            raise ValueError("ShapeXAttn: num_init_layers needs learned_queries")
 
         self.point_feat_dim = point_feat_dim
         # point (+ its NOCS) (+ point_feat_dim feature channels)
@@ -177,6 +183,12 @@ class ShapeXAttn(OD3D_Model):
                    self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
                    moe_experts=moe_experts, moe_top_k=moe_top_k)   # H02-T21: MoE FFNs (o3b/model/moe.py)
             for i in range(num_layers)
+        ])
+        self.init_layers = nn.ModuleList([
+            _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout,
+                   self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
+                   moe_experts=moe_experts, moe_top_k=moe_top_k)
+            for i in range(num_init_layers)
         ])
         self.norm_out = nn.LayerNorm(dim)
         if pose_query and not learned_queries:
@@ -303,9 +315,12 @@ class ShapeXAttn(OD3D_Model):
                                                     None if qry_feat is None else qry_feat.float())
 
         aux_pts, aux_extra, aux_pose = [], [], []
-        for p in range(self.num_passes):
-            q = q + self.pass_embed[p]
-            for layer in self.layers:
+        stages = [(self.layers, self.pass_embed[p]) for p in range(self.num_passes)]
+        if len(self.init_layers):
+            stages.insert(0, (self.init_layers, 0.))
+        for p, (layers, embed) in enumerate(stages):
+            q = q + embed
+            for layer in layers:
                 q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask=self_mask)
             h = self.norm_out(q)
             out = self.point_head(h[:, p0:n_main])
@@ -316,7 +331,7 @@ class ShapeXAttn(OD3D_Model):
                 bag = _Bag(feat=h[:, 0], obj_tform4x4_obj_nocs_0c=obj_tform)
                 _, bag = self.pose_head(None, bag)
                 pose = (bag.cam_tform4x4_obj, bag.obj_size3d)
-            if p < self.num_passes - 1:
+            if p < len(stages) - 1:
                 aux_pts.append(coarse)
                 aux_extra.append(extra)
                 if pose is not None:
