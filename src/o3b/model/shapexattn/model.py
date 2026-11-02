@@ -82,6 +82,17 @@ pass (same heads, deep supervision) and has no pass embedding.
 attends to the surface tokens, the surface tokens no longer attend to it.
 The pose is written as ``cam_tform4x4_obj`` / ``obj_size3d`` directly, so the
 chain needs no MLP or PoseMLP after this module.
+
+``num_passes > 1`` without learned queries (H08) loops the coarse-MLP decoder: the
+surface tokens start at the coarse MLP's points as usual, every pass runs the same
+layers, and a point head (zero-initialised, so pass 1 starts from the one-pass
+model) adds an offset to each point and to its NOCS / features. The next pass moves
+the tokens' PointROPE positions to those points. The coarse MLP's own points and
+every pass but the last are deep supervision (``pts3d_shape_aux`` /
+``feat_shape_aux`` / ``nocs_shape_aux``). With ``pose_query`` an aux pose head reads
+the pose token after every pass but the last (``pose_aux``) and moves it to the
+predicted centre; the last pass still ends in ``feat + pose_out(pose token)`` for
+the chain's PoseMLP.
 """
 
 import logging
@@ -146,8 +157,6 @@ class ShapeXAttn(OD3D_Model):
         self.rope_unit = rope_unit
         self.learned_queries = learned_queries
         self.num_passes = num_passes
-        if num_passes > 1 and not learned_queries:
-            raise ValueError("ShapeXAttn: num_passes > 1 needs learned_queries")
         if num_init_layers and not learned_queries:
             raise ValueError("ShapeXAttn: num_init_layers needs learned_queries")
         if not surface_sees_pose and not (learned_queries and pose_query):
@@ -178,6 +187,17 @@ class ShapeXAttn(OD3D_Model):
                                          bias=True, out_dims=[3, 6, 3])
         else:
             self.coarse = _mlp([in_dim, hidden_dim, hidden_dim, coarse_count * self.out_ch])
+            if num_passes > 1:
+                # H08: passes over the coarse-MLP decoder; residual heads start at zero
+                g = torch.Generator().manual_seed(0)
+                self.pass_embed = nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
+                self.point_head = nn.Linear(dim, self.out_ch)
+                nn.init.zeros_(self.point_head.weight)
+                nn.init.zeros_(self.point_head.bias)
+                if pose_query:
+                    from o3b.model.posemlp.model import PoseMLP
+                    self.pose_head = PoseMLP(num_layers=1, hidden_dim=0, dropout=0., in_dim=dim,
+                                             activation="none", bias=True, out_dims=[3, 6, 3])
 
         # surface token = embed(point) + embed(global feature); with learned queries
         # only the masked XYZ tokens embed a point
@@ -253,8 +273,29 @@ class ShapeXAttn(OD3D_Model):
             xyz = None if qry_pts is None else self._cam_to_cloud(frames_pred, qry_pts.float())
             q, q_pos, self_mask = self._mask_tokens(feat, q, q_pos, xyz,
                                                     None if qry_feat is None else qry_feat.float())
-        for layer in self.layers:
-            q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask=self_mask)
+        p0 = 1 if self.pose_query else 0
+        extra = coarse_out[..., 3:]
+        aux_pts, aux_extra, aux_pose = [], [], []
+        for p in range(self.num_passes):
+            if self.num_passes > 1:
+                q = q + self.pass_embed[p]
+            for layer in self.layers:
+                q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask=self_mask)
+            if p == self.num_passes - 1:
+                break
+            # H08: every pass but the last moves the points and supervises them
+            h = self.norm_out(q)
+            aux_pts.append(coarse)
+            aux_extra.append(extra)
+            out = self.point_head(h[:, p0:n_main])
+            coarse, extra = coarse + out[..., :3], extra + out[..., 3:]
+            pos = [coarse.detach() / self.rope_unit, q_pos[:, n_main:]]
+            if self.pose_query:
+                bag = _Bag(feat=h[:, 0], obj_tform4x4_obj_nocs_0c=frames_pred.obj_tform4x4_obj_nocs_0c)
+                _, bag = self.pose_head(None, bag)
+                aux_pose.append((bag.cam_tform4x4_obj, bag.obj_size3d))
+                pos.insert(0, self.pose_head.nets[0](h[:, 0]).detach()[:, None] / self.rope_unit)
+            q_pos = torch.cat(pos, dim=1)
         q = self.norm_out(q)                                      # (B, [1 +] C [+ K], dim)
         if mask_pts is not None or qry_pts is not None or qry_feat is not None:
             self._mask_out(frames_pred, q[:, n_main:], mask_tgt if mask_pts is not None else None,
@@ -267,14 +308,22 @@ class ShapeXAttn(OD3D_Model):
         seed = self.fold_grid[None, None].expand(B, C, K, 2)
         fold_out = self.fold(torch.cat([q[:, :, None].expand(B, C, K, q.shape[-1]), seed], dim=-1))
         fine = (coarse[:, :, None] + fold_out[..., :3]).reshape(B, C * K, 3)
-        o = 3
+        o = 0
         if self.nocs:
-            frames_pred.nocs_shape_coarse = coarse_out[..., o:o + 3]
-            frames_pred.nocs_shape_fine = fold_out[..., o:o + 3].reshape(B, C * K, 3)
-            o += 3
+            frames_pred.nocs_shape_coarse = extra[..., :3]
+            frames_pred.nocs_shape_fine = fold_out[..., 3:6].reshape(B, C * K, 3)
+            o = 3
         if self.point_feat_dim:
-            frames_pred.feat_shape_coarse = coarse_out[..., o:]
-            frames_pred.feat_shape_fine = fold_out[..., o:].reshape(B, C * K, self.point_feat_dim)
+            frames_pred.feat_shape_coarse = extra[..., o:]
+            frames_pred.feat_shape_fine = fold_out[..., 3 + o:].reshape(B, C * K, self.point_feat_dim)
+        if aux_pts:
+            frames_pred.pts3d_shape_aux = aux_pts
+            if self.nocs:
+                frames_pred.nocs_shape_aux = [e[..., :3] for e in aux_extra]
+            if self.point_feat_dim:
+                frames_pred.feat_shape_aux = [e[..., o:] for e in aux_extra]
+        if aux_pose:
+            frames_pred.pose_aux = aux_pose
 
         frames_pred.pts3d_shape_coarse = coarse
         frames_pred.pts3d_shape_fine = fine
