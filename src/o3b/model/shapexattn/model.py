@@ -80,6 +80,11 @@ before the passes, to give them their initial tokens and points; it ends like a
 pass (same heads, deep supervision) and has no pass embedding.
 ``surface_sees_pose: false`` makes self-attention one-way: the pose token still
 attends to the surface tokens, the surface tokens no longer attend to it.
+``pose_layers: n`` takes the pose token out of the passes' layers: every pass runs
+it through n cross-attention layers of its own (over the same stage-4 tokens, no
+self-attention, own pass embedding and output norm), so the passes share no
+weights between pose and surface and the pose loss no longer reaches the surface
+tokens. The init block, if any, still runs both together and so initialises both.
 The pose is written as ``cam_tform4x4_obj`` / ``obj_size3d`` directly, so the
 chain needs no MLP or PoseMLP after this module.
 
@@ -146,6 +151,7 @@ class ShapeXAttn(OD3D_Model):
         num_passes: int = 1,
         num_init_layers: int = 0,
         surface_sees_pose: bool = True,
+        pose_layers: int = 0,
         anchor_extent: float = 0.5,
         learned_anchors: bool = True,
     ):
@@ -162,6 +168,8 @@ class ShapeXAttn(OD3D_Model):
         if not surface_sees_pose and not (learned_queries and pose_query):
             raise ValueError("ShapeXAttn: surface_sees_pose false needs learned_queries and pose_query")
         self.surface_sees_pose = surface_sees_pose
+        if pose_layers and not (learned_queries and pose_query):
+            raise ValueError("ShapeXAttn: pose_layers needs learned_queries and pose_query")
 
         self.point_feat_dim = point_feat_dim
         # point (+ its NOCS) (+ point_feat_dim feature channels)
@@ -217,6 +225,15 @@ class ShapeXAttn(OD3D_Model):
             for i in range(num_init_layers)
         ])
         self.norm_out = nn.LayerNorm(dim)
+        # H08: the pose token's own layers in the passes (cross-attention only)
+        self.pose_layers = nn.ModuleList([
+            _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout, self_attn=False)
+            for _ in range(pose_layers)
+        ])
+        if pose_layers:
+            self.pose_norm = nn.LayerNorm(dim)
+            g = torch.Generator().manual_seed(1)
+            self.pose_pass_embed = nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
         if pose_query and not learned_queries:
             self.embed_pose = nn.Linear(in_dim, dim)
             self.pose_out = nn.Linear(dim, in_dim)
@@ -375,14 +392,26 @@ class ShapeXAttn(OD3D_Model):
             self_mask[p0:n_main, 0] = False                       # row: who attends, column: to whom
 
         aux_pts, aux_extra, aux_pose = [], [], []
-        stages = [(self.layers, self.pass_embed[p]) for p in range(self.num_passes)]
+        stages = [(self.layers, self.pass_embed[p], p) for p in range(self.num_passes)]
         if len(self.init_layers):
-            stages.insert(0, (self.init_layers, 0.))
-        for p, (layers, embed) in enumerate(stages):
-            q = q + embed
-            for layer in layers:
-                q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask=self_mask)
-            h = self.norm_out(q)
+            stages.insert(0, (self.init_layers, 0., None))
+        for p, (layers, embed, i) in enumerate(stages):
+            if i is not None and len(self.pose_layers):
+                # the pass's layers see the surface (+ masked) tokens only; the pose
+                # token goes through its own layers
+                qp, qs = q[:, :1] + self.pose_pass_embed[i], q[:, 1:] + embed
+                sm = None if self_mask is None else self_mask[1:, 1:]
+                for layer in layers:
+                    qs = layer(qs, q_pos[:, 1:], tok, tok_pos, tok_mask, self_mask=sm)
+                for layer in self.pose_layers:
+                    qp = layer(qp, q_pos[:, :1], tok, tok_pos, tok_mask)
+                q = torch.cat([qp, qs], dim=1)
+                h = torch.cat([self.pose_norm(qp), self.norm_out(qs)], dim=1)
+            else:
+                q = q + embed
+                for layer in layers:
+                    q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask=self_mask)
+                h = self.norm_out(q)
             out = self.point_head(h[:, p0:n_main])
             coarse = coarse + out[..., :3]
             extra = out[..., 3:]
