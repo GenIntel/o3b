@@ -85,6 +85,13 @@ it through n cross-attention layers of its own (over the same stage-4 tokens, no
 self-attention, own pass embedding and output norm), so the passes share no
 weights between pose and surface and the pose loss no longer reaches the surface
 tokens. The init block, if any, still runs both together and so initialises both.
+``init_token: true`` (with ``num_init_layers``) makes the init block one token: a
+learned query (+ the projected cls feature) at the cloud origin cross-attends
+through the init layers; a shape MLP on it regresses the ``coarse_count`` coarse
+points (+ NOCS / features), which start the surface tokens there (embedded point +
+projected init token, no learned surface queries or anchors), and the pose head on
+it gives the pose token's start (projected init token, at the predicted centre).
+Its points and pose are deep-supervised like an earlier pass.
 The pose is written as ``cam_tform4x4_obj`` / ``obj_size3d`` directly, so the
 chain needs no MLP or PoseMLP after this module.
 
@@ -152,6 +159,7 @@ class ShapeXAttn(OD3D_Model):
         num_init_layers: int = 0,
         surface_sees_pose: bool = True,
         pose_layers: int = 0,
+        init_token: bool = False,
         anchor_extent: float = 0.5,
         learned_anchors: bool = True,
     ):
@@ -168,6 +176,9 @@ class ShapeXAttn(OD3D_Model):
         if not surface_sees_pose and not (learned_queries and pose_query):
             raise ValueError("ShapeXAttn: surface_sees_pose false needs learned_queries and pose_query")
         self.surface_sees_pose = surface_sees_pose
+        if init_token and not (num_init_layers and pose_query):
+            raise ValueError("ShapeXAttn: init_token needs num_init_layers and pose_query")
+        self.init_token = init_token
         if pose_layers and not (learned_queries and pose_query):
             raise ValueError("ShapeXAttn: pose_layers needs learned_queries and pose_query")
 
@@ -180,17 +191,26 @@ class ShapeXAttn(OD3D_Model):
             # pose query, and a per-pass embedding; each pass ends in a point head
             # (offset + NOCS / features per surface token) and a pose head.
             g = torch.Generator().manual_seed(0)
-            self.query = nn.Parameter(torch.randn(coarse_count, dim, generator=g) * 0.02)
-            anchor = (torch.rand(coarse_count, 3, generator=g) * 2 - 1) * anchor_extent
-            if learned_anchors:
-                self.anchor = nn.Parameter(anchor)
-            else:                                     # all queries start at the cloud origin
-                self.register_buffer("anchor", torch.zeros_like(anchor), persistent=False)
+            if init_token:
+                # one init token; a shape MLP on it gives the coarse points
+                self.init_query = nn.Parameter(torch.randn(1, dim, generator=g) * 0.02)
+                self.init_norm = nn.LayerNorm(dim)
+                self.coarse = _mlp([dim, hidden_dim, hidden_dim, coarse_count * self.out_ch])
+                self.embed_init = nn.Linear(dim, dim)
+                self.embed_init_pose = nn.Linear(dim, dim)
+            else:
+                self.query = nn.Parameter(torch.randn(coarse_count, dim, generator=g) * 0.02)
+                anchor = (torch.rand(coarse_count, 3, generator=g) * 2 - 1) * anchor_extent
+                if learned_anchors:
+                    self.anchor = nn.Parameter(anchor)
+                else:                                     # all queries start at the cloud origin
+                    self.register_buffer("anchor", torch.zeros_like(anchor), persistent=False)
             self.pass_embed = nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
             self.point_head = nn.Linear(dim, self.out_ch)
             if pose_query:
                 from o3b.model.posemlp.model import PoseMLP
-                self.pose_query_embed = nn.Parameter(torch.randn(1, dim, generator=g) * 0.02)
+                if not init_token:
+                    self.pose_query_embed = nn.Parameter(torch.randn(1, dim, generator=g) * 0.02)
                 self.pose_head = PoseMLP(num_layers=1, hidden_dim=0, dropout=0., in_dim=dim, activation="none",
                                          bias=True, out_dims=[3, 6, 3])
         else:
@@ -209,7 +229,7 @@ class ShapeXAttn(OD3D_Model):
 
         # surface token = embed(point) + embed(global feature); with learned queries
         # only the masked XYZ tokens embed a point
-        if not learned_queries or mask_tokens:
+        if not learned_queries or mask_tokens or init_token:
             self.embed_pt = _mlp([3, dim // 2, dim])
         self.embed_glob = nn.Linear(in_dim, dim)
         self.layers = nn.ModuleList([
@@ -220,7 +240,7 @@ class ShapeXAttn(OD3D_Model):
         ])
         self.init_layers = nn.ModuleList([
             _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout,
-                   self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
+                   self_attn=not init_token and bool(self_attn_every) and (i + 1) % self_attn_every == 0,
                    moe_experts=moe_experts, moe_top_k=moe_top_k)
             for i in range(num_init_layers)
         ])
@@ -366,14 +386,34 @@ class ShapeXAttn(OD3D_Model):
         obj_tform = frames_pred.obj_tform4x4_obj_nocs_0c
 
         glob = self.embed_glob(feat)[:, None]
-        q = self.query[None].expand(B, -1, -1) + glob
-        coarse = self.anchor[None].expand(B, -1, -1)
-        q_pos = coarse.detach() / self.rope_unit
-        p0 = 1 if self.pose_query else 0
-        if self.pose_query:
-            q = torch.cat([self.pose_query_embed[None].expand(B, -1, -1) + glob, q], dim=1)
-            q_pos = torch.cat([q_pos.new_zeros(B, 1, 3), q_pos], dim=1)
         tok_pos = tok_coord / self.rope_unit
+        p0 = 1 if self.pose_query else 0
+        aux_pts, aux_extra, aux_pose = [], [], []
+        if self.init_token:
+            # one token through the init layers; a shape MLP and the pose head on it
+            # start the surface and pose tokens
+            t = self.init_query[None].expand(B, -1, -1) + glob
+            t_pos = t.new_zeros(B, 1, 3)
+            for layer in self.init_layers:
+                t = layer(t, t_pos, tok, tok_pos, tok_mask)
+            h0 = self.init_norm(t)[:, 0]
+            co = self.coarse(h0).reshape(B, C, self.out_ch)
+            coarse = co[..., :3]
+            aux_pts.append(coarse)
+            aux_extra.append(co[..., 3:])
+            _, bag = self.pose_head(None, _Bag(feat=h0, obj_tform4x4_obj_nocs_0c=obj_tform))
+            aux_pose.append((bag.cam_tform4x4_obj, bag.obj_size3d))
+            centre = self.pose_head.nets[0](h0).detach()
+            e = self.embed_init(h0)[:, None]
+            q = torch.cat([self.embed_init_pose(h0)[:, None], self.embed_pt(coarse) + e], dim=1)
+            q_pos = torch.cat([centre[:, None], coarse.detach()], dim=1) / self.rope_unit
+        else:
+            q = self.query[None].expand(B, -1, -1) + glob
+            coarse = self.anchor[None].expand(B, -1, -1)
+            q_pos = coarse.detach() / self.rope_unit
+            if self.pose_query:
+                q = torch.cat([self.pose_query_embed[None].expand(B, -1, -1) + glob, q], dim=1)
+                q_pos = torch.cat([q_pos.new_zeros(B, 1, 3), q_pos], dim=1)
         n_main, self_mask = q.shape[1], None
         mask_pts = getattr(frames_gt, "mask_pts3d_cam", None) if self.mask_tokens else None
         qry_pts = getattr(frames_gt, "query_pts3d_cam", None) if self.mask_tokens else None
@@ -391,9 +431,8 @@ class ShapeXAttn(OD3D_Model):
                 self_mask = torch.ones(q.shape[1], q.shape[1], dtype=torch.bool, device=q.device)
             self_mask[p0:n_main, 0] = False                       # row: who attends, column: to whom
 
-        aux_pts, aux_extra, aux_pose = [], [], []
         stages = [(self.layers, self.pass_embed[p], p) for p in range(self.num_passes)]
-        if len(self.init_layers):
+        if len(self.init_layers) and not self.init_token:
             stages.insert(0, (self.init_layers, 0., None))
         for p, (layers, embed, i) in enumerate(stages):
             if i is not None and len(self.pose_layers):
