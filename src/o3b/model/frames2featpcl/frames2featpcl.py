@@ -91,7 +91,6 @@ def frames2featpcl(frames_gt, frames_pred,
     pts3d_grid_mask[pts3d_zero_mask] = 1
     # add nn layer norm or nn batch norm
     #featmap_res_perm = resize(featmap, H_out=depth.shape[-2], W_out=depth.shape[-1], mode="nearest_v2").permute(0, 2, 3, 1)
-    pts3d_grid = depth2pts3d_grid(depth=depth, cam_intr4x4=frames_gt.cam_intr4x4, opengl=opengl).permute(0, 2, 3, 1).to(featmap.dtype)
 
     if append_rays3d:
         rays3d_grid = cam_intr4x4_2_rays3d(frames_gt.cam_intr4x4, size).permute(0, 2, 3, 1).to(featmap.dtype)

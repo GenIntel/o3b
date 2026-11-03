@@ -92,6 +92,8 @@ class DINOv2(OD3D_Model):
 
             self.out_dims = [self.extractor.embed_dim]
             self.extractor = self.patch_vit_resolution(self.extractor, self.stride)
+            if self.dinov2:
+                self.cache_pos_encoding(self.extractor)
 
         else:  # using keys did not show any improvement
             self.extractor = ViTExtractor(model_type=hub_model)
@@ -307,6 +309,30 @@ class DINOv2(OD3D_Model):
             )
 
         return interpolate_pos_encoding
+
+    @staticmethod
+    def cache_pos_encoding(model: nn.Module) -> None:
+        """Keep the last interpolated position embedding per input size.
+
+        DINOv2 re-interpolates (bicubic) its position embedding on every forward,
+        3 ms (ViT-S) to 6 ms (ViT-B) of a batch-1 Trinity-Frame call. The key holds
+        pos_embed's version counter, which an optimizer step bumps, and nothing is
+        cached while pos_embed is being trained, as the result must carry its graph.
+        """
+        interpolate = model.interpolate_pos_encoding
+        cache = {}
+
+        def interpolate_pos_encoding(x, w, h):
+            pe = model.pos_embed
+            if pe.requires_grad and torch.is_grad_enabled():
+                return interpolate(x, w, h)
+            key = (x.shape[1], w, h, x.dtype, x.device, pe._version, pe.data_ptr())
+            if key not in cache:
+                cache.clear()
+                cache[key] = interpolate(x, w, h)
+            return cache[key]
+
+        model.interpolate_pos_encoding = interpolate_pos_encoding
 
     @staticmethod
     def patch_vit_resolution(model: nn.Module, stride: int) -> nn.Module:

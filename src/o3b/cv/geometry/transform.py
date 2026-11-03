@@ -1686,6 +1686,22 @@ def cam_intr4x4_2_center_ray3d(cam_intr4x4, size):
     pts3d = pts3d[..., 0, 0]
     return pts3d
 
+_PXL2D_GRIDS = {}
+
+
+def _pxl2d_grid_cached(H, W, device, dtype):
+    # depth2pts3d_grid's pixel grid, built once per size on the device: building it
+    # on the CPU and moving it was 1-3 ms of every batch-1 Trinity-Frame call.
+    # Callers only read it (reproj2d3d_broadcast expands, then concatenates).
+    key = (int(H), int(W), device, dtype)
+    if key not in _PXL2D_GRIDS:
+        _PXL2D_GRIDS[key] = torch.stack(
+            torch.meshgrid(torch.arange(W), torch.arange(H), indexing="xy"),
+            dim=-1,
+        ).to(device=device, dtype=dtype)
+    return _PXL2D_GRIDS[key]
+
+
 def depth2pts3d_grid(depth, cam_intr4x4, opengl: bool = False):
     #  depth: ...x1xHxW
     #  cam_intr: ...x4x4
@@ -1693,10 +1709,7 @@ def depth2pts3d_grid(depth, cam_intr4x4, opengl: bool = False):
     device = cam_intr4x4.device
     dtype = cam_intr4x4.dtype
     H, W = depth.shape[-2:]
-    pxl2d = torch.stack(
-        torch.meshgrid(torch.arange(W), torch.arange(H), indexing="xy"),
-        dim=-1,
-    ).to(device=device, dtype=dtype)
+    pxl2d = _pxl2d_grid_cached(H, W, device, dtype)
     # pxl2d[(None, ) * (cam_intr4x4.dim() - 2)] # legacy code, do not use for not broadcasting cam intr...
     pts3d_homog = (
         reproj2d3d_broadcast(

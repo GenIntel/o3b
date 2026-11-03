@@ -80,7 +80,7 @@ def gray2binary(gray, axis=-1):
     return gray
 
 
-def encode(locs, num_dims, num_bits):
+def encode_bitwise(locs, num_dims, num_bits):
     """Decode an array of locations in a hypercube into a Hilbert integer.
 
     This is a vectorized-ish version of the Hilbert curve implementation by John
@@ -293,3 +293,87 @@ def decode(hilberts, num_dims, num_bits):
 
     # Return them in the expected shape.
     return flat_locs.reshape((*orig_shape, num_dims))
+
+
+# ── table-driven encode ───────────────────────────────────────────────────────
+# encode_bitwise runs Skilling's loop one bit, dim and level at a time: about 600
+# small kernels per Trinity-Frame frame, 7.5 ms of a batch-1 call. At each level
+# that loop applies an axis swap and flips to all lower bits, decided by the
+# level's own bits. Their composition takes 48 values, so it is a state, and a
+# table maps state + 3 levels of x, y, z to 9 code bits + the next state.
+# tests/test_hilbert_table.py checks encode == encode_bitwise.
+
+
+def _hilbert_step(u, w):
+    # one level's effect, bits u, on a lower level's bits w (as in encode_bitwise)
+    w = list(w)
+    for dim in range(3):
+        if u[dim]:
+            w[0] ^= 1
+        else:
+            t = w[0] ^ w[dim]
+            w[dim] ^= t
+            w[0] ^= t
+    return tuple(w)
+
+
+def _hilbert_tables():
+    """(next1, code1) index state * 8 + xyz; (next3, code3) index state * 512 + xxxyyyzzz."""
+    bits = [(a, b, c) for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+    states, todo, one = {tuple(bits): 0}, [tuple(bits)], {}
+    while todo:
+        T = todo.pop()
+        for v in range(8):
+            u = T[v]
+            T2 = tuple(_hilbert_step(u, T[i]) for i in range(8))
+            if T2 not in states:
+                states[T2] = len(states)
+                todo.append(T2)
+            one[states[T], v] = (states[T2], u[0] << 2 | u[1] << 1 | u[2])
+    S = len(states)
+    next1 = [one[s, v][0] for s in range(S) for v in range(8)]
+    code1 = [one[s, v][1] for s in range(S) for v in range(8)]
+    next3, code3 = [], []
+    for s in range(S):
+        for i in range(512):
+            x, y, z = i >> 6 & 7, i >> 3 & 7, i & 7
+            st, code = s, 0
+            for lev in (2, 1, 0):
+                st, d = one[st, (x >> lev & 1) << 2 | (y >> lev & 1) << 1 | (z >> lev & 1)]
+                code = code << 3 | d
+            next3.append(st)
+            code3.append(code)
+    return tuple(torch.tensor(t) for t in (next1, code1, next3, code3))
+
+
+_TABLES_CPU = None
+_TABLES = {}
+
+
+def encode(locs, num_dims, num_bits):
+    """Hilbert integer of each location; equal to encode_bitwise. 3-D only."""
+    global _TABLES_CPU
+    if num_dims != 3:
+        return encode_bitwise(locs, num_dims, num_bits)
+    if num_dims * num_bits > 63:
+        raise ValueError(f"num_dims={num_dims} and num_bits={num_bits} do not fit an int64")
+    device = locs.device
+    if device not in _TABLES:
+        if _TABLES_CPU is None:
+            _TABLES_CPU = _hilbert_tables()
+        _TABLES[device] = (*[t.to(device) for t in _TABLES_CPU],
+                           torch.tensor([4, 2, 1], device=device),
+                           torch.tensor([64, 8, 1], device=device))
+    next1, code1, next3, code3, w1, w3 = _TABLES[device]
+    locs = locs.reshape(-1, 3).long()
+    state = code = torch.zeros(locs.shape[0], dtype=torch.long, device=device)
+    rem = num_bits % 3
+    for s in range(num_bits - 1, num_bits - rem - 1, -1):
+        i = state * 8 + (((locs >> s) & 1) * w1).sum(-1)
+        state, code = next1[i], code << 3 | code1[i]
+    for s in range(num_bits - rem - 3, -1, -3):
+        i = state * 512 + (((locs >> s) & 7) * w3).sum(-1)
+        state, code = next3[i], code << 9 | code3[i]
+    for s in (32, 16, 8, 4, 2, 1):          # Gray to binary
+        code = code ^ (code >> s)
+    return code
