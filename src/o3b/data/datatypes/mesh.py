@@ -386,6 +386,8 @@ def _parse_mc_type(type_str: str) -> dict:
     tets) or ``fc<N>`` (FlexiCubes), N SDF samples per axis; the latter two
     take ``_o<steps>`` for their surface fit (default ISOSURFACE_FIT_STEPS,
     ``_o0`` = plain extraction), see o3b/cv/isosurface/remesh.py.
+    ``alpha<N>`` is od3d's alpha-shape mesh with at most N vertices
+    (``convert_mesh_to_alpha``).
 
     Returns dict with keys: method, res, fit_steps, geometry, view_sampling,
     n_views, resolution, feature_model.
@@ -401,17 +403,17 @@ def _parse_mc_type(type_str: str) -> dict:
                 "view_sampling": m.group(1), "n_views": int(m.group(2)) if m.group(2) else None,
                 "resolution": int(m.group(3)) if m.group(3) else None, "feature_model": m.group(4)}
     m = re.fullmatch(
-        r"((mc|dmtet|fc)(\d+)(?:_o(\d+))?)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
+        r"((mc|dmtet|fc|alpha)(\d+)(?:_o(\d+))?)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
         type_str,
     )
     if not m:
         raise ValueError(f"Cannot parse mesh type: {type_str!r}")
-    if m.group(2) == "mc" and m.group(4) is not None:
-        raise ValueError(f"mc has no surface fit, drop the _o: {type_str!r}")
+    if m.group(2) in ("mc", "alpha") and m.group(4) is not None:
+        raise ValueError(f"{m.group(2)} has no surface fit, drop the _o: {type_str!r}")
     return {
-        "method":        m.group(2),                          # 'mc', 'dmtet' or 'fc'
-        "res":           int(m.group(3)),
-        "fit_steps":     (int(m.group(4)) if m.group(4) else ISOSURFACE_FIT_STEPS) if m.group(2) != "mc" else None,
+        "method":        m.group(2),                          # 'mc', 'dmtet', 'fc' or 'alpha'
+        "res":           int(m.group(3)),                     # alpha: the vertex budget
+        "fit_steps":     (int(m.group(4)) if m.group(4) else ISOSURFACE_FIT_STEPS) if m.group(2) in ("dmtet", "fc") else None,
         "geometry":      m.group(1),                          # the type without features, e.g. 'fc16'
         "view_sampling": m.group(5),                          # 'uni', 'rand', or None
         "n_views":       int(m.group(6)) if m.group(6) else None,
@@ -421,7 +423,7 @@ def _parse_mc_type(type_str: str) -> dict:
 
 
 def _is_remesh_type(type_str: str) -> bool:
-    return type_str.startswith(("mc", "dmtet", "fc", "orig"))
+    return type_str.startswith(("mc", "dmtet", "fc", "alpha", "orig"))
 
 
 def convert_mesh(type_str: str, mesh: Mesh) -> Mesh:
@@ -432,6 +434,8 @@ def convert_mesh(type_str: str, mesh: Mesh) -> Mesh:
         mc_mesh = mesh
     elif params["method"] == "mc":
         mc_mesh = convert_mesh_to_mc(mesh, params["res"])
+    elif params["method"] == "alpha":
+        mc_mesh = convert_mesh_to_alpha(mesh, params["res"])
     else:
         mc_mesh = convert_mesh_to_isosurface(mesh, params["method"], params["res"], params["fit_steps"])
     return _add_vert_feats(mc_mesh, params)
@@ -675,6 +679,55 @@ def convert_mesh_to_isosurface(mesh: Mesh, method: str, res: int = 16, fit_steps
         raise ValueError(f"{method}{res}: empty isosurface")
     return _finish_remesh(verts, faces, V, F, mesh, V.min(axis=0), V.max(axis=0),
                           f"{method.upper()}{res}" + (f"_o{fit_steps}" if fit_steps != ISOSURFACE_FIT_STEPS else ""))
+
+
+def convert_mesh_to_alpha(mesh: Mesh, n_verts: int = 500, n_pts: int = 10000, seed: int = 0) -> Mesh:
+    """od3d's ``alpha<N>`` mesh (the only geometry uCO3D / Every9D has) made from
+    a mesh: an alpha shape of *n_pts* points on the surface, decimated to at
+    most *n_verts* vertices. od3d builds it from the segmented point cloud
+    (od3d_datasets/sequence.py, mesh_type "alpha"); here the points are drawn
+    uniformly by area from the source surface (seeded, so caches are
+    reproducible), and the same loop follows: alpha starts at the mean
+    distance to the max(1 %, 3 / n)-quantile neighbour and grows by 1.1 (with
+    5 % fewer points) until the shape is watertight and vertex-manifold, then
+    quadric decimation shrinks the face budget by 0.9 until it fits."""
+    import numpy as np
+    import open3d
+    import trimesh
+
+    V, F = mesh.verts.cpu().numpy(), mesh.faces.cpu().numpy()
+    src = trimesh.Trimesh(V, F, process=False)
+    pts, _ = trimesh.sample.sample_surface(src, n_pts, seed=seed)
+    pts_t = torch.from_numpy(np.asarray(pts)).float()
+    q = max(0.01, 3.0 / len(pts_t))
+    alpha = float(torch.cdist(pts_t[None], pts_t[None])[0].quantile(q, dim=-1).mean())
+
+    pcl = open3d.geometry.PointCloud(open3d.utility.Vector3dVector(np.asarray(pts, dtype=np.float64)))
+    n_down, shape = len(pts_t), None
+    for _ in range(100):
+        shape = open3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcl, alpha)
+        if (len(shape.triangles) >= 4 and shape.is_watertight() and shape.is_vertex_manifold()):
+            break
+        alpha *= 1.1
+        n_down = max(int(n_down * 0.95), 4)
+        pcl = pcl.farthest_point_down_sample(n_down)
+    else:
+        raise ValueError(f"alpha{n_verts}: no watertight alpha shape after 100 tries (alpha {alpha:.4g})")
+    shape = shape.remove_unreferenced_vertices()
+
+    dec, n_faces = shape, n_verts * 2
+    while len(dec.vertices) > n_verts:
+        n_faces = int(n_faces * 0.9)
+        dec = shape.simplify_quadric_decimation(target_number_of_triangles=n_faces)
+    dec = dec.remove_unreferenced_vertices()
+    verts, faces = np.asarray(dec.vertices), np.asarray(dec.triangles)
+    # the alpha shape's winding is not consistent: orient outward, then hand
+    # _finish_remesh the igl winding it flips
+    t = trimesh.Trimesh(verts, faces, process=False)
+    trimesh.repair.fix_normals(t)
+    faces = np.asarray(t.faces)[:, [0, 2, 1]]
+    return _finish_remesh(np.asarray(t.vertices), faces, V, F, mesh, V.min(axis=0), V.max(axis=0),
+                          f"ALPHA{n_verts}")
 
 
 def _finish_remesh(verts, faces, V, F, mesh: Mesh, box_lo, box_hi, label: str) -> Mesh:
