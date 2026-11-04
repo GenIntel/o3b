@@ -82,6 +82,10 @@ pass (same heads, deep supervision) and has no pass embedding.
 ``num_passes`` without changing the parameters: passes beyond the trained ones
 reuse the last pass's embeddings (``pass_embed[-1]``, ``pose_pass_embed[-1]``), i.e.
 repeat the refinement step. Meant for testing more refinement at eval time.
+``pass_embedding: false`` (learned queries only) drops ``pass_embed`` and
+``pose_pass_embed``: every pass is the same function, so the layers can only tell
+the passes apart by their input (token features, PointROPE positions), and any
+number of passes runs without extrapolating an embedding.
 ``surface_sees_pose: false`` makes self-attention one-way: the pose token still
 attends to the surface tokens, the surface tokens no longer attend to it.
 ``pose_layers: n`` takes the pose token out of the passes' layers: every pass runs
@@ -167,6 +171,7 @@ class ShapeXAttn(OD3D_Model):
         anchor_extent: float = 0.5,
         learned_anchors: bool = True,
         rollout_passes: int = 0,
+        pass_embedding: bool = True,
     ):
         super().__init__()
         self.nocs = nocs
@@ -179,6 +184,8 @@ class ShapeXAttn(OD3D_Model):
         if rollout_passes and not learned_queries:
             raise ValueError("ShapeXAttn: rollout_passes needs learned_queries")
         self.rollout_passes = rollout_passes or num_passes
+        if not pass_embedding and not learned_queries:
+            raise ValueError("ShapeXAttn: pass_embedding false needs learned_queries")
         if num_init_layers and not learned_queries:
             raise ValueError("ShapeXAttn: num_init_layers needs learned_queries")
         if not surface_sees_pose and not (learned_queries and pose_query):
@@ -213,7 +220,8 @@ class ShapeXAttn(OD3D_Model):
                     self.anchor = nn.Parameter(anchor)
                 else:                                     # all queries start at the cloud origin
                     self.register_buffer("anchor", torch.zeros_like(anchor), persistent=False)
-            self.pass_embed = nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
+            self.pass_embed = (nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
+                               if pass_embedding else None)
             self.point_head = nn.Linear(dim, self.out_ch)
             if pose_query:
                 from o3b.model.posemlp.model import PoseMLP
@@ -261,7 +269,8 @@ class ShapeXAttn(OD3D_Model):
         if pose_layers:
             self.pose_norm = nn.LayerNorm(dim)
             g = torch.Generator().manual_seed(1)
-            self.pose_pass_embed = nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
+            self.pose_pass_embed = (nn.Parameter(torch.randn(num_passes, dim, generator=g) * 0.02)
+                                    if pass_embedding else None)
         if pose_query and not learned_queries:
             self.embed_pose = nn.Linear(in_dim, dim)
             self.pose_out = nn.Linear(dim, in_dim)
@@ -442,15 +451,16 @@ class ShapeXAttn(OD3D_Model):
             self_mask[p0:n_main, 0] = False                       # row: who attends, column: to whom
 
         # rollout_passes > num_passes: the extra passes repeat the last trained one
-        stages = [(self.layers, self.pass_embed[min(p, self.num_passes - 1)], min(p, self.num_passes - 1))
-                  for p in range(self.rollout_passes)]
+        stages = [(self.layers, 0. if self.pass_embed is None else self.pass_embed[min(p, self.num_passes - 1)],
+                   min(p, self.num_passes - 1)) for p in range(self.rollout_passes)]
         if len(self.init_layers) and not self.init_token:
             stages.insert(0, (self.init_layers, 0., None))
         for p, (layers, embed, i) in enumerate(stages):
             if i is not None and len(self.pose_layers):
                 # the pass's layers see the surface (+ masked) tokens only; the pose
                 # token goes through its own layers
-                qp, qs = q[:, :1] + self.pose_pass_embed[i], q[:, 1:] + embed
+                pe = 0. if self.pose_pass_embed is None else self.pose_pass_embed[i]
+                qp, qs = q[:, :1] + pe, q[:, 1:] + embed
                 sm = None if self_mask is None else self_mask[1:, 1:]
                 for layer in layers:
                     qs = layer(qs, q_pos[:, 1:], tok, tok_pos, tok_mask, self_mask=sm)
