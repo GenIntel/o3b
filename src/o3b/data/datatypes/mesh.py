@@ -386,6 +386,8 @@ def _parse_mc_type(type_str: str) -> dict:
     tets) or ``fc<N>`` (FlexiCubes), N SDF samples per axis; the latter two
     take ``_o<steps>`` for their surface fit (default ISOSURFACE_FIT_STEPS,
     ``_o0`` = plain extraction), see o3b/cv/isosurface/remesh.py.
+    ``fcs<N>`` is ``fc<N>`` with the sign-locked fit (no SDF sample changes
+    sign, so the fit cannot perforate thin walls; see remesh_isosurface).
     ``alpha<N>`` is od3d's alpha-shape mesh with at most N vertices
     (``convert_mesh_to_alpha``).
 
@@ -403,7 +405,7 @@ def _parse_mc_type(type_str: str) -> dict:
                 "view_sampling": m.group(1), "n_views": int(m.group(2)) if m.group(2) else None,
                 "resolution": int(m.group(3)) if m.group(3) else None, "feature_model": m.group(4)}
     m = re.fullmatch(
-        r"((mc|dmtet|fc|alpha)(\d+)(?:_o(\d+))?)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
+        r"((mc|dmtet|fcs|fc|alpha)(\d+)(?:_o(\d+))?)(?:_v(uni|rand)(\d+)(?:_r(\d+))?(?:_f([\w+@.]+))?)?",
         type_str,
     )
     if not m:
@@ -411,9 +413,9 @@ def _parse_mc_type(type_str: str) -> dict:
     if m.group(2) in ("mc", "alpha") and m.group(4) is not None:
         raise ValueError(f"{m.group(2)} has no surface fit, drop the _o: {type_str!r}")
     return {
-        "method":        m.group(2),                          # 'mc', 'dmtet', 'fc' or 'alpha'
+        "method":        m.group(2),                          # 'mc', 'dmtet', 'fc', 'fcs' or 'alpha'
         "res":           int(m.group(3)),                     # alpha: the vertex budget
-        "fit_steps":     (int(m.group(4)) if m.group(4) else ISOSURFACE_FIT_STEPS) if m.group(2) in ("dmtet", "fc") else None,
+        "fit_steps":     (int(m.group(4)) if m.group(4) else ISOSURFACE_FIT_STEPS) if m.group(2) in ("dmtet", "fc", "fcs") else None,
         "geometry":      m.group(1),                          # the type without features, e.g. 'fc16'
         "view_sampling": m.group(5),                          # 'uni', 'rand', or None
         "n_views":       int(m.group(6)) if m.group(6) else None,
@@ -667,6 +669,7 @@ def convert_mesh_to_mc(mesh: Mesh, res: int = 64) -> Mesh:
 
 
 def convert_mesh_to_isosurface(mesh: Mesh, method: str, res: int = 16, fit_steps: int = ISOSURFACE_FIT_STEPS) -> Mesh:
+    """``method`` 'dmtet', 'fc' or 'fcs' (FlexiCubes, sign-locked fit)."""
     """DMTet / FlexiCubes counterpart of ``convert_mesh_to_mc``: same grid box,
     SDF samples and finish (box clamp + stretch, texture atlas); the
     extraction, optionally fitted to the source surface, is in
@@ -674,7 +677,8 @@ def convert_mesh_to_isosurface(mesh: Mesh, method: str, res: int = 16, fit_steps
     from o3b.cv.isosurface.remesh import remesh_isosurface
 
     V, F = mesh.verts.cpu().numpy(), mesh.faces.cpu().numpy()
-    verts, faces = remesh_isosurface(V, F, method, res, fit_steps=fit_steps)
+    verts, faces = remesh_isosurface(V, F, "fc" if method == "fcs" else method, res, fit_steps=fit_steps,
+                                     sign_lock=method == "fcs")
     if faces.shape[0] == 0:
         raise ValueError(f"{method}{res}: empty isosurface")
     return _finish_remesh(verts, faces, V, F, mesh, V.min(axis=0), V.max(axis=0),

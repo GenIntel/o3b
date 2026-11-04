@@ -111,8 +111,18 @@ def remesh_isosurface(
     lr: float = 5e-3,
     n_samples: int = 10000,
     seed: int = 0,
+    sign_lock: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return (verts, faces) of the ``dmtet`` / ``fc`` remesh of (V, F).
+
+    ``sign_lock``: every SDF sample keeps its initial sign, sdf = sign0 * softplus(theta).
+    Free, Adam moves each sample by ~lr per step whatever its gradient, so the
+    snapped samples (-1e-5) flip in the first steps, and the chamfer barely
+    notices the tunnels that opens through thin walls (a HouseCorr3D mug at
+    fc32: 1,907 flips, genus 1 -> 125, chamfer 1.55e-4 unfitted -> 3.51e-4).
+    Locked, the surface still moves through the deformation, the cube weights
+    and the SDF magnitudes (genus 1, chamfer 1.31e-4). The price is that a part
+    thinner than a cell can no longer grow inside-samples during the fit.
 
     Faces are wound like ``igl.marching_cubes`` on an inside-negative SDF, so
     the caller can finish exactly as ``convert_mesh_to_mc`` does.
@@ -158,25 +168,33 @@ def remesh_isosurface(
     S = np.where(snap, -1e-5, S)
 
     x0 = torch.as_tensor((grid - center) / L, dtype=torch.float32, device=dev)
-    sdf = torch.nn.Parameter(torch.as_tensor(S / L, dtype=torch.float32, device=dev))
+    s0 = torch.as_tensor(S / L, dtype=torch.float32, device=dev)
+    if sign_lock:
+        sign0 = torch.where(s0 < 0, -1.0, 1.0)
+        mag = s0.abs().clamp(min=1e-6)
+        theta = torch.nn.Parameter(mag + torch.log(-torch.expm1(-mag)))  # softplus^-1(|s0|)
+        sdf_of = lambda: sign0 * torch.nn.functional.softplus(theta)
+    else:
+        theta = torch.nn.Parameter(s0.clone())
+        sdf_of = lambda: theta
     deform = torch.nn.Parameter(torch.zeros_like(x0))
     edges = _unique_edges(cells, edge_pairs)
     max_disp = (x0[edges[:, 0]] - x0[edges[:, 1]]).norm(dim=1).mean() / 4  # nvdiffrec's FlexiCubes bound
 
     if method == "fc":
         weights = torch.nn.Parameter(torch.ones(cells.shape[0], 21, device=dev))
-        params = [sdf, deform, weights]
+        params = [theta, deform, weights]
 
         def extract(training):
-            v, f, l_dev = fc(x0 + max_disp * torch.tanh(deform), sdf, cells, n - 1,
+            v, f, l_dev = fc(x0 + max_disp * torch.tanh(deform), sdf_of(), cells, n - 1,
                              weights[:, :12], weights[:, 12:20], weights[:, 20], training=training)
             return v, f, l_dev.mean() if l_dev.numel() else torch.zeros((), device=dev)
     else:
         mt = DMTet(device=dev)
-        params = [sdf, deform]
+        params = [theta, deform]
 
         def extract(training):
-            v, f = mt(x0 + max_disp * torch.tanh(deform), -sdf, cells)  # DMTet: inside > 0
+            v, f = mt(x0 + max_disp * torch.tanh(deform), -sdf_of(), cells)  # DMTet: inside > 0
             return v, f, torch.zeros((), device=dev)
 
     if fit_steps > 0:
@@ -193,7 +211,7 @@ def remesh_isosurface(
             cd = _chamfer(_sample_surface(v, f, n_samples, gen), target)
             # nvdiffrec's schedule: 0.2 decaying to 0.01 over the first quarter
             sdf_w = 0.2 - (0.2 - 0.01) * min(1.0, 4.0 * it / fit_steps)
-            loss = cd + sdf_w * sdf_reg_loss(sdf, edges).mean() * 1e-3 + 0.25 * l_dev * 1e-3
+            loss = cd + sdf_w * sdf_reg_loss(sdf_of(), edges).mean() * 1e-3 + 0.25 * l_dev * 1e-3
             opt.zero_grad()
             loss.backward()
             opt.step()
