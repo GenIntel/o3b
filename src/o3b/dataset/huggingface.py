@@ -245,10 +245,12 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
     try:
         api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
 
-        uploaded = _uploaded_configs(api, repo_id)
-        if config_name in uploaded and not override:
-            print(f"{repo_id} already holds config '{config_name}' — skipping "
-                  f"(pass --override to replace it).")
+        # per split: one config can hold several (GenIntelLab/Every9D's frames
+        # has train and test), and uploading the second must not read as a re-upload
+        uploaded = _uploaded_splits(api, repo_id)
+        if (config_name, split) in uploaded and not override:
+            print(f"{repo_id} already holds split '{split}' of config '{config_name}' "
+                  f"— skipping (pass --override to replace it).")
             return
 
         _delete_non_parquet(api, repo_id, config_name)
@@ -262,7 +264,8 @@ def upload_sharded(config_path: Path, *, platform: str = "default",
             load_from_disk(str(path)), api, repo_id,
             config_name=config_name, split=split,
             private=private, token=token,
-            commit_message=f"{'update' if config_name in uploaded else 'add'} {config_name}",
+            commit_message=(f"{'update' if (config_name, split) in uploaded else 'add'} "
+                            f"{config_name} ({split})"),
         )
         # The mesh sidecar is a dataset of its own (object_id → mesh), stored
         # next to the shards locally; on the hub it is a second config so the
@@ -417,17 +420,19 @@ def _delete_non_parquet(api, repo_id: str, config_name: str) -> None:
     )
 
 
-def _uploaded_configs(api, repo_id: str) -> set[str]:
-    """Config names already in the repo, read off the data files it holds.
+def _uploaded_splits(api, repo_id: str) -> set[tuple[str, str]]:
+    """``(config, split)`` pairs already in the repo, read off its data files.
 
-    Cheaper and more robust than parsing the README ``configs:`` block, and it
-    also catches a config whose card entry was hand-edited away.
+    ``push_to_hub`` names them ``<config>/<split>-00000-of-000NN.parquet``.  Cheaper
+    and more robust than parsing the README ``configs:`` block, and it also catches
+    a config whose card entry was hand-edited away.
     """
     try:
         files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
     except Exception:
         return set()
-    return {f.split("/")[0] for f in files if f.endswith(".parquet") and "/" in f}
+    return {(f.split("/")[0], f.split("/")[1].split("-")[0])
+            for f in files if f.endswith(".parquet") and f.count("/") == 1}
 
 
 def _identity(api, platform: str) -> str:

@@ -52,6 +52,8 @@ def _build_dataset_parser(sub):
     p = sub.add_parser("dataset", help="Dataset commands (fetch, index, init, viz)")
     ds_sub = p.add_subparsers(dest="dataset_command", required=True)
 
+    OBB_ROOT = "research/hypotheses/h09-every9d-label-quality"
+
     def _add_config(q):
         from o3b.dataset.cli import _resolve_dataset_config
         q.add_argument(
@@ -435,6 +437,65 @@ def _build_dataset_parser(sub):
                              "background, 0 to disable (default: %(default)s)")
     p_axes.add_argument("--category", default=None, metavar="NAME",
                         help="Start on this category")
+
+    p_obb_sample = ds_sub.add_parser(
+        "annotate-obb-sample",
+        help="Draw one object per category to re-annotate from named subsets, old labels first, "
+             "into <path_preprocess>/subset/<source>_verify<N>.yaml",
+    )
+    _add_config(p_obb_sample)
+    p_obb_sample.add_argument("--source", action="append", required=True, metavar="SUBSET",
+                              help="Subset to draw from; repeat for several")
+    p_obb_sample.add_argument("-n", "--count", type=int, default=100, metavar="N")
+    p_obb_sample.add_argument("--root", default=OBB_ROOT, metavar="DIR")
+    p_obb_sample.add_argument("--replace", action="store_true",
+                              help="Redraw existing lists; refused once annotations exist")
+
+    p_obb_pack = ds_sub.add_parser(
+        "annotate-obb-pack",
+        help="Copy the frames, cameras and mesh of the sampled objects to a local "
+             "cache, without reading any official pose",
+    )
+    _add_config(p_obb_pack)
+    p_obb_pack.add_argument("--root", default=OBB_ROOT, metavar="DIR")
+    p_obb_pack.add_argument("--pack", default=None, metavar="DIR",
+                            help="Default: ~/.o3b/cache/verify_labels")
+    p_obb_pack.add_argument("--limit", type=int, default=None, metavar="N",
+                            help="Only the first N objects of each sample")
+
+    p_obb = ds_sub.add_parser(
+        "annotate-obb",
+        help="Annotate oriented 3-D boxes on the sample in the browser, blind to "
+             "the official labels, with a Compare button",
+    )
+    _add_config(p_obb)
+    p_obb.add_argument("--root", default=OBB_ROOT, metavar="DIR")
+    p_obb.add_argument("--pack", default=None, metavar="DIR")
+    p_obb.add_argument("--port", type=int, default=None, metavar="PORT")
+    p_obb.add_argument("--annotator", default=None, metavar="NAME")
+    p_obb.add_argument("--include-old", action="store_true",
+                       help="Also queue the objects that have an old label, to re-annotate "
+                            "them from scratch; a new annotation replaces the old label")
+    p_obb.add_argument("--official", default="every9d_v7", metavar="TFORM_OBJ_TYPE",
+                       help="tform_obj type to compare with (default: %(default)s)")
+
+    p_obb_cmp = ds_sub.add_parser(
+        "annotate-obb-compare",
+        help="Score all saved annotations against the official labels, per cohort",
+    )
+    _add_config(p_obb_cmp)
+    p_obb_cmp.add_argument("--root", default=OBB_ROOT, metavar="DIR")
+    p_obb_cmp.add_argument("--pack", default=None, metavar="DIR")
+    p_obb_cmp.add_argument("--official", default="every9d_v7", metavar="TFORM_OBJ_TYPE")
+
+    p_obb_old = ds_sub.add_parser(
+        "annotate-obb-import-old",
+        help="Bring od3d's earlier pose labels in as read-only comparison cohorts",
+    )
+    _add_config(p_obb_old)
+    p_obb_old.add_argument("--root", default=OBB_ROOT, metavar="DIR")
+    p_obb_old.add_argument("--source", required=True, metavar="DIR",
+                           help="od3d's scripts/pose_labeling_share")
 
     p_sax = ds_sub.add_parser(
         "select-and-axes-tform-obj-type",
@@ -918,6 +979,38 @@ def _run_dataset(args, parser=None, argv=None):
                                category=args.category, max_height=args.max_height,
                                max_count=args.max_count,
                                no_index=args.no_index)
+        return
+    elif args.dataset_command == "annotate-obb-sample":
+        from o3b.dataset.verify_labels.sample import run_sample
+        run_sample(cfg.path_preprocess, args.root, args.source, count=args.count,
+                   replace=args.replace)
+        return
+    elif args.dataset_command == "annotate-obb-pack":
+        from o3b.dataset.verify_labels.compare import _sample_ids
+        from o3b.dataset.verify_labels.pack import run_pack
+        ids = [i for sample in _sample_ids(args.root).values() for i in sorted(sample)[:args.limit]]
+        failed = run_pack(cfg, ids, args.pack)
+        print(f"packed {len(ids) - len(failed)} of {len(ids)}" + (f"; failed: {failed}" if failed else ""))
+        return
+    elif args.dataset_command == "annotate-obb":
+        from o3b.dataset.verify_labels.viewer import run_viewer
+        run_viewer(cfg, args.root, pack_root=args.pack, port=args.port, annotator=args.annotator,
+                   official=args.official, include_old=args.include_old)
+        return
+    elif args.dataset_command == "annotate-obb-compare":
+        from o3b.dataset import tform_obj_store
+        from o3b.dataset.verify_labels.compare import run_compare
+        table = tform_obj_store.load_all(cfg.path_preprocess, args.official)
+        if table is None:
+            print(f"no tform_obj/{args.official}.db under {cfg.path_preprocess}", file=sys.stderr)
+            sys.exit(1)
+        _, markdown = run_compare(args.root, table, args.pack,
+                                  db_path=tform_obj_store.db_path(cfg.path_preprocess, args.official))
+        print(markdown)
+        return
+    elif args.dataset_command == "annotate-obb-import-old":
+        from o3b.dataset.verify_labels.import_old import run_import
+        run_import(args.root, args.source, cfg)
         return
     elif args.dataset_command == "select-subset":
         from o3b.dataset.select_subset import run_subset_editor

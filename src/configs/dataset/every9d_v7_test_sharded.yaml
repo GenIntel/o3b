@@ -16,6 +16,9 @@ defaults:
   - every9d_v7_test
   - _self_
 
+# The hub split this uploads to and loads from; UCO3D itself does not read it.
+split: test
+
 categories:            # null = every category the subset covers
 filter_count_max:
 
@@ -61,3 +64,9 @@ transform:
 
 sharded_name: every9d_v7_test_r${img_size}_all
 sharded_override: false
+
+# Published as GenIntelLab/Every9D, config `frames`; no version in any public name.
+# Upload this config to push its split (see hub/every9d/PLAN.md in Every9Dv2).
+huggingface_name: GenIntelLab/Every9D
+huggingface_config_name: frames
+use_huggingface: false
