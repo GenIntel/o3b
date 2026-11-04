@@ -1,0 +1,9 @@
+# H04 / Trinity-Shape on sign-locked FlexiCubes meshes (26-11-04): trained on fcs32 instead of fc32 (fc32's free fit perforates thin walls), geometry term with the Euclidean 3-D distance, threshold c = 0.05 with push apart (= Trinity-Shape, pfd_sd15pf32_all_h10_geo005_48k, retrained on fcs32).
+# Otherwise pfd_sd15pf32_all_h10_geo005_48k: one field for all 50 HouseCorr3D categories, 10 non-keypoint training instances per category (heldout:10), PartField trunk, 4 meshes per step, cross-instance pairs, feature term from SD 1.5 + PartField, 32 dims, 48k steps, cosine floored at 10 %.
+# The checkpoint is written by the training job into the cluster checkout.
+class_name: PartPointField
+ckpt_path: "checkpoints/feat_distill/pfd_sd15pf32_all_h10_geo005_48k_fcs32.pth"
+out_dim: 32
+n_pc_points: 100000
+seed: 0
+freeze: true

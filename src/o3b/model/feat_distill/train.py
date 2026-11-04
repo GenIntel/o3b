@@ -94,6 +94,25 @@ def load_meshes(args) -> list[dict]:
     return out
 
 
+def local_geodesics(verts: torch.Tensor, faces: torch.Tensor, max_dist: float):
+    """Exact geodesic distances (gdist, MMP) between the vertices closer than ``max_dist`` along the
+    surface, as (welded id per vertex (V,), number of welded vertices W, sorted keys wi * W + wj,
+    distances): the cached meshes split vertices along UV seams, which would disconnect the surface."""
+    import gdist
+    import numpy as np
+
+    v = verts.double().numpy()
+    _, first, wid = np.unique(np.round(v, 6), axis=0, return_index=True, return_inverse=True)
+    wid = wid.reshape(-1)
+    f = wid[faces.numpy()].astype(np.int32)
+    f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+    D = gdist.local_gdist_matrix(v[first], f, max_distance=max_dist).tocoo()
+    W = len(first)
+    keys = torch.from_numpy(D.row.astype(np.int64) * W + D.col.astype(np.int64))
+    order = torch.argsort(keys)
+    return torch.from_numpy(wid).long(), W, keys[order], torch.from_numpy(D.data).float()[order]
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--categories", required=True, type=lambda s: s.split(","))
@@ -123,6 +142,10 @@ def main() -> None:
                    help="pairs beyond the clamp: 'hinge' pushes their features at least c apart, "
                         "'none' leaves them to the teacher term")
     p.add_argument("--geo-clamp", type=float, default=0.3)
+    p.add_argument("--geo-dist", choices=("euclidean", "geodesic"), default="euclidean",
+                   help="d of the geometry term: the 3-D distance, or the exact geodesic distance on the "
+                        "mesh (gdist, computed up to c once per mesh; pairs not connected within c count "
+                        "as far). Needs a finite --geo-clamp and watertight, manifold meshes (fcs<N>)")
     p.add_argument("--feats-on-cpu", action="store_true",
                    help="keep the teacher features on the CPU in fp16 and move only each step's pairs "
                         "(500 fc32 meshes x 1728 dims are ~17 GB)")
@@ -174,6 +197,17 @@ def main() -> None:
             m["geo_scale"] = float((m["feats"][i].float() - m["feats"][j].float()).norm(dim=1).mean().cpu() / dx.mean())
         else:
             m["geo_scale"] = float(args.geo_scale)
+    if args.geo_weight > 0 and args.geo_dist == "geodesic":
+        if not math.isfinite(args.geo_clamp) or args.geo_scale == "auto":
+            raise ValueError("--geo-dist geodesic needs a finite --geo-clamp and a numeric --geo-scale")
+        t_geo, n_ent = time.time(), 0
+        for m in meshes:
+            wid, W, keys, vals = local_geodesics(m["verts"], m["faces"], args.geo_clamp * m["size"])
+            m["wid"], m["n_welded"] = wid.to(dev), W
+            m["geo_keys"], m["geo_vals"] = keys.to(dev), (vals / m["size"]).to(dev)
+            n_ent += len(keys)
+        print(f"geodesics within c = {args.geo_clamp}: {n_ent / len(meshes):.0f} pairs per mesh, "
+              f"{time.time() - t_geo:.0f}s", flush=True)
     if args.geo_scale == "auto":
         sc = torch.tensor([m["geo_scale"] for m in meshes])
         print(f"geometry scale (auto): mean {sc.mean():.3f}, min {sc.min():.3f}, max {sc.max():.3f}", flush=True)
@@ -299,7 +333,15 @@ def main() -> None:
             c = args.geo_clamp
             dg = (g[:n] - g[n:]).pow(2).sum(dim=1).add(1e-12).sqrt()
             with torch.no_grad():
-                dx = (m["verts_dev"][i.to(dev)] - m["verts_dev"][j.to(dev)]).norm(dim=1) / m["size"]
+                if args.geo_dist == "geodesic":
+                    wi, wj = m["wid"][i.to(dev)], m["wid"][j.to(dev)]
+                    q = wi * m["n_welded"] + wj
+                    pos = torch.searchsorted(m["geo_keys"], q).clamp(max=len(m["geo_keys"]) - 1)
+                    hit = m["geo_keys"][pos] == q
+                    dx = torch.where(hit, m["geo_vals"][pos], torch.full_like(q, 2 * c, dtype=torch.float))
+                    dx = torch.where(wi == wj, torch.zeros_like(dx), dx)
+                else:
+                    dx = (m["verts_dev"][i.to(dev)] - m["verts_dev"][j.to(dev)]).norm(dim=1) / m["size"]
                 near = dx < c
             # no hinge branch at c = inf: where() would backpropagate 0 * inf = nan through it
             hinge = args.geo_far == "hinge" and math.isfinite(c)
