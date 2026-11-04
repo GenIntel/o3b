@@ -86,6 +86,9 @@ repeat the refinement step. Meant for testing more refinement at eval time.
 ``pose_pass_embed``: every pass is the same function, so the layers can only tell
 the passes apart by their input (token features, PointROPE positions), and any
 number of passes runs without extrapolating an embedding.
+``global_feat: false`` (learned queries only) drops the projection of ``feat``
+(the DINOv2 cls feature) from every query and masked token: the decoder then sees
+the image only through LitePT's tokens.
 ``surface_sees_pose: false`` makes self-attention one-way: the pose token still
 attends to the surface tokens, the surface tokens no longer attend to it.
 ``pose_layers: n`` takes the pose token out of the passes' layers: every pass runs
@@ -172,6 +175,7 @@ class ShapeXAttn(OD3D_Model):
         learned_anchors: bool = True,
         rollout_passes: int = 0,
         pass_embedding: bool = True,
+        global_feat: bool = True,
     ):
         super().__init__()
         self.nocs = nocs
@@ -186,6 +190,9 @@ class ShapeXAttn(OD3D_Model):
         self.rollout_passes = rollout_passes or num_passes
         if not pass_embedding and not learned_queries:
             raise ValueError("ShapeXAttn: pass_embedding false needs learned_queries")
+        if not global_feat and not learned_queries:
+            raise ValueError("ShapeXAttn: global_feat false needs learned_queries")
+        self.dim = dim
         if num_init_layers and not learned_queries:
             raise ValueError("ShapeXAttn: num_init_layers needs learned_queries")
         if not surface_sees_pose and not (learned_queries and pose_query):
@@ -247,7 +254,7 @@ class ShapeXAttn(OD3D_Model):
         # only the masked XYZ tokens embed a point
         if not learned_queries or mask_tokens or init_token:
             self.embed_pt = _mlp([3, dim // 2, dim])
-        self.embed_glob = nn.Linear(in_dim, dim)
+        self.embed_glob = nn.Linear(in_dim, dim) if global_feat else None
         self.layers = nn.ModuleList([
             _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout,
                    self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
@@ -404,7 +411,7 @@ class ShapeXAttn(OD3D_Model):
         C, K = self.coarse_count, self.fold_count
         obj_tform = frames_pred.obj_tform4x4_obj_nocs_0c
 
-        glob = self.embed_glob(feat)[:, None]
+        glob = self._glob(feat)
         tok_pos = tok_coord / self.rope_unit
         p0 = 1 if self.pose_query else 0
         aux_pts, aux_extra, aux_pose = [], [], []
@@ -557,12 +564,19 @@ class ShapeXAttn(OD3D_Model):
         return transf3d_broadcast(pts3d=pts, transf4x4=inv_tform4x4(
             frames_pred.obj_tform4x4_obj_nocs_0c.detach().float())[:, None])
 
+    def _glob(self, feat):
+        """The projected global (cls) feature added to every query, (B, 1, dim); zeros
+        with ``global_feat: false``."""
+        if self.embed_glob is None:
+            return feat.new_zeros(feat.shape[0], 1, self.dim)
+        return self.embed_glob(feat)[:, None]
+
     def _mask_tokens(self, feat, q, q_pos, xyz, ppf):
         """Append XYZ-known tokens (``xyz``, cloud frame) then feature-known tokens
         (``ppf``) after the queries; either may be None. Returns the queries,
         their positions and the self-attention mask."""
         B = q.shape[0]
-        glob = self.embed_glob(feat)[:, None]
+        glob = self._glob(feat)
         toks, pos = [q], [q_pos]
         if xyz is not None:
             toks.append(self.embed_pt(xyz) + glob + self.mask_type[0])
