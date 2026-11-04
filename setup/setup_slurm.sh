@@ -947,6 +947,9 @@ if _is_true "${INSTALL_AFFNET}"; then
     # sys.path by the runner. The merged checkpoint (wudongming/AffordanceVLM) and
     # its CLIP tower are fetched into HF_HOME here, so the job does not download.
     echo "--- pip install affnet deps (AffordanceVLM: transformers 4.31) ---"
+    # the weights go where the runs read them (the platform's path_hf_home), never
+    # into ~/.cache, which on the cluster is a small quota-limited home
+    export HF_HOME="${HF_HOME:-${PATH_WS}/hf}"
     AFFNET_DIR="${AFFNET_DIR:-third_party/AffordanceNet}"
     AFFNET_COMMIT="${AFFNET_COMMIT:-bf5a17148fda33f935611d8ffe69e97a14528a90}"
     if [ ! -d "${AFFNET_DIR}/.git" ]; then
@@ -973,6 +976,7 @@ if _is_true "${INSTALL_UNIAFF}"; then
     # commit. The checkpoint is two model-parallel shards (2 GPUs), fetched into
     # HF_HOME; SAM ViT-H turns its grasp boxes into masks, as the paper does.
     echo "--- pip install uniaff deps (LLaMA2-Accessory) ---"
+    export HF_HOME="${HF_HOME:-${PATH_WS}/hf}"   # not ~/.cache (quota-limited home)
     ACC_DIR="${ACC_DIR:-third_party/LLaMA2-Accessory}"
     ACC_COMMIT="${ACC_COMMIT:-3777c43940ddfb45d3bc1046b118ca4401747ee2}"
     if [ ! -d "${ACC_DIR}/.git" ]; then
@@ -986,7 +990,7 @@ if _is_true "${INSTALL_UNIAFF}"; then
     pip install --no-deps -e "${ACC_DIR}"
     python -c "from huggingface_hub import snapshot_download as d; d('SiyuanH/UniAff-13B')" \
         || echo "WARNING: could not fetch SiyuanH/UniAff-13B into HF_HOME -- the runner will try at start."
-    SAM_CKPT="${HF_HOME:-${HOME}/.cache/huggingface}/sam_vit_h_4b8939.pth"
+    SAM_CKPT="${HF_HOME}/sam_vit_h_4b8939.pth"
     [ -f "${SAM_CKPT}" ] || wget -q -O "${SAM_CKPT}" https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
         || echo "WARNING: could not fetch sam_vit_h_4b8939.pth to ${SAM_CKPT}."
     python -c "import accessory, fairscale, open_clip, segment_anything; from accessory.model.meta import MetaModel" \
