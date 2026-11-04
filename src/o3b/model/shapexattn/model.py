@@ -78,6 +78,10 @@ as the queries' PointROPE positions. Earlier passes are deep supervision
 ``num_init_layers`` adds a block of layers with their own weights that runs once
 before the passes, to give them their initial tokens and points; it ends like a
 pass (same heads, deep supervision) and has no pass embedding.
+``rollout_passes`` (learned queries only) runs that many passes instead of
+``num_passes`` without changing the parameters: passes beyond the trained ones
+reuse the last pass's embeddings (``pass_embed[-1]``, ``pose_pass_embed[-1]``), i.e.
+repeat the refinement step. Meant for testing more refinement at eval time.
 ``surface_sees_pose: false`` makes self-attention one-way: the pose token still
 attends to the surface tokens, the surface tokens no longer attend to it.
 ``pose_layers: n`` takes the pose token out of the passes' layers: every pass runs
@@ -162,6 +166,7 @@ class ShapeXAttn(OD3D_Model):
         init_token: bool = False,
         anchor_extent: float = 0.5,
         learned_anchors: bool = True,
+        rollout_passes: int = 0,
     ):
         super().__init__()
         self.nocs = nocs
@@ -171,6 +176,9 @@ class ShapeXAttn(OD3D_Model):
         self.rope_unit = rope_unit
         self.learned_queries = learned_queries
         self.num_passes = num_passes
+        if rollout_passes and not learned_queries:
+            raise ValueError("ShapeXAttn: rollout_passes needs learned_queries")
+        self.rollout_passes = rollout_passes or num_passes
         if num_init_layers and not learned_queries:
             raise ValueError("ShapeXAttn: num_init_layers needs learned_queries")
         if not surface_sees_pose and not (learned_queries and pose_query):
@@ -433,7 +441,9 @@ class ShapeXAttn(OD3D_Model):
                 self_mask = torch.ones(q.shape[1], q.shape[1], dtype=torch.bool, device=q.device)
             self_mask[p0:n_main, 0] = False                       # row: who attends, column: to whom
 
-        stages = [(self.layers, self.pass_embed[p], p) for p in range(self.num_passes)]
+        # rollout_passes > num_passes: the extra passes repeat the last trained one
+        stages = [(self.layers, self.pass_embed[min(p, self.num_passes - 1)], min(p, self.num_passes - 1))
+                  for p in range(self.rollout_passes)]
         if len(self.init_layers) and not self.init_token:
             stages.insert(0, (self.init_layers, 0., None))
         for p, (layers, embed, i) in enumerate(stages):
