@@ -958,7 +958,7 @@ if _is_true "${INSTALL_AFFNET}"; then
     fi
     _git_retry git -C "${AFFNET_DIR}" fetch --quiet origin || true
     git -C "${AFFNET_DIR}" checkout --quiet "${AFFNET_COMMIT}"
-    pip install "transformers==4.31.0" "peft==0.4.0" "tokenizers<0.14" sentencepiece "einops==0.4.1" \
+    pip install "transformers==4.31.0" "peft==0.4.0" "tokenizers<0.14" sentencepiece "einops==0.4.1" scikit-image \
         opencv-python pycocotools scipy "huggingface_hub<0.25" "accelerate<0.30"
     python -c "from huggingface_hub import snapshot_download as d; d('wudongming/AffordanceVLM'); d('openai/clip-vit-large-patch14')" \
         || echo "WARNING: could not fetch wudongming/AffordanceVLM / CLIP into HF_HOME -- the runner will try at start."
