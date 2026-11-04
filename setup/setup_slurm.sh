@@ -40,6 +40,7 @@ INSTALL_SAM3="${INSTALL_SAM3:-false}"
 INSTALL_ZEROSHOT="${INSTALL_ZEROSHOT:-false}"
 INSTALL_RECGEN="${INSTALL_RECGEN:-false}"
 INSTALL_F2G="${INSTALL_F2G:-false}"
+INSTALL_AFFNET="${INSTALL_AFFNET:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
 GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
 GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
@@ -933,6 +934,33 @@ if _is_true "${INSTALL_F2G}"; then
     python -c "import f2g_pose, pointnet2_ops, cutoop" \
         && echo "--- F2G-Pose deps import OK ---" \
         || echo "WARNING: F2G-Pose's dependencies do not all import -- F2GPoseMethod will fail."
+fi
+
+
+if _is_true "${INSTALL_AFFNET}"; then
+    # AffordanceNet / AffordanceVLM-7B (https://github.com/wudongming97/AffordanceNet,
+    # RAGNet, ICCV 2025): the H12 baseline on HANDAL handle segmentation, run by
+    # research/hypotheses/h12-handal-affordance/quantitative/run_affordancevlm_handal.py.
+    # LISA-style code pinned to transformers 4.31 / peft 0.4, hence its own env
+    # (platform slurm_lmbl40_affnet). Not pip-installable: cloned and put on
+    # sys.path by the runner. The merged checkpoint (wudongming/AffordanceVLM) and
+    # its CLIP tower are fetched into HF_HOME here, so the job does not download.
+    echo "--- pip install affnet deps (AffordanceVLM: transformers 4.31) ---"
+    AFFNET_DIR="${AFFNET_DIR:-third_party/AffordanceNet}"
+    AFFNET_COMMIT="${AFFNET_COMMIT:-bf5a17148fda33f935611d8ffe69e97a14528a90}"
+    if [ ! -d "${AFFNET_DIR}/.git" ]; then
+        echo "--- git clone AffordanceNet ---"
+        _git_retry git clone https://github.com/wudongming97/AffordanceNet.git "${AFFNET_DIR}"
+    fi
+    _git_retry git -C "${AFFNET_DIR}" fetch --quiet origin || true
+    git -C "${AFFNET_DIR}" checkout --quiet "${AFFNET_COMMIT}"
+    pip install "transformers==4.31.0" "peft==0.4.0" "tokenizers<0.14" sentencepiece "einops==0.4.1" \
+        opencv-python pycocotools scipy "huggingface_hub<0.25" "accelerate<0.30"
+    python -c "from huggingface_hub import snapshot_download as d; d('wudongming/AffordanceVLM'); d('openai/clip-vit-large-patch14')" \
+        || echo "WARNING: could not fetch wudongming/AffordanceVLM / CLIP into HF_HOME -- the runner will try at start."
+    PYTHONPATH="${AFFNET_DIR}" python -c "from model.AffordanceVLM import AffordanceVLMForCausalLM; from utils.aff_seg_dataset import AffValDataset" \
+        && echo "--- AffordanceNet imports OK ---" \
+        || echo "WARNING: AffordanceNet does not import -- run_affordancevlm_handal.py will fail."
 fi
 
 
