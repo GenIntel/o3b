@@ -114,6 +114,9 @@ class Mesh:
     faces_uvs:   Optional[Tensor] = None  # (F, 3) int64 UV face indices
     texture:     Optional[Tensor] = None  # (3, H, W) float
     vert_feats:  Optional[Tensor] = None  # (V, C) float — per-vertex feature vectors
+    # (V,) float in [0, 1] — per-vertex affordance label (HANDAL: 1 = handle,
+    # from models_parts); None where the dataset has no part annotation
+    vert_labels: Optional[Tensor] = None
 
     def save(self, path: Path) -> None:
         """Export this mesh to a GLB file, and vert_feats to a sibling .pt file.

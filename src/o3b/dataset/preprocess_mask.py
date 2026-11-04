@@ -19,6 +19,15 @@ in every choice that changes the mask:
 * written as an 8-bit 0/255 PNG at ``mask/sam3_bbox/<name_unique>.png``, which
   is ``<split>/<category>[/<sequence>]/<frame>`` — the key both packages use.
 
+``sam3_text`` (H12) prompts SAM 3's text model (``Sam3Model``, promptable
+concept segmentation) with the frame's category name and nothing else — no box,
+no point — and keeps the highest-scoring instance (an empty mask when none
+passes the 0.5 score threshold). The name is ``_mask_text_prompt(row)``: for
+HANDAL the category directory as AffordanceNet words its prompt ("power
+drills"), so the baselines and this mask see the same text. It is the test-time
+object mask for a "no ground truth at test time" protocol, which a box prompt
+from the annotated box would not be.
+
 Needs the ``sam3`` dependency group (``transformers`` 5, see setup_slurm.sh) and
 the gated ``facebook/sam3`` weights in the HF cache; ``slurm_lmbl40_sam3`` sets
 both. Run it where the data is:
@@ -33,7 +42,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MASK_TYPES = ("sam3_bbox",)
+MASK_TYPES = ("sam3_bbox", "sam3_text")
 
 
 class Sam3BoxSegmenter:
@@ -96,6 +105,48 @@ class Sam3BoxSegmenter:
         return masks, scores
 
 
+class Sam3TextSegmenter:
+    """SAM 3's text model: the instance with the highest score for a concept."""
+
+    def __init__(self, device: str = "cuda", score_threshold: float = 0.5,
+                 mask_threshold: float = 0.5):
+        import torch
+        from transformers import Sam3Model, Sam3Processor
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        self.device = torch.device(device)
+        self.model = Sam3Model.from_pretrained("facebook/sam3").to(self.device).eval()
+        self.processor = Sam3Processor.from_pretrained("facebook/sam3")
+        self.score_threshold = score_threshold
+        self.mask_threshold = mask_threshold
+
+    def __call__(self, images, texts):
+        """images: list of HxWx3 uint8 arrays; texts: one concept per image.
+
+        Returns a list of HxW bool masks and a list of float scores (0 and an
+        empty mask where nothing passes the threshold).
+        """
+        import torch
+
+        masks, scores = [], []
+        for img, text in zip(images, texts):
+            inputs = self.processor(images=img, text=text, return_tensors="pt").to(self.device)
+            with torch.inference_mode():
+                out = self.model(**inputs)
+            res = self.processor.post_process_instance_segmentation(
+                out, threshold=self.score_threshold, mask_threshold=self.mask_threshold,
+                target_sizes=inputs.get("original_sizes").tolist())[0]
+            if len(res["masks"]) == 0:
+                masks.append(torch.zeros(img.shape[:2], dtype=torch.bool))
+                scores.append(0.0)
+                continue
+            i = int(torch.as_tensor(res["scores"]).argmax())
+            masks.append(torch.as_tensor(res["masks"][i]).cpu() > 0)
+            scores.append(float(res["scores"][i]))
+        return masks, scores
+
+
 def run_preprocess_mask(config_path: Path, *, platform: str = "default",
                         mask_type: str = "sam3_bbox", override: bool = False,
                         limit: int | None = None, batch_size: int = 1) -> None:
@@ -139,13 +190,17 @@ def run_preprocess_mask(config_path: Path, *, platform: str = "default",
     if not todo:
         return
 
-    seg = Sam3BoxSegmenter()
+    text_mode = mask_type == "sam3_text"
+    seg = Sam3TextSegmenter() if text_mode else Sam3BoxSegmenter()
     n_written = n_skipped = 0
     for i in tqdm(range(0, len(todo), batch_size), unit="batch"):
         imgs, bboxs, outs = [], [], []
         for row in todo[i:i + batch_size]:
             meta = load_meta_yaml(ds.meta_path(row))
-            bbox = ds._mask_prompt_bbox_from_meta(meta) if meta is not None else None
+            if text_mode:
+                bbox = ds._mask_text_prompt(row) if meta is not None else None
+            else:
+                bbox = ds._mask_prompt_bbox_from_meta(meta) if meta is not None else None
             if meta is None or bbox is None or not meta.get("rfpath_rgb"):
                 n_skipped += 1
                 continue
@@ -155,7 +210,8 @@ def run_preprocess_mask(config_path: Path, *, platform: str = "default",
                 continue
             with Image.open(p) as im:
                 imgs.append(np.asarray(im.convert("RGB")).copy())
-            bboxs.append([float(v) for v in (bbox.tolist() if hasattr(bbox, "tolist") else bbox)])
+            bboxs.append(bbox if text_mode else
+                         [float(v) for v in (bbox.tolist() if hasattr(bbox, "tolist") else bbox)])
             outs.append(out_root / f"{ds._rel_key(row)}.png")
         if not imgs:
             continue

@@ -1,0 +1,31 @@
+# handal_test_aff — every HANDAL test frame at full resolution, with its handle (H12).
+#
+# The affordance protocol (AffordanceNet's `handal_all`) scores every
+# test/*/rgb/*.jpg against mask_parts/<frame>_000000_handle.png in the original
+# image, so: no per-sequence cap, no crop (the evaluation crops on the object
+# mask it is given and pastes the prediction back), and fo_mask_aff required.
+#
+#   python research/hypotheses/h12-handal-affordance/quantitative/eval_handal_aff.py ...
+
+defaults:
+  - handal_test
+  - _self_
+
+categories:            # null = every category
+
+modalities:
+  - rgb
+  - depth
+  - depth_mask
+  - fo_mask
+  - fo_mask_aff
+  - cam_intr4x4
+  - cam_bbox2d
+  - category
+
+extra:
+  frames_count_max_per_sequence:
+
+filter_count_max:
+
+transform:

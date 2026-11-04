@@ -1,0 +1,16 @@
+# handal_test_aff_sam3 — handal_test_aff with SAM 3's text-prompted mask as the
+# object mask (and its box as the crop box) instead of HANDAL's annotated
+# mask_visib: the H12 "no ground truth at test time" setting. Write the masks first:
+#
+#   o3b dataset preprocess-mask -d handal_test_aff --mask-type sam3_text -p slurm_lmbl40_sam3 --remote
+#
+# A frame whose SAM 3 mask is empty has no crop; the evaluation scores it as an
+# empty prediction.
+
+defaults:
+  - handal_test_aff
+  - _self_
+
+extra:
+  mask_source: preprocess
+  mask_type: sam3_text

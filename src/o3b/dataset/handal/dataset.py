@@ -154,6 +154,82 @@ class HANDAL(Od3dFrameDataset):
             return None
         return self.path_raw / rpath / "models" / f"obj_{obj_id:06d}.ply"
 
+    # ── affordance: the handle ───────────────────────────────────────────────
+
+    def _aff_mask_path(self, row, meta) -> Optional[Path]:
+        """``mask_parts/<frame>_<obj>_handle.png``, next to the visible mask.
+
+        The ground truth RAGNet / AffordanceNet score HANDAL against
+        (``utils/aff_seg_dataset.py``: ``rgb`` -> ``mask_parts``,
+        ``_000000_handle.png``). Derived from the meta's ``rfpath_mask``
+        (``.../mask_visib/<frame>_<obj>.png``) so the object index is the
+        frame's own rather than assumed to be 0.
+        """
+        rf = meta.get("rfpath_mask")
+        if not rf:
+            return None
+        p = self.path_raw / rf
+        return p.parent.parent / "mask_parts" / f"{p.stem}_handle.png"
+
+    def _mask_text_prompt(self, row) -> Optional[str]:
+        """The category as AffordanceNet names it in its prompt: the raw
+        directory without ``handal_dataset_``, underscores as spaces
+        (``utils/aff_seg_dataset.py``: ``aff_cls[15:].replace('_', ' ')``)."""
+        rpath = MAP_CATEGORIES_HANDAL_TO_RPATH.get(row["category"])
+        if not rpath:
+            return str(row["category"]).replace("_", " ")
+        return Path(rpath).name[len("handal_dataset_"):].replace("_", " ")
+
+    # A part mesh is accepted only if it lies on the model: median distance of
+    # the model's verts to the nearer part, in metres. 0.0 on 196 of the 197
+    # objects checked locally; one power drill's parts sit ~27 mm off.
+    _PARTS_MAX_MEDIAN_DIST_M = 0.002
+
+    def _mesh_vert_labels(self, row, meta, verts):
+        """1 where a vertex is nearer ``models_parts/obj_N_handle.ply`` than
+        ``obj_N_not.ply``. ``verts`` are the model's, in metres; the part meshes
+        are cut from the same model, so they share its frame and units."""
+        import numpy as np
+        import torch
+        import trimesh
+        from scipy.spatial import cKDTree
+
+        rpath = MAP_CATEGORIES_HANDAL_TO_RPATH.get(row["category"])
+        obj_id = self._obj_id(row)
+        if not rpath or obj_id is None:
+            return None
+        base = self.path_raw / rpath / "models_parts" / f"obj_{obj_id:06d}"
+        ph, pn = Path(f"{base}_handle.ply"), Path(f"{base}_not.ply")
+        if not ph.exists() or not pn.exists():
+            return None
+        scale = float((self.cfg.extra or {}).get("scale_to_m") or 1.0)
+        try:
+            h = np.asarray(trimesh.load(ph, process=False).vertices) * scale
+            n = np.asarray(trimesh.load(pn, process=False).vertices) * scale
+        except Exception as e:
+            logger.warning(f"could not read part meshes {base}_*.ply: {e}")
+            return None
+        if not len(h) or not len(n):
+            return None
+        th, tn = cKDTree(h), cKDTree(n)
+        # Alignment is checked on the raw model (the mesh handed in may be a
+        # remesh such as mc16, whose verts sit up to a voxel off the surface).
+        raw_path = self._mesh_path(row, meta)
+        try:
+            raw = np.asarray(trimesh.load(raw_path, process=False).vertices) * scale
+        except Exception as e:
+            logger.warning(f"could not read {raw_path}: {e}")
+            return None
+        if len(raw) > 20000:
+            raw = raw[np.random.default_rng(0).choice(len(raw), 20000, replace=False)]
+        med = float(np.median(np.minimum(th.query(raw)[0], tn.query(raw)[0])))
+        if med > self._PARTS_MAX_MEDIAN_DIST_M:
+            logger.warning(f"{base}_*.ply: parts {med * 1000:.1f} mm off the model; "
+                           f"no vert labels for this object")
+            return None
+        v = verts.detach().cpu().numpy().astype(np.float64)
+        return torch.from_numpy((th.query(v)[0] < tn.query(v)[0]).astype(np.float32))
+
     # ── bbox correction ──────────────────────────────────────────────────────
 
     def _cam_bbox2d_from_meta(self, meta):

@@ -610,12 +610,25 @@ class Od3dFrameDataset(ConfigurableDataset):
         Two conventions among the four: HANDAL names it in the meta (relative to
         path_raw), the others keep parallel trees under path_preprocess.
         """
-        if meta.get("rfpath_mask"):
+        extra = self.cfg.extra or {}
+        # extra.mask_source: preprocess reads mask/<mask_type>/ even where the
+        # meta names an annotated mask (HANDAL): a predicted mask at test time
+        # (H12: SAM 3 from the category name) in place of the GT one.
+        if meta.get("rfpath_mask") and extra.get("mask_source") != "preprocess":
             return self.path_raw / meta["rfpath_mask"]
-        mask_type = (self.cfg.extra or {}).get("mask_type")
+        mask_type = extra.get("mask_type")
         if not mask_type:
             return None
         return self.path_preprocess / "mask" / mask_type / f"{self._rel_key(row)}.png"
+
+    def _aff_mask_path(self, row, meta) -> Optional[Path]:
+        """Where this row's affordance (part) mask lives; None when the dataset has none."""
+        return None
+
+    def _mesh_vert_labels(self, row, meta, verts):
+        """(V,) per-vertex affordance labels for ``verts`` (metres, the raw object
+        frame, before NCDS normalisation), or None when the dataset has none."""
+        return None
 
     def _depth_path(self, row, meta) -> Optional[Path]:
         if meta.get("rfpath_depth"):
@@ -667,6 +680,17 @@ class Od3dFrameDataset(ConfigurableDataset):
                 m = read_image(p)
                 if m is not None:
                     fo_mask = (m[0] > 127) if m.dtype == torch.uint8 else (m[0] > 0.5)
+
+        # Only when listed explicitly (``modalities: null`` means "everything",
+        # and a frame without its part mask is dropped): the affordance protocol
+        # scores exactly the frames that have one.
+        fo_mask_aff = None
+        if mods is not None and "fo_mask_aff" in mods:
+            p = self._aff_mask_path(row, meta)
+            m = read_image(p) if p is not None and p.exists() else None
+            if m is None:
+                return None
+            fo_mask_aff = (m[0] > 127) if m.dtype == torch.uint8 else (m[0] > 0.5)
 
         depth, depth_mask = None, None
         if _want("depth", mods) or _want("depth_mask", mods):
@@ -757,7 +781,15 @@ class Od3dFrameDataset(ConfigurableDataset):
             # Subclasses whose stored bbox needs correcting override this
             # (HANDAL's is [w, h, x, y] under an xyxy comment).
             cam_bbox2d = self._cam_bbox2d_from_meta(meta)
-            if cam_bbox2d is None and meta.get("l_bbox"):
+            if (self.cfg.extra or {}).get("mask_source") == "preprocess":
+                # the box comes from the predicted mask too, or the crop would
+                # carry the GT box into a "no GT at test time" protocol; an empty
+                # predicted mask leaves no box, and the frame no crop
+                cam_bbox2d = None
+                if fo_mask is not None and bool(fo_mask.any()):
+                    from o3b.cv.visual.draw import get_bboxs_from_masks
+                    cam_bbox2d = get_bboxs_from_masks(fo_mask[None])[0].float()
+            elif cam_bbox2d is None and meta.get("l_bbox"):
                 cam_bbox2d = torch.tensor(meta["l_bbox"], dtype=torch.float32)
             elif fo_mask is not None and bool(fo_mask.any()):
                 from o3b.cv.visual.draw import get_bboxs_from_masks
@@ -840,6 +872,7 @@ class Od3dFrameDataset(ConfigurableDataset):
             cam_tform4x4_obj_ncds=cam_tform4x4_obj_ncds,
             fo_mask_amodal=fo_mask_amodal,
             fo_mask_amodal_dt=fo_mask_amodal_dt,
+            fo_mask_aff=fo_mask_aff,
         )
 
     # ── object geometry ──────────────────────────────────────────────────────
@@ -876,6 +909,11 @@ class Od3dFrameDataset(ConfigurableDataset):
         if box is None and meta.get("l_bbox"):
             box = meta["l_bbox"]
         return box
+
+    def _mask_text_prompt(self, row) -> Optional[str]:
+        """The concept ``preprocess-mask --mask-type sam3_text`` prompts with:
+        the category name in words by default."""
+        return str(row["category"]).replace("_", " ")
 
     def _mesh_path(self, row, meta) -> Optional[Path]:
         """Where this row's object mesh lives; None when the dataset has none.
@@ -1038,7 +1076,12 @@ class Od3dFrameDataset(ConfigurableDataset):
 
         mesh = None
         if verts is not None and faces is not None:
-            mesh = Mesh(verts=(verts - center) / half_scale, faces=faces)
+            vert_labels = None
+            mods = self.cfg.modalities
+            if mods is not None and "mesh_vert_labels" in mods:
+                vert_labels = self._mesh_vert_labels(row, meta, verts)
+            mesh = Mesh(verts=(verts - center) / half_scale, faces=faces,
+                        vert_labels=vert_labels)
 
         cache[key] = (mesh, size3d, bbox3d, tform)
         from dataclasses import replace as _r

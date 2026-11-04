@@ -121,6 +121,8 @@ class CropCamBBox2D(O3B_Transform):
             updates["fo_mask"] = _crop_nearest(fo.fo_mask)
         if fo.fo_mask_amodal is not None:
             updates["fo_mask_amodal"] = _crop_nearest(fo.fo_mask_amodal)
+        if getattr(fo, "fo_mask_aff", None) is not None:
+            updates["fo_mask_aff"] = _crop_nearest(fo.fo_mask_aff)
         if fo.depth_mask is not None:
             updates["depth_mask"] = _crop_nearest(fo.depth_mask)
         if fo.mask is not None:

@@ -393,11 +393,12 @@ def _build_dataset_parser(sub):
     p_pmask = ds_sub.add_parser(
         "preprocess-mask",
         help="Write an instance-mask tree the way od3d's preprocess_mask does "
-             "(sam3_bbox: SAM3 tracker, box + 9 point prompts) — see "
+             "(sam3_bbox: SAM3 tracker, box + 9 point prompts; sam3_text: SAM3 "
+             "text model, the category name as the prompt) — see "
              "o3b/dataset/preprocess_mask.py",
     )
     _add_config(p_pmask)
-    p_pmask.add_argument("--mask-type", default="sam3_bbox", choices=["sam3_bbox"],
+    p_pmask.add_argument("--mask-type", default="sam3_bbox", choices=["sam3_bbox", "sam3_text"],
                          help="mask tree to write under <path_preprocess>/mask/ "
                               "(default: sam3_bbox)")
     p_pmask.add_argument("--override", action="store_true",

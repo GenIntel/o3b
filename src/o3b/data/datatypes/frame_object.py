@@ -43,6 +43,10 @@ class FrameObject(Frame, Object):
     # (H, W) float32 distance transform of fo_mask_amodal, same normalisation
     # and same crop-time recomputation as fo_mask_dt.
     fo_mask_amodal_dt: Optional[Tensor] = None
+    # (H, W) bool affordance mask, a part of the visible object: HANDAL's
+    # mask_parts/<frame>_<obj>_handle.png (the region RAGNet / AffordanceNet
+    # score "<category> handle" against). Cropped like fo_mask.
+    fo_mask_aff:       Optional[Tensor] = None
     obj_kpts2d_mask:  Optional[Tensor] = None  # (K,)     bool  keypoint visible in this frame (occlusion-aware)
     cam_tform4x4_obj:      Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
     cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (4, 4)  ncds→cam (= cam_tform4x4_obj @ obj_ncds0c_tform4x4_obj)
@@ -547,6 +551,7 @@ class FrameObjectBatch:
     fo_mask_dt:       Optional[Tensor]       = None  # (B, H, W) float32, normalised DT of fo_mask
     fo_mask_amodal:    Optional[Tensor]      = None  # (B, H, W) bool, GT mesh rendered under the GT pose
     fo_mask_amodal_dt: Optional[Tensor]      = None  # (B, H, W) float32, normalised DT of fo_mask_amodal
+    fo_mask_aff:       Optional[Tensor]      = None  # (B, H, W) bool, affordance part (HANDAL: handle)
     obj_kpts2d_mask:  Optional[Tensor]       = None  # (B, K)    bool
     cam_tform4x4_obj: Optional[Tensor]       = None  # (B, 4, 4)
     cam_tform4x4_obj_ncds: Optional[Tensor]  = None  # (B, 4, 4) ncds→cam
@@ -733,6 +738,7 @@ def collate_frame_objects(
         fo_mask_dt       = _get("fo_mask_dt"),
         fo_mask_amodal    = _get("fo_mask_amodal"),
         fo_mask_amodal_dt = _get("fo_mask_amodal_dt"),
+        fo_mask_aff       = _get("fo_mask_aff"),
         obj_kpts2d_mask  = _get("obj_kpts2d_mask"),
         cam_tform4x4_obj = _get("cam_tform4x4_obj"),
         cam_tform4x4_obj_ncds = _get("cam_tform4x4_obj_ncds"),
