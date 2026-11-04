@@ -285,6 +285,8 @@ class ShapeXAttn(OD3D_Model):
         tok, tok_coord, tok_mask = frames_pred.tokens, frames_pred.tokens_coord, frames_pred.tokens_mask
         if tok is None:
             raise RuntimeError("ShapeXAttn: no frames_pred.tokens — run LitePT with out_tokens: true")
+        # kept for heads after PoseMLP (AffXAttn), which overwrites feat with the pose
+        frames_pred.feat_pre_pose = feat
         tok, tok_coord = tok.float(), tok_coord.float()
         B = feat.shape[0]
         C, K = self.coarse_count, self.fold_count

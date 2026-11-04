@@ -23,7 +23,10 @@ asked at once, and lets ``chunk`` bound the memory of a full-mask query.
 Positions and the surface inputs are detached: the affordance loss reaches the
 encoder through the tokens, not by moving the predicted surface.
 
-``frames_pred.feat`` (the global feature, ``in_dim``) is read and left alone.
+The global feature (``in_dim``) is ShapeXAttn's input, ``feat_pre_pose``: the
+head sits last in the chain, after PoseMLP has replaced ``feat`` with the pose
+(and last so that the checkpoint keys of the modules before it keep their
+positions). Without ``feat_pre_pose`` it falls back to ``feat``.
 """
 
 import logging
@@ -83,8 +86,12 @@ class AffXAttn(OD3D_Model):
     @staticmethod
     def _cam_to_cloud(frames_pred, pts):
         from o3b.cv.geometry.transform import inv_tform4x4, transf3d_broadcast
-        return transf3d_broadcast(pts3d=pts, transf4x4=inv_tform4x4(
-            frames_pred.obj_tform4x4_obj_nocs_0c.detach().float())[:, None])
+        # PoseMLP consumes obj_tform4x4_obj_nocs_0c; ShapeXAttn keeps the same
+        # transform as cam_tform4x4_pts3d_shape (camera <- cloud frame)
+        T = frames_pred.obj_tform4x4_obj_nocs_0c
+        if T is None:
+            T = frames_pred.cam_tform4x4_pts3d_shape
+        return transf3d_broadcast(pts3d=pts, transf4x4=inv_tform4x4(T.detach().float())[:, None])
 
     def _lift_pixels(self, frames_gt, pxl):
         """(B, Q, 2) pixels -> (B, Q, 3) camera-space points, as Frames2FeatPCL.
@@ -145,7 +152,12 @@ class AffXAttn(OD3D_Model):
         if tok is None:
             raise RuntimeError("AffXAttn: no frames_pred.tokens — run LitePT with out_tokens: true")
         tok, tok_pos = tok.float(), tok_coord.float() / self.rope_unit
-        glob = self.embed_glob(frames_pred.feat.float())[:, None]       # (B, 1, dim)
+        # the global feature as ShapeXAttn read it: after PoseMLP, frames_pred.feat
+        # holds the pose, so a head at the end of the chain reads the kept copy
+        feat = getattr(frames_pred, "feat_pre_pose", None)
+        if feat is None:
+            feat = frames_pred.feat
+        glob = self.embed_glob(feat.float())[:, None]                  # (B, 1, dim)
 
         pxl = getattr(frames_gt, "aff_query_pxl2d", None)
         if pxl is not None and frames_gt.depth is not None:
