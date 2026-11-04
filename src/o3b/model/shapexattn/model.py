@@ -89,6 +89,13 @@ number of passes runs without extrapolating an embedding.
 ``global_feat: false`` (learned queries only) drops the projection of ``feat``
 (the DINOv2 cls feature) from every query and masked token: the decoder then sees
 the image only through LitePT's tokens.
+``mid_update_after: k`` (learned queries with ``pose_layers``) runs the point head
+after the first k shared layers of every pass as well: its offset moves the coarse
+points and the surface tokens' PointROPE positions (detached) for the remaining
+layers, and the end-of-pass offset is added on top. The pose token is unaffected.
+``mid_aux: true`` hands those mid-pass points (and NOCS / features) to TrinityMethod
+as ``pts3d_shape_mid`` / ``nocs_shape_mid`` / ``feat_shape_mid`` for deep
+supervision of their own (``shape_*_l1_mid``).
 ``surface_sees_pose: false`` makes self-attention one-way: the pose token still
 attends to the surface tokens, the surface tokens no longer attend to it.
 ``pose_layers: n`` takes the pose token out of the passes' layers: every pass runs
@@ -176,6 +183,8 @@ class ShapeXAttn(OD3D_Model):
         rollout_passes: int = 0,
         pass_embedding: bool = True,
         global_feat: bool = True,
+        mid_update_after: int = 0,
+        mid_aux: bool = False,
     ):
         super().__init__()
         self.nocs = nocs
@@ -193,6 +202,11 @@ class ShapeXAttn(OD3D_Model):
         if not global_feat and not learned_queries:
             raise ValueError("ShapeXAttn: global_feat false needs learned_queries")
         self.dim = dim
+        if mid_update_after and not (learned_queries and pose_layers and 0 < mid_update_after < num_layers):
+            raise ValueError("ShapeXAttn: mid_update_after needs learned_queries, pose_layers and 0 < k < num_layers")
+        if mid_aux and not mid_update_after:
+            raise ValueError("ShapeXAttn: mid_aux needs mid_update_after")
+        self.mid_update_after, self.mid_aux = mid_update_after, mid_aux
         if num_init_layers and not learned_queries:
             raise ValueError("ShapeXAttn: num_init_layers needs learned_queries")
         if not surface_sees_pose and not (learned_queries and pose_query):
@@ -415,6 +429,7 @@ class ShapeXAttn(OD3D_Model):
         tok_pos = tok_coord / self.rope_unit
         p0 = 1 if self.pose_query else 0
         aux_pts, aux_extra, aux_pose = [], [], []
+        mid_pts, mid_extra = [], []
         if self.init_token:
             # one token through the init layers; a shape MLP and the pose head on it
             # start the surface and pose tokens
@@ -469,8 +484,16 @@ class ShapeXAttn(OD3D_Model):
                 pe = 0. if self.pose_pass_embed is None else self.pose_pass_embed[i]
                 qp, qs = q[:, :1] + pe, q[:, 1:] + embed
                 sm = None if self_mask is None else self_mask[1:, 1:]
-                for layer in layers:
+                for li, layer in enumerate(layers):
                     qs = layer(qs, q_pos[:, 1:], tok, tok_pos, tok_mask, self_mask=sm)
+                    if i is not None and li + 1 == self.mid_update_after:
+                        # mid-pass: move the coarse points, re-place the surface tokens
+                        o_mid = self.point_head(self.norm_out(qs[:, :n_main - 1]))
+                        coarse = coarse + o_mid[..., :3]
+                        if self.mid_aux:
+                            mid_pts.append(coarse)
+                            mid_extra.append(o_mid[..., 3:])
+                        q_pos = torch.cat([q_pos[:, :1], coarse.detach() / self.rope_unit, q_pos[:, n_main:]], dim=1)
                 for layer in self.pose_layers:
                     qp = layer(qp, q_pos[:, :1], tok, tok_pos, tok_mask)
                 q = torch.cat([qp, qs], dim=1)
@@ -524,6 +547,12 @@ class ShapeXAttn(OD3D_Model):
                 frames_pred.feat_shape_aux = [e[..., o:] for e in aux_extra]
         if aux_pose:
             frames_pred.pose_aux = aux_pose
+        if mid_pts:
+            frames_pred.pts3d_shape_mid = mid_pts
+            if self.nocs:
+                frames_pred.nocs_shape_mid = [e[..., :3] for e in mid_extra]
+            if self.point_feat_dim:
+                frames_pred.feat_shape_mid = [e[..., o:] for e in mid_extra]
 
         frames_pred.pts3d_shape_coarse = coarse
         frames_pred.pts3d_shape_fine = fine
