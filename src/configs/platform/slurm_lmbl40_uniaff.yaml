@@ -1,0 +1,18 @@
+defaults:
+  - slurm_lmbl40
+  - _self_
+
+# slurm_lmbl40 plus the uniaff dependency group: UniAff-13B (SPHINX llama_ens5 on
+# LLaMA2-Accessory, its own env <repo>_py310_cu124_torch26_uniaff) as the H12
+# baseline on HANDAL handle segmentation. Two GPUs: the checkpoint is two
+# model-parallel shards.
+#
+#   o3b platform setup -p slurm_lmbl40_uniaff
+#   o3b platform run -p slurm_lmbl40_uniaff -c "torchrun --nproc-per-node 2 research/hypotheses/h12-handal-affordance/quantitative/run_uniaff_handal.py ..."
+deps:
+  - uniaff
+
+gpu_count_per_node: 2
+
+# off the training partition, whose per-account GPU cap the training runs fill
+partition: alldlc2_gpu-l40s

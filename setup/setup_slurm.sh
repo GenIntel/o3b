@@ -41,6 +41,7 @@ INSTALL_ZEROSHOT="${INSTALL_ZEROSHOT:-false}"
 INSTALL_RECGEN="${INSTALL_RECGEN:-false}"
 INSTALL_F2G="${INSTALL_F2G:-false}"
 INSTALL_AFFNET="${INSTALL_AFFNET:-false}"
+INSTALL_UNIAFF="${INSTALL_UNIAFF:-false}"
 DEPS_TAG="${DEPS_TAG:-}"   # e.g. "densematcher" or "densematcher_diff3f"; appended to venv name
 GIT_RETRIES="${GIT_RETRIES:-4}"        # attempts per network-facing git step
 GIT_RETRY_WAIT="${GIT_RETRY_WAIT:-20}" # seconds between those attempts
@@ -961,6 +962,36 @@ if _is_true "${INSTALL_AFFNET}"; then
     PYTHONPATH="${AFFNET_DIR}" python -c "from model.AffordanceVLM import AffordanceVLMForCausalLM; from utils.aff_seg_dataset import AffValDataset" \
         && echo "--- AffordanceNet imports OK ---" \
         || echo "WARNING: AffordanceNet does not import -- run_affordancevlm_handal.py will fail."
+fi
+
+
+if _is_true "${INSTALL_UNIAFF}"; then
+    # UniAff-13B (SiyuanH/UniAff-13B, arXiv 2409.20551): SPHINX `llama_ens5` (LLaMA-2
+    # 13B + CLIP / ConvNeXt-XXL / DINOv2-g / Q-Former) fine-tuned on tool and
+    # articulation affordances; the H12 baseline on HANDAL. Its code is
+    # LLaMA2-Accessory (A3VLM's copy of it is incomplete), installed -e at a pinned
+    # commit. The checkpoint is two model-parallel shards (2 GPUs), fetched into
+    # HF_HOME; SAM ViT-H turns its grasp boxes into masks, as the paper does.
+    echo "--- pip install uniaff deps (LLaMA2-Accessory) ---"
+    ACC_DIR="${ACC_DIR:-third_party/LLaMA2-Accessory}"
+    ACC_COMMIT="${ACC_COMMIT:-3777c43940ddfb45d3bc1046b118ca4401747ee2}"
+    if [ ! -d "${ACC_DIR}/.git" ]; then
+        echo "--- git clone LLaMA2-Accessory ---"
+        _git_retry git clone https://github.com/Alpha-VLLM/LLaMA2-Accessory.git "${ACC_DIR}"
+    fi
+    _git_retry git -C "${ACC_DIR}" fetch --quiet origin || true
+    git -C "${ACC_DIR}" checkout --quiet "${ACC_COMMIT}"
+    pip install fairscale sentencepiece open_clip_torch fire regex h5py einops dacite "transformers<4.46" \
+        "git+https://github.com/facebookresearch/segment-anything.git"
+    pip install --no-deps -e "${ACC_DIR}"
+    python -c "from huggingface_hub import snapshot_download as d; d('SiyuanH/UniAff-13B')" \
+        || echo "WARNING: could not fetch SiyuanH/UniAff-13B into HF_HOME -- the runner will try at start."
+    SAM_CKPT="${HF_HOME:-${HOME}/.cache/huggingface}/sam_vit_h_4b8939.pth"
+    [ -f "${SAM_CKPT}" ] || wget -q -O "${SAM_CKPT}" https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
+        || echo "WARNING: could not fetch sam_vit_h_4b8939.pth to ${SAM_CKPT}."
+    python -c "import accessory, fairscale, open_clip, segment_anything; from accessory.model.meta import MetaModel" \
+        && echo "--- LLaMA2-Accessory imports OK ---" \
+        || echo "WARNING: LLaMA2-Accessory does not import -- run_uniaff_handal.py will fail."
 fi
 
 
