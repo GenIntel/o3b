@@ -22,7 +22,7 @@ in every choice that changes the mask:
 ``sam3_text`` (H12) prompts SAM 3's text model (``Sam3Model``, promptable
 concept segmentation) with the frame's category name and nothing else — no box,
 no point — and keeps the highest-scoring instance (an empty mask when none
-passes the 0.5 score threshold). The name is ``_mask_text_prompt(row)``: for
+passes the score threshold, 0 by default — see the class). The name is ``_mask_text_prompt(row)``: for
 HANDAL the category directory as AffordanceNet words its prompt ("power
 drills"), so the baselines and this mask see the same text. It is the test-time
 object mask for a "no ground truth at test time" protocol, which a box prompt
@@ -108,7 +108,13 @@ class Sam3BoxSegmenter:
 class Sam3TextSegmenter:
     """SAM 3's text model: the instance with the highest score for a concept."""
 
-    def __init__(self, device: str = "cuda", score_threshold: float = 0.5,
+    # score_threshold 0: always the best instance. Sam3's post-processing gates
+    # every query's score by one per-image presence score, which on HANDAL frames
+    # sits low enough that a wrench whose best query scores 0.81-0.88 returned no
+    # instance even at 0.1. The frames are known to show the category (the
+    # protocol's premise, which every method shares), and the gate is the same for
+    # all queries of an image, so the top instance is the top query either way.
+    def __init__(self, device: str = "cuda", score_threshold: float = 0.0,
                  mask_threshold: float = 0.5):
         import torch
         from transformers import Sam3Model, Sam3Processor
