@@ -1,0 +1,9 @@
+# H04 / Trinity-Shape output-dimension ablation (26-11-05): pfd_sd15pf32_all_h10_geo005_48k (Trinity-Shape) with 16 instead of 32 output dims.
+# One field for all 50 HouseCorr3D categories: 10 non-keypoint training instances per category (heldout:10), PartField trunk, 4 meshes per step, cross-instance pairs, SD 1.5 + PartField teacher, geometry term c = 0.05 with push apart, fc32 only, 48k steps, cosine floored at 10 %.
+# The checkpoint is written by the training job into the cluster checkout.
+class_name: PartPointField
+ckpt_path: "checkpoints/feat_distill/pfd_sd15pf16_all_h10_geo005_48k.pth"
+out_dim: 16
+n_pc_points: 100000
+seed: 0
+freeze: true
