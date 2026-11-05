@@ -473,7 +473,9 @@ def _kpts_sym_min_dist(gt_cam_kpts_syms, axis6d_syms, axis6d_syms_mask, pred_cam
     arg-min over candidates; samples with more than one such axis are not
     supported and fall back to the discrete candidates only.
 
-    Returns (dist (B, K), gt_sel (B, K, 3)) — dist to, and the winning candidate.
+    Returns (dist (B, K), gt_sel (B, K, 3), gt_syms (B, K, S, 3)) — dist to, and
+    the winning candidate, and every candidate after the continuous rotation
+    (what _kpts2d_sym_min_dist projects).
     """
     from o3b.cv.metric.pose import get_closest_B_to_A_rotated_around_axis6d
 
@@ -500,7 +502,80 @@ def _kpts_sym_min_dist(gt_cam_kpts_syms, axis6d_syms, axis6d_syms_mask, pred_cam
     gt_sel = torch.gather(gt_syms, dim=2,
                           index=sym_ids[:, :, None, None].expand(-1, -1, 1, 3)).squeeze(2)
     dist = (pred_cam_kpts - gt_sel).norm(dim=-1)                                  # (B, K), NaN-preserving
-    return dist, gt_sel
+    return dist, gt_sel, gt_syms
+
+
+# ── 2D (pixel-space) evaluation ───────────────────────────────────────────────
+#
+# HouseCorr3D's "2D" setting (Morpheus, arXiv 2605.28257, Sec. 3 / Tab. 3 / A4;
+# od3d's tasks/correspondence/task.py, crsp2d_*): the predicted target keypoint
+# and the GT one are compared in the target image, in pixels, and a keypoint is
+# correct within 0.1 * max(w, h) of the target's 2D object box. Here every route
+# predicts a 3-D target point, so its pixel is that point's projection; amodal
+# keypoints therefore have a 2-D score too (a 2-D matcher has none).
+
+_BEHIND_CAM_PX = 1e9  # pixel "distance" of a point on / behind the image plane
+
+
+def _bbox2d_size_from_masks(masks, B, dev):
+    """(B,) max(w, h) of each mask's tight box, in pixels of the (cropped) frame
+    the intrinsics belong to; NaN where the mask is missing or empty.
+
+    HouseCorr3D derives cam_bbox2d from this same visible instance mask
+    (dataset.py, get_bboxs_from_masks), and the pair batch carries the mask but
+    not the box. Inclusive pixel indices, as od3d's x2 - x1 / y2 - y1."""
+    size = torch.full((B,), float("nan"), device=dev)
+    if masks is None:
+        return size
+    for b in range(B):
+        m = masks[b]
+        if m is None:
+            continue
+        m = m.bool()
+        if m.dim() == 3:
+            m = m[0]
+        if not m.any():
+            continue
+        ys = torch.where(m.any(dim=1))[0]
+        xs = torch.where(m.any(dim=0))[0]
+        size[b] = float(max(int(xs[-1] - xs[0]), int(ys[-1] - ys[0])))
+    return size
+
+
+def _proj_cam_px(pts_cam, intr4x4):
+    """OpenGL camera-space points (..., 3) → pixels (..., 2) through intr4x4
+    (B, 4, 4) broadcast over the leading batch dim; points on or behind the image
+    plane (z >= 0 in OpenGL) come back as NaN."""
+    from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+    B = pts_cam.shape[0]
+    extra = pts_cam.dim() - 2
+    shape = (B,) + (1,) * extra + (4, 4)
+    eye = torch.eye(4, device=pts_cam.device).expand(*shape)
+    uv = proj3d2d_tform4x4_intr4x4_broadcast(
+        pts3d=pts_cam, tform4x4=eye, intr4x4=intr4x4.reshape(shape),
+    )
+    behind = ~(pts_cam[..., 2] < -1e-6)
+    return torch.where(behind[..., None], torch.full_like(uv, float("nan")), uv)
+
+
+def _kpts2d_sym_min_dist(gt_syms, pred_cam_kpts, intr4x4):
+    """Pixel distance from each predicted keypoint to its nearest symmetric GT
+    candidate, both projected into the target image.
+
+    gt_syms: (B, K, S, 3) candidates from _kpts_sym_min_dist (discrete symmetries,
+      each already turned about a continuous axis towards the prediction in 3-D —
+      od3d's 2-D metric takes the discrete ones alone, which would count a bottle
+      rotated about its own axis as wrong).
+    pred_cam_kpts: (B, K, 3); NaN rows (route unavailable) stay NaN. A prediction
+      behind the camera has no pixel and counts as wrong (_BEHIND_CAM_PX)."""
+    nan_pred = ~torch.isfinite(pred_cam_kpts).all(dim=-1)                          # (B, K)
+    pred_uv = _proj_cam_px(torch.nan_to_num(pred_cam_kpts, nan=0.0), intr4x4)     # (B, K, 2)
+    gt_uv = _proj_cam_px(gt_syms, intr4x4)                                        # (B, K, S, 2)
+    d = (gt_uv - pred_uv[:, :, None, :]).norm(dim=-1)                             # (B, K, S)
+    d = torch.where(torch.isfinite(d), d, torch.full_like(d, float("inf")))
+    dist = d.min(dim=-1).values
+    dist = torch.where(torch.isfinite(dist), dist, torch.full_like(dist, _BEHIND_CAM_PX))
+    return torch.where(nan_pred, torch.full_like(dist, float("nan")), dist)
 
 
 def _variant_metrics(dist, kpts_valid, threshold, src_vis, trgt_vis):
@@ -715,7 +790,27 @@ class CamCrsp3DNNTask(OD3D_Task):
         threshold = 0.1 * trgt_obj_size.float().to(dev)  # (B,)
         src_vis, trgt_vis = batch.src_obj_kpts2d_mask, batch.trgt_obj_kpts2d_mask
 
-        pose_dist, _ = _kpts_sym_min_dist(
+        # 2D: pixels of the target frame, 0.1 * max(w, h) of its visible-mask box.
+        # Skipped (no keys) when the batch has no target mask or intrinsics.
+        threshold2d = None
+        if batch.trgt_cam_intr4x4 is not None and batch.trgt_fo_mask is not None:
+            threshold2d = 0.1 * _bbox2d_size_from_masks(batch.trgt_fo_mask, B, dev)
+            trgt_intr = batch.trgt_cam_intr4x4.float().to(dev)
+
+        def _metrics2d(gt_syms, pred, suffix):
+            if threshold2d is None:
+                return
+            # a sample without a usable box gets NaN distances → NaN aggregates
+            d2 = _kpts2d_sym_min_dist(gt_syms, pred, trgt_intr)
+            d2 = torch.where(torch.isfinite(threshold2d)[:, None], d2, torch.full_like(d2, float("nan")))
+            m2 = _variant_metrics(d2, kpts_valid, torch.nan_to_num(threshold2d, nan=0.0),
+                                  src_vis, trgt_vis)
+            quant.extra[f"cam_kpts2d_trgt_pck01{suffix}"] = m2["pck"]
+            if m2["modal"] is not None:
+                quant.extra[f"cam_kpts2d_modal_trgt_pck01{suffix}"]  = m2["modal"]
+                quant.extra[f"cam_kpts2d_amodal_trgt_pck01{suffix}"] = m2["amodal"]
+
+        pose_dist, _, pose_gt_syms = _kpts_sym_min_dist(
             gt_trgt_kpts_cam_t_syms, trgt_cam_obj_axis6d_syms, obj_axis6d_syms_mask,
             pred_trgt_kpts_cam_t,
         )
@@ -729,6 +824,7 @@ class CamCrsp3DNNTask(OD3D_Task):
             cam_kpts_modal_trgt_pck01   = m_pose["modal"],
             cam_kpts_amodal_trgt_pck01  = m_pose["amodal"],
         )
+        _metrics2d(pose_gt_syms, pred_trgt_kpts_cam_t, "")
 
         variant_correct = {"pose": m_pose["is_correct"]}
         for name, pred in (("featmap2d", pred_feat2d_kpts), ("mesh", pred_mesh_kpts),
@@ -737,11 +833,12 @@ class CamCrsp3DNNTask(OD3D_Task):
                            ("direct", pred_direct_kpts)):
             if pred is None:
                 continue
-            dist, _ = _kpts_sym_min_dist(
+            dist, _, gt_syms_v = _kpts_sym_min_dist(
                 gt_trgt_kpts_cam_t_syms, trgt_cam_obj_axis6d_syms, obj_axis6d_syms_mask,
                 pred.to(dev),
             )
             m = _variant_metrics(dist, kpts_valid, threshold, src_vis, trgt_vis)
+            _metrics2d(gt_syms_v, pred.to(dev), f"_{name}")
             variant_correct[name] = m["is_correct"]
             quant.extra[f"cam_kpts_trgt_euc_dist_mean_{name}"] = m["dist_mean"]
             quant.extra[f"cam_kpts_trgt_pck01_{name}"]         = m["pck"]
