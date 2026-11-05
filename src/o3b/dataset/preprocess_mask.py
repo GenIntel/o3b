@@ -28,6 +28,12 @@ drills"), so the baselines and this mask see the same text. It is the test-time
 object mask for a "no ground truth at test time" protocol, which a box prompt
 from the annotated box would not be.
 
+``gdino_sam2_text`` (H12, SAM 2 instead of SAM 3) is the same text-only setting
+for SAM 2, which takes no text: Grounding DINO (``IDEA-Research/grounding-dino-base``)
+finds the category's highest-scoring box from the same text, and SAM 2.1
+(``facebook/sam2.1-hiera-large``) segments that box, single-mask output —
+"Grounded SAM 2". Both are in transformers 5, so the ``sam3`` env runs it.
+
 Needs the ``sam3`` dependency group (``transformers`` 5, see setup_slurm.sh) and
 the gated ``facebook/sam3`` weights in the HF cache; ``slurm_lmbl40_sam3`` sets
 both. Run it where the data is:
@@ -42,7 +48,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MASK_TYPES = ("sam3_bbox", "sam3_text")
+MASK_TYPES = ("sam3_bbox", "sam3_text", "gdino_sam2_text")
 
 
 class Sam3BoxSegmenter:
@@ -153,6 +159,71 @@ class Sam3TextSegmenter:
         return masks, scores
 
 
+class GroundedSam2Segmenter:
+    """Grounding DINO's top box for a concept, segmented by SAM 2.1 (box prompt).
+
+    Always the top box (no score threshold), for the reason Sam3TextSegmenter
+    keeps its top instance: the frames are known to show the category. No box at
+    all (no query scores above zero) gives an empty mask.
+    """
+
+    def __init__(self, device: str = "cuda",
+                 detector: str = "IDEA-Research/grounding-dino-base",
+                 segmenter: str = "facebook/sam2.1-hiera-large"):
+        import torch
+        from transformers import (AutoModelForZeroShotObjectDetection, AutoProcessor,
+                                  Sam2Model, Sam2Processor)
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        self.device = torch.device(device)
+        self.det = AutoModelForZeroShotObjectDetection.from_pretrained(detector).to(self.device).eval()
+        self.det_processor = AutoProcessor.from_pretrained(detector)
+        self.sam = Sam2Model.from_pretrained(segmenter).to(self.device).eval()
+        self.sam_processor = Sam2Processor.from_pretrained(segmenter)
+
+    def _box(self, img, text):
+        import torch
+        from PIL import Image
+        H, W = img.shape[:2]
+        # Grounding DINO wants lower-case phrases ending with a period
+        prompt = text.lower().strip().rstrip(".") + "."
+        inputs = self.det_processor(images=Image.fromarray(img), text=prompt,
+                                    return_tensors="pt").to(self.device)
+        with torch.inference_mode():
+            out = self.det(**inputs)
+        res = self.det_processor.post_process_grounded_object_detection(
+            out, inputs.input_ids, threshold=0.0, text_threshold=0.0, target_sizes=[(H, W)])[0]
+        if len(res["scores"]) == 0:
+            return None, 0.0
+        i = int(res["scores"].argmax())
+        b = res["boxes"][i].tolist()
+        b = [min(max(b[0], 0), W - 1), min(max(b[1], 0), H - 1),
+             min(max(b[2], 0), W - 1), min(max(b[3], 0), H - 1)]
+        return (b if b[2] > b[0] and b[3] > b[1] else None), float(res["scores"][i])
+
+    def __call__(self, images, texts):
+        """images: list of HxWx3 uint8 arrays; texts: one concept per image."""
+        import torch
+
+        masks, scores = [], []
+        for img, text in zip(images, texts):
+            box, score = self._box(img, text)
+            if box is None:
+                masks.append(torch.zeros(img.shape[:2], dtype=torch.bool))
+                scores.append(0.0)
+                continue
+            inputs = self.sam_processor(images=img, input_boxes=[[box]],
+                                        return_tensors="pt").to(self.device)
+            with torch.inference_mode():
+                out = self.sam(**inputs, multimask_output=False)
+            m = self.sam_processor.post_process_masks(
+                out.pred_masks.float().cpu(), inputs["original_sizes"].cpu())[0]
+            masks.append(m.reshape(-1, *m.shape[-2:])[0] > 0)
+            scores.append(score)
+        return masks, scores
+
+
 def run_preprocess_mask(config_path: Path, *, platform: str = "default",
                         mask_type: str = "sam3_bbox", override: bool = False,
                         limit: int | None = None, batch_size: int = 1) -> None:
@@ -196,8 +267,9 @@ def run_preprocess_mask(config_path: Path, *, platform: str = "default",
     if not todo:
         return
 
-    text_mode = mask_type == "sam3_text"
-    seg = Sam3TextSegmenter() if text_mode else Sam3BoxSegmenter()
+    text_mode = mask_type in ("sam3_text", "gdino_sam2_text")
+    seg = (Sam3TextSegmenter() if mask_type == "sam3_text" else
+           GroundedSam2Segmenter() if mask_type == "gdino_sam2_text" else Sam3BoxSegmenter())
     n_written = n_skipped = 0
     for i in tqdm(range(0, len(todo), batch_size), unit="batch"):
         imgs, bboxs, outs = [], [], []

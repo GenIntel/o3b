@@ -1,0 +1,17 @@
+# handal_test_aff_gsam2 — handal_test_aff with a Grounded SAM 2 object mask
+# (Grounding DINO's top box for the category name, segmented by SAM 2.1 Hiera-L)
+# instead of HANDAL's mask_visib: H12's text-only test-time setting with SAM 2
+# in place of SAM 3 (handal_test_aff_sam3). Write the masks first:
+#
+#   o3b dataset preprocess-mask -d handal_test_aff --mask-type gdino_sam2_text -p slurm_lmbl40_sam3 --remote
+#
+# A frame whose mask is empty has no crop; the evaluation scores it as an empty
+# prediction.
+
+defaults:
+  - handal_test_aff
+  - _self_
+
+extra:
+  mask_source: preprocess
+  mask_type: gdino_sam2_text
