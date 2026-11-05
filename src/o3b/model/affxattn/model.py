@@ -12,7 +12,10 @@ tokens are. A head reads one logit per query and class. Two kinds of query:
   Each also carries its DINOv2 feature, sampled bilinearly from
   ``frames_pred.featmap``. Logits land in ``aff_logit_pxl`` (B, Q[, C]): the 2-D
   affordance mask, at whatever pixels are asked for (in training a sample of
-  the object mask; at test every pixel of it).
+  the object mask; at test every pixel of it). With ``aff_query_pts3d_cam``
+  (B, Q, 3) the points are given instead of lifted, and ``aff_query_pxl2d``
+  only places their DINOv2 feature (fractional crop pixels): how a 256 crop
+  is queried at every full-resolution pixel.
 - **surface**, the predicted fine surface ``pts3d_shape_fine`` (+ its
   ``feat_shape_fine`` when ``surface_feat_dim``): logits in
   ``aff_logit_shape_fine`` (B, N[, C]), the amodal 3-D affordance a grasp needs.
@@ -160,9 +163,15 @@ class AffXAttn(OD3D_Model):
         glob = self.embed_glob(feat.float())[:, None]                  # (B, 1, dim)
 
         pxl = getattr(frames_gt, "aff_query_pxl2d", None)
-        if pxl is not None and frames_gt.depth is not None:
+        # already-lifted camera-space points (B, Q, 3): queries at pixels the
+        # (cropped) frame does not have, e.g. every full-resolution mask pixel;
+        # pxl is then their fractional position in the crop, for the DINOv2 feature
+        pts_cam = getattr(frames_gt, "aff_query_pts3d_cam", None)
+        if pxl is not None and (pts_cam is not None or frames_gt.depth is not None):
             pxl = pxl.float()
-            xyz = self._cam_to_cloud(frames_pred, self._lift_pixels(frames_gt, pxl)).detach()
+            if pts_cam is None:
+                pts_cam = self._lift_pixels(frames_gt, pxl)
+            xyz = self._cam_to_cloud(frames_pred, pts_cam.float()).detach()
             q = (self.embed_pt(xyz) + self.embed_img(self._sample_featmap(frames_gt, frames_pred, pxl))
                  + glob + self.query_type[0])
             frames_pred.aff_logit_pxl = self._run(q, xyz / self.rope_unit, tok, tok_pos, tok_mask)
