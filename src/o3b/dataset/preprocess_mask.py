@@ -226,7 +226,8 @@ class GroundedSam2Segmenter:
 
 def run_preprocess_mask(config_path: Path, *, platform: str = "default",
                         mask_type: str = "sam3_bbox", override: bool = False,
-                        limit: int | None = None, batch_size: int = 1) -> None:
+                        limit: int | None = None, batch_size: int = 1,
+                        shard: int = 0, num_shards: int = 1) -> None:
     """Write ``mask/<mask_type>/<rel_key>.png`` for every frame the config walks.
 
     batch_size 1 by default, as od3d segments (its DataLoader runs batch 1): it
@@ -259,6 +260,8 @@ def run_preprocess_mask(config_path: Path, *, platform: str = "default",
     rows = list(ds._frame_rows)
     if limit:
         rows = rows[:limit]
+    if num_shards > 1:
+        rows = rows[shard::num_shards]
     out_root = Path(ds.path_preprocess) / "mask" / mask_type
     todo = [r for r in rows
             if override or not (out_root / f"{ds._rel_key(r)}.png").exists()]

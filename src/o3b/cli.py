@@ -408,6 +408,10 @@ def _build_dataset_parser(sub):
                          help="Re-segment frames whose mask already exists")
     p_pmask.add_argument("--limit", type=int, default=None, metavar="N",
                          help="Only the first N frames (smoke test)")
+    p_pmask.add_argument("--shard", type=int, default=0, metavar="I",
+                         help="Segment only frames I, I+n, I+2n, ... (with --num-shards n), "
+                              "so n jobs can write one tree in parallel")
+    p_pmask.add_argument("--num-shards", type=int, default=1, metavar="N")
     p_pmask.add_argument("--remote", action="store_true",
                          help="Run on the --platform's compute node (needs a GPU, the "
                               "sam3 dependency group and the facebook/sam3 weights — "
@@ -672,6 +676,8 @@ def _run_dataset_remote(args) -> None:
         parts += ["--mask-type", args.mask_type]
         if args.limit:
             parts += ["--limit", str(args.limit)]
+        if getattr(args, "num_shards", 1) > 1:
+            parts += ["--shard", str(args.shard), "--num-shards", str(args.num_shards)]
     chunks = getattr(args, "chunks", None) if command == "init" else None
     if chunks:
         parts += ["--chunks", str(chunks)]
@@ -897,7 +903,8 @@ def _run_dataset(args, parser=None, argv=None):
     if args.dataset_command == "preprocess-mask":
         from o3b.dataset.preprocess_mask import run_preprocess_mask
         run_preprocess_mask(args.config, platform=args.platform, mask_type=args.mask_type,
-                            override=args.override, limit=args.limit)
+                            override=args.override, limit=args.limit,
+                            shard=args.shard, num_shards=args.num_shards)
         return
     if args.dataset_command == "tform-obj-to-db":
         from o3b.dataset.copy_tform_obj import run_tform_obj_to_db
