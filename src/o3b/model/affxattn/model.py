@@ -22,7 +22,10 @@ tokens are. A head reads one logit per query and class. Two kinds of query:
 
 Queries have no self-attention, so each one's logit depends only on its own
 point and the tokens. That makes the answer independent of how many pixels are
-asked at once, and lets ``chunk`` bound the memory of a full-mask query.
+asked at once, and lets ``chunk`` bound the memory of a full-mask query. 2048 (was 8192): the
+masked cross-attention materialises a (B, heads, chunk, tokens) score block, and
+at 8192 that block (3.3 GB at 16 crops per GPU) ran three HANDAL fine-tunes out
+of memory in their first in-training eval, where every mask pixel is a query.
 Positions and the surface inputs are detached: the affordance loss reaches the
 encoder through the tokens, not by moving the predicted surface.
 
@@ -60,7 +63,7 @@ class AffXAttn(OD3D_Model):
         surface: bool = True,
         surface_feat_dim: int = 0,
         pts3d_opengl: bool = True,
-        chunk: int = 8192,
+        chunk: int = 2048,
         dropout: float = 0.0,
     ):
         super().__init__()
