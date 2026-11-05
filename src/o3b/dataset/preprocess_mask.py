@@ -34,6 +34,15 @@ finds the category's highest-scoring box from the same text, and SAM 2.1
 (``facebook/sam2.1-hiera-large``) segments that box, single-mask output —
 "Grounded SAM 2". Both are in transformers 5, so the ``sam3`` env runs it.
 
+``sam3p1_text`` (H12) is ``sam3_text`` with SAM 3.1's detector weights and
+nothing else changed (same ``Sam3Model`` code, processor, prompt and top-instance
+rule). SAM 3.1 (``facebook/sam3.1``) ships only the native
+``sam3.1_multiplex.pt``, whose detector is a retrained SAM 3 detector (every
+tensor differs by 1-3 %; the neck's unused fourth level and the tracker necks
+are gone). transformers has no port, so the weights are converted once into a
+``Sam3Model`` directory — the native->HF key map read off SAM 3, where both
+formats hold the same tensors — and ``$O3B_SAM3P1_HF`` points at it.
+
 Needs the ``sam3`` dependency group (``transformers`` 5, see setup_slurm.sh) and
 the gated ``facebook/sam3`` weights in the HF cache; ``slurm_lmbl40_sam3`` sets
 both. Run it where the data is:
@@ -48,7 +57,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MASK_TYPES = ("sam3_bbox", "sam3_text", "gdino_sam2_text")
+MASK_TYPES = ("sam3_bbox", "sam3_text", "sam3p1_text", "gdino_sam2_text")
 
 
 class Sam3BoxSegmenter:
@@ -121,15 +130,15 @@ class Sam3TextSegmenter:
     # protocol's premise, which every method shares), and the gate is the same for
     # all queries of an image, so the top instance is the top query either way.
     def __init__(self, device: str = "cuda", score_threshold: float = 0.0,
-                 mask_threshold: float = 0.5):
+                 mask_threshold: float = 0.5, weights: str = "facebook/sam3"):
         import torch
         from transformers import Sam3Model, Sam3Processor
 
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         self.device = torch.device(device)
-        self.model = Sam3Model.from_pretrained("facebook/sam3").to(self.device).eval()
-        self.processor = Sam3Processor.from_pretrained("facebook/sam3")
+        self.model = Sam3Model.from_pretrained(weights).to(self.device).eval()
+        self.processor = Sam3Processor.from_pretrained(weights)
         self.score_threshold = score_threshold
         self.mask_threshold = mask_threshold
 
@@ -270,8 +279,16 @@ def run_preprocess_mask(config_path: Path, *, platform: str = "default",
     if not todo:
         return
 
-    text_mode = mask_type in ("sam3_text", "gdino_sam2_text")
+    text_mode = mask_type in ("sam3_text", "sam3p1_text", "gdino_sam2_text")
+    if mask_type == "sam3p1_text":
+        import os
+        weights = os.environ.get("O3B_SAM3P1_HF")
+        if not weights or not (Path(weights) / "model.safetensors").exists():
+            print("sam3p1_text needs $O3B_SAM3P1_HF = a Sam3Model directory holding "
+                  "SAM 3.1's converted weights (see the module docstring)", file=sys.stderr)
+            sys.exit(1)
     seg = (Sam3TextSegmenter() if mask_type == "sam3_text" else
+           Sam3TextSegmenter(weights=weights) if mask_type == "sam3p1_text" else
            GroundedSam2Segmenter() if mask_type == "gdino_sam2_text" else Sam3BoxSegmenter())
     n_written = n_skipped = 0
     for i in tqdm(range(0, len(todo), batch_size), unit="batch"):

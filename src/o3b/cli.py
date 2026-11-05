@@ -401,7 +401,7 @@ def _build_dataset_parser(sub):
              "o3b/dataset/preprocess_mask.py",
     )
     _add_config(p_pmask)
-    p_pmask.add_argument("--mask-type", default="sam3_bbox", choices=["sam3_bbox", "sam3_text", "gdino_sam2_text"],
+    p_pmask.add_argument("--mask-type", default="sam3_bbox", choices=["sam3_bbox", "sam3_text", "sam3p1_text", "gdino_sam2_text"],
                          help="mask tree to write under <path_preprocess>/mask/ "
                               "(default: sam3_bbox)")
     p_pmask.add_argument("--override", action="store_true",
