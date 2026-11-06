@@ -171,8 +171,11 @@ nccl_env:
 #                    ablates the value.
 env: {}
 
-nodes_exclude: dlc2gpu10 # ecc cudea error
-# dlc2gpu09,dlc2gpu10,dlc2gpu11,dlc2gpu01,dlc2gpu08  # shm problem, problem for ddp
-# dlc2gpu01 was suddenly having no space left on device problem
-# dlc2gpu08 sometimes had a problem after time (also dlc2gpu03, dlc2gpu13)
-# dlc2gpu12
+# No standing node blocks: a node that fails usually works again after a day,
+# so exclude it for one day only — per submission (`--exclude`, or a
+# `platform: {nodes_exclude: …}` ablation with the date in a comment) — never here.
+# The fault retry above already excludes the failing node for that job.
+# Past failures, history only: dlc2gpu10 (ECC, 2026-11-04), dlc2gpu09 (ECC,
+# slow; 2026-11-03), dlc2gpu01 (no space left on device), dlc2gpu08/03/13
+# (problems after a while), dlc2gpu09/10/11/01/08 (shm, DDP).
+nodes_exclude: null
