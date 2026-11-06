@@ -1,0 +1,20 @@
+# handal_train_aff_sam3_sharded — handal_train_aff_sharded (32 frames per
+# sequence) with SAM 3's text-prompted mask as the object mask, and its box as
+# the crop box, instead of HANDAL's annotated mask_visib: the masks the model
+# sees at test time (handal_test_aff_sam3), here for training. The handle
+# labels (fo_mask_aff, mesh_vert_labels) stay HANDAL's. Write the masks first:
+#
+#   o3b dataset preprocess-mask -d handal_train_aff_sharded --mask-type sam3_text -p slurm_lmbl40_sam3 --remote --shard I --num-shards 8
+#
+# A frame whose SAM 3 mask is empty has no crop and is left out of the cache.
+
+defaults:
+  - handal_train_aff_sharded
+  - _self_
+
+extra:
+  frames_count_max_per_sequence: 32
+  mask_source: preprocess
+  mask_type: sam3_text
+
+sharded_name: handal_train_aff_r${img_size}_f32_sam3
