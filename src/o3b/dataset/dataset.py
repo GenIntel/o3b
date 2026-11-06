@@ -126,6 +126,13 @@ class DatasetConfig:
     # How a cache too large for one job's walltime is built by parallel jobs.
     sharded_chunk:     Optional[int]        = None
     sharded_chunks:    Optional[int]        = None
+    # Read only some rows of the cache: the name of an int64 .npy of row
+    # indices under <path_preprocess>/sharded/<sharded_name>.rows/ (or an
+    # absolute path). Order is kept and repeats are allowed, so one cache serves
+    # any sub- or resampling of itself (a category / instance subset, a
+    # viewpoint-matched draw) without being rebuilt. Applied on read only; a
+    # build still writes the whole cache.
+    sharded_rows:      Optional[str]        = None
 
     # HuggingFace Hub repo holding this config's sharded cache.  All hc3d configs
     # share one repo ("GenIntelLab/HouseCorr3D") and become separate *subsets*
@@ -178,6 +185,7 @@ class DatasetConfig:
             "sharded_override":   self.sharded_override,
             "sharded_shard_size": self.sharded_shard_size,
             "sharded_num_workers": self.sharded_num_workers,
+            "sharded_rows":       self.sharded_rows,
             "huggingface_name":   self.huggingface_name,
             "huggingface_config_name": self.huggingface_config_name,
             "use_huggingface":    self.use_huggingface,
@@ -219,6 +227,7 @@ class DatasetConfig:
             sharded_override     = bool(d.get("sharded_override", False)),
             sharded_shard_size   = int(d.get("sharded_shard_size", 1000)),
             sharded_num_workers  = int(d.get("sharded_num_workers", 0)),
+            sharded_rows         = d.get("sharded_rows"),
             huggingface_name     = d.get("huggingface_name"),
             huggingface_config_name = d.get("huggingface_config_name"),
             use_huggingface      = bool(d.get("use_huggingface", False)),
@@ -370,6 +379,8 @@ class ConfigurableDataset(_TorchDataset):
             self._setup()
         if cfg.sharded_name:
             self._setup_sharded()
+            if cfg.sharded_rows and cfg.sharded_chunk is None:
+                self._select_sharded_rows()
 
     def _setup(self) -> None:
         pass
@@ -513,6 +524,34 @@ class ConfigurableDataset(_TorchDataset):
         self._sharded = read_sharded_dataset(path)
         self._sharded_meshes, self._sharded_mesh_rows = self._read_mesh_sidecar(path)
         print(f"Done. Wrote {len(self._sharded)} items → {path}")
+
+    def sharded_rows_path(self) -> Optional[Path]:
+        """Where ``sharded_rows`` points, or None when it is unset."""
+        name = self.cfg.sharded_rows
+        if not name:
+            return None
+        p = Path(name)
+        if p.is_absolute():
+            return p
+        d = self._sharded_dir()
+        if d is None:
+            raise ValueError("sharded_rows names a file relative to the cache, "
+                             "but path_preprocess is None")
+        return d.parent / f"{d.name}.rows" / (name if name.endswith(".npy") else f"{name}.npy")
+
+    def _select_sharded_rows(self) -> None:
+        """Narrow the loaded cache to the rows ``sharded_rows`` lists."""
+        import numpy as np
+        path = self.sharded_rows_path()
+        rows = np.load(path).astype(np.int64).reshape(-1)
+        n = len(self._sharded)
+        if rows.size and (rows.min() < 0 or rows.max() >= n):
+            raise ValueError(f"{path}: row indices outside [0, {n}) of the cache")
+        # in memory: the default writes an indices file into the shared cache
+        # directory, which every rank and worker would race to create
+        self._sharded = self._sharded.select(rows, keep_in_memory=True)
+        print(f"sharded_rows {path}: {rows.size} rows "
+              f"({np.unique(rows).size} distinct) of {n}")
 
     def _setup_sharded_chunk(self) -> None:
         """Build (or reuse) chunk ``sharded_chunk`` of ``sharded_chunks``.
