@@ -660,6 +660,13 @@ class CamCrsp3DNNTask(OD3D_Task):
     top-down render of the target object.  Predicted poses fall back to GT when
     unavailable (oracle upper bound).
 
+    ``dump_kpts2d``: a path; when set, every sample is appended to it as one
+    JSON line (frame ids, 2-D threshold, per keypoint the GT pixel in both frames, visibility
+    and, per route, the predicted pixel and the symmetry-aware 2-D distance),
+    so the 2-D result can be re-scored on any keypoint / pair subset (the VLM
+    keypoint test). The file is truncated on the first write of a process; under
+    DDP each rank writes ``<path>.r<rank>``.
+
     ``mesh_ncds_rescale`` / ``mesh_ncds_recenter`` control how the meshes of the
     ``mesh`` variant are normalised into NCDS before being posed — see
     :func:`o3b.data.datatypes.mesh.verts_ncds`.  Both default to off: GT meshes
@@ -674,9 +681,12 @@ class CamCrsp3DNNTask(OD3D_Task):
         qualit: bool = True,
         mesh_ncds_rescale: bool = False,
         mesh_ncds_recenter: bool = False,
+        dump_kpts2d: Optional[str] = None,
         **kwargs,
     ):
         self.qualit = qualit
+        self.dump_kpts2d = dump_kpts2d
+        self._dump_opened = False
         self.mesh_ncds_rescale  = mesh_ncds_rescale
         self.mesh_ncds_recenter = mesh_ncds_recenter
         self._warned_missing: set[tuple] = set()
@@ -797,12 +807,15 @@ class CamCrsp3DNNTask(OD3D_Task):
             threshold2d = 0.1 * _bbox2d_size_from_masks(batch.trgt_fo_mask, B, dev)
             trgt_intr = batch.trgt_cam_intr4x4.float().to(dev)
 
+        routes2d = {}  # route -> (pred cam pts (B, K, 3), sym-aware 2-D dist (B, K))
+
         def _metrics2d(gt_syms, pred, suffix):
             if threshold2d is None:
                 return
             # a sample without a usable box gets NaN distances → NaN aggregates
             d2 = _kpts2d_sym_min_dist(gt_syms, pred, trgt_intr)
             d2 = torch.where(torch.isfinite(threshold2d)[:, None], d2, torch.full_like(d2, float("nan")))
+            routes2d[suffix.lstrip("_") or "pose"] = (pred, d2)
             m2 = _variant_metrics(d2, kpts_valid, torch.nan_to_num(threshold2d, nan=0.0),
                                   src_vis, trgt_vis)
             quant.extra[f"cam_kpts2d_trgt_pck01{suffix}"] = m2["pck"]
@@ -846,6 +859,10 @@ class CamCrsp3DNNTask(OD3D_Task):
                 quant.extra[f"cam_kpts_modal_trgt_pck01_{name}"]  = m["modal"]
                 quant.extra[f"cam_kpts_amodal_trgt_pck01_{name}"] = m["amodal"]
 
+        if self.dump_kpts2d and threshold2d is not None:
+            self._dump_kpts2d(batch, routes2d, query_kpts_cam_q, gt_trgt_kpts_cam_t, trgt_intr,
+                              threshold2d, kpts_valid, src_vis, trgt_vis)
+
         if self.qualit and return_qualit:
             qualit = self._render_qualit(
                 batch, query_kpts_cam_q, gt_trgt_kpts_cam_t, pred_trgt_kpts_cam_t,
@@ -863,6 +880,48 @@ class CamCrsp3DNNTask(OD3D_Task):
             qualit = None
 
         return quant, qualit
+
+    def _dump_kpts2d(self, batch, routes2d, src_kpts_cam, gt_kpts_cam, intr, threshold2d,
+                     kpts_valid, src_vis, trgt_vis):
+        import json
+        import os
+        import torch.distributed as dist
+
+        path = self.dump_kpts2d
+        if dist.is_available() and dist.is_initialized():
+            path = f"{path}.r{dist.get_rank()}"
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+        def _uv(x):  # (K, 2) -> list, NaN (no pixel) -> None
+            return [[round(float(u), 2), round(float(v), 2)] if math.isfinite(u) and math.isfinite(v)
+                    else None for u, v in x.tolist()]
+
+        def _f(x):
+            return [round(float(d), 2) if math.isfinite(d) else None for d in x.tolist()]
+
+        gt_uv = _proj_cam_px(gt_kpts_cam.float(), intr).cpu()
+        src_uv = (_proj_cam_px(src_kpts_cam.float(), batch.src_cam_intr4x4.float().to(intr.device)).cpu()
+                  if batch.src_cam_intr4x4 is not None else None)
+        uvs = {k: _proj_cam_px(torch.nan_to_num(p.float().to(intr.device), nan=float("inf")), intr).cpu()
+               for k, (p, _) in routes2d.items()}
+        B = gt_uv.shape[0]
+        ids_s = batch.src_frame_id or [""] * B
+        ids_t = batch.trgt_frame_id or [""] * B
+        with open(path, "a" if self._dump_opened else "w") as f:
+            self._dump_opened = True
+            for b in range(B):
+                rec = {
+                    "src_frame": ids_s[b], "trgt_frame": ids_t[b],
+                    "threshold_px": float(threshold2d[b]),
+                    "valid": kpts_valid[b].tolist(),
+                    "src_vis": src_vis[b].tolist() if src_vis is not None else None,
+                    "trgt_vis": trgt_vis[b].tolist() if trgt_vis is not None else None,
+                    "gt_uv": _uv(gt_uv[b]),
+                    "src_uv": _uv(src_uv[b]) if src_uv is not None else None,
+                    "routes": {k: {"uv": _uv(uvs[k][b]), "d2sym": _f(d2[b].cpu())}
+                               for k, (_, d2) in routes2d.items()},
+                }
+                f.write(json.dumps(rec) + "\n")
 
     # ── qualitative ────────────────────────────────────────────────────────────
 
