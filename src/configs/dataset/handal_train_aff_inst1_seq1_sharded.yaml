@@ -1,0 +1,33 @@
+# handal_train_aff_inst1_seq1_sharded — H12 low data, "1 %": one sequence per category.
+#
+#   o3b dataset init -d handal_train_aff_inst1_seq1_sharded -p slurm_lmbl40 --remote
+#
+# One random sequence (seed 0, >= 32 handle masks) of the instance that
+# handal_train_aff_inst1_sharded keeps, so this set is inside that one:
+# 17 of 1,684 sequences (1.0 %), 32 frames each.
+
+defaults:
+  - handal_train_aff_sharded
+  - _self_
+
+extra:
+  subset_ids:
+    - adjustable_wrench/038006
+    - claw_hammer/005004
+    - combination_wrench/039007
+    - fixed_joint_pliers/010006
+    - ladle/011005
+    - locking_pliers/022008
+    - measuring_cup/013005
+    - mug/003002
+    - pot_and_pan/041009
+    - power_drill/005005
+    - ratchet/021001
+    - screwdriver/008007
+    - slip_joint_pliers/092001
+    - spatula/008007
+    - strainer/031009
+    - utensil/005009
+    - whisk/041012
+
+sharded_name: handal_train_aff_r${img_size}_f32_inst1_seq1
