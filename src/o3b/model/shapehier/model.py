@@ -206,7 +206,7 @@ class ShapeHier(OD3D_Model):
         if not self._logged_stages:
             # once per process: real tokens per sample in each LitePT stage (mean / max)
             n = [mk.sum(1).float() for _, _, mk in stages]
-            logger.info("ShapeHier: LitePT tokens per sample, stage 0..%d: %s", len(n) - 1,
+            logger.warning("ShapeHier: LitePT tokens per sample, stage 0..%d: %s", len(n) - 1,
                         ", ".join(f"{x.mean():.0f} / {x.max():.0f}" for x in n))
             self._logged_stages = True
 
