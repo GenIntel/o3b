@@ -106,7 +106,7 @@ def _aabb_iou(size_a: torch.Tensor, size_b: torch.Tensor) -> torch.Tensor:
 class PoseTask(OD3D_Task):
     """Compare predicted against GT object pose for each frame-object."""
 
-    def __init__(self, rot_acc_deg=(10.0, 30.0), transl_acc_cm=(5.0, 10.0),
+    def __init__(self, rot_acc_deg=(5.0, 10.0, 30.0), transl_acc_cm=(5.0, 10.0),
                  iou_acc=(0.25, 0.5, 0.75), cat_axes_align: bool = False):
         self.rot_acc_deg = tuple(rot_acc_deg)
         self.transl_acc_cm = tuple(transl_acc_cm)

@@ -94,7 +94,7 @@ def _errors(D: torch.Tensor, syms: Optional[torch.Tensor], chunk: int = 8192) ->
 
 
 def category_axes_align(categories: list, pred_rot: torch.Tensor, gt_rot: torch.Tensor,
-                        syms: dict, rot_acc_deg=(10.0, 30.0), select_deg: float = 30.0,
+                        syms: dict, rot_acc_deg=(5.0, 10.0, 30.0), select_deg: float = 30.0,
                         device: Optional[str] = None) -> tuple[dict, dict]:
     """Metrics with one axis relabelling per category.
 

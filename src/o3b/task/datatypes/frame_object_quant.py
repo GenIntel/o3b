@@ -21,13 +21,16 @@ class FrameObjectQuantBatch:
     # ── rotation ─────────────────────────────────────────────────────────────
     pose_rot_err_rad:      Optional[Tensor] = None  # (B,) geodesic error
     pose_rot_err_rad_sym:  Optional[Tensor] = None  # (B,) … minimised over symmetries
-    pose_rot_acc_10deg:     Optional[Tensor] = None  # (B,) float 0/1
+    pose_rot_acc_5deg:      Optional[Tensor] = None  # (B,) float 0/1
+    pose_rot_acc_10deg:     Optional[Tensor] = None
     pose_rot_acc_30deg:     Optional[Tensor] = None
+    pose_rot_acc_5deg_sym:  Optional[Tensor] = None
     pose_rot_acc_10deg_sym: Optional[Tensor] = None
     pose_rot_acc_30deg_sym: Optional[Tensor] = None
     # category-level symmetry next to a per-instance obj_syms (Omni6DPose):
     # od3d's second Omni6DPose number. Declared, or mean() never reports it.
     pose_rot_err_rad_symcat:  Optional[Tensor] = None
+    pose_rot_acc_5deg_symcat:  Optional[Tensor] = None
     pose_rot_acc_10deg_symcat: Optional[Tensor] = None
     pose_rot_acc_30deg_symcat: Optional[Tensor] = None
 
@@ -69,9 +72,10 @@ class FrameObjectQuantBatch:
 
     _FIELDS = (
         "pose_rot_err_rad", "pose_rot_err_rad_sym",
-        "pose_rot_acc_10deg", "pose_rot_acc_30deg",
-        "pose_rot_acc_10deg_sym", "pose_rot_acc_30deg_sym",
-        "pose_rot_err_rad_symcat", "pose_rot_acc_10deg_symcat", "pose_rot_acc_30deg_symcat",
+        "pose_rot_acc_5deg", "pose_rot_acc_10deg", "pose_rot_acc_30deg",
+        "pose_rot_acc_5deg_sym", "pose_rot_acc_10deg_sym", "pose_rot_acc_30deg_sym",
+        "pose_rot_err_rad_symcat", "pose_rot_acc_5deg_symcat", "pose_rot_acc_10deg_symcat",
+        "pose_rot_acc_30deg_symcat",
         "pose_transl_err_m", "pose_transl_acc_5cm", "pose_transl_acc_10cm",
         "pose_rot_transl_acc_10deg_5cm", "pose_rot_transl_acc_30deg_10cm",
         "pose_size3d_err_m", "pose_bbox3d_iou", "pose_size3d_iou",
