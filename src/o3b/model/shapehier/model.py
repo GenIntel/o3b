@@ -53,6 +53,8 @@ The module is a side branch: it reads ``feat`` and LitePT's
 goes before the PoseMLP. The pose comes from the chain's own XAttnPool, MLP and
 PoseMLP.
 """
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -60,6 +62,8 @@ import torch.nn.functional as F
 from o3b.model.model import OD3D_Model, register_model
 from o3b.model.shapemlp.model import _mlp
 from o3b.model.xattnpool.model import _Layer, rope3d
+
+logger = logging.getLogger(__name__)
 
 
 class _LocalLayer(nn.Module):
@@ -152,6 +156,7 @@ class ShapeHier(OD3D_Model):
         self.level_aux = level_aux
         self.knn, self.knn_levels = knn, set(knn_levels) if knn else set()
         self.rope_pos_grad = rope_pos_grad
+        self._logged_stages = False
 
         g = torch.Generator().manual_seed(0)
         self.init = _mlp([in_dim, init_hidden_dim, init_hidden_dim, init_count * 3])
@@ -198,6 +203,12 @@ class ShapeHier(OD3D_Model):
         if len(stages) != self.L:
             raise RuntimeError(f"ShapeHier: {len(stages)} encoder stages for {self.L} levels")
         B = feat.shape[0]
+        if not self._logged_stages:
+            # once per process: real tokens per sample in each LitePT stage (mean / max)
+            n = [mk.sum(1).float() for _, _, mk in stages]
+            logger.info("ShapeHier: LitePT tokens per sample, stage 0..%d: %s", len(n) - 1,
+                        ", ".join(f"{x.mean():.0f} / {x.max():.0f}" for x in n))
+            self._logged_stages = True
 
         pts = self.init(feat).reshape(B, self.init_count, 3)      # L0 points, cloud frame
         q = self.slot[None] + self.embed_glob(feat)[:, None] + self.embed_pt(pts)
