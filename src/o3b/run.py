@@ -51,6 +51,8 @@ def _eval_metric_means(method, task, loader, distributed: bool, desc: str,
 
     accum: dict[str, list] = {}
     n_samples = 0
+    if hasattr(task, "reset"):
+        task.reset()
     for batch in tqdm(loader, total=len(loader), unit="batch", desc=desc,
                       disable=not show_bar):
         if method is not None:
@@ -65,6 +67,8 @@ def _eval_metric_means(method, task, loader, distributed: bool, desc: str,
         for metric_name, value in quant.mean().items():
             accum.setdefault(metric_name, []).append(value)
     metrics = _reduce_metric_means(accum, distributed)
+    if hasattr(task, "finalize"):
+        metrics.update(task.finalize(distributed)[0])
     if distributed:
         n_samples = int(ddp.all_reduce_sum(n_samples))
     return metrics, n_samples
@@ -359,6 +363,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     t_eval_start = time.perf_counter()
 
     from tqdm import tqdm
+    if hasattr(task, "reset"):
+        task.reset()
     bar = tqdm(loader, total=len(loader), unit="batch", desc="eval",
                disable=not is_main)
     for batch_idx, batch in enumerate(bar):
@@ -448,6 +454,12 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     # This is the only collective of the eval pass, so an imbalanced shard only
     # costs the others a wait here, never a timeout mid-loop.
     metrics = _reduce_metric_means(accum, distributed)
+    # task-level metrics that need the whole pass (PoseTask cat_axes_align);
+    # collective, so before the cleanup below
+    _task_choice = {}
+    if hasattr(task, "finalize"):
+        _task_extra, _task_choice = task.finalize(distributed)
+        metrics.update(_task_extra)
     if distributed:
         n_samples      = int(ddp.all_reduce_sum(n_samples))
         t_method_total = ddp.all_reduce_sum(t_method_total)
@@ -482,6 +494,11 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     print(f"Results  ({n_samples} samples)")
     for k, v in metrics.items():
         print(f"  {k:<25} {v:.4f}")
+    for _variant, _per_cat in _task_choice.items():
+        _changed = {c: v for c, v in _per_cat.items() if v[0] != 0}
+        print(f"  catalign[{_variant}]: {len(_changed)}/{len(_per_cat)} categories re-labelled")
+        for c, (_pi, _P, _n) in sorted(_changed.items()):
+            print(f"    {c:<30} n={_n:<6} P={_P}")
     for k, v in cost_metrics.items():
         print(f"  {k:<25} {v:.4f}")
 
@@ -489,5 +506,10 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         final_metrics = {f"eval/{k}": v for k, v in metrics.items()}
         final_metrics["eval/n_samples"] = n_samples
         final_metrics.update({f"eval/{k}": v for k, v in cost_metrics.items()})
+        if _task_choice:
+            final_metrics["eval/catalign_choice"] = _wb.Table(
+                columns=["variant", "category", "n", "P_index", "P"],
+                data=[[var, c, n, pi, str(P)] for var, d in _task_choice.items()
+                      for c, (pi, P, n) in sorted(d.items())])
         _wb.log(final_metrics)
         _wb.finish()

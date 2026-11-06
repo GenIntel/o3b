@@ -107,11 +107,64 @@ class PoseTask(OD3D_Task):
     """Compare predicted against GT object pose for each frame-object."""
 
     def __init__(self, rot_acc_deg=(10.0, 30.0), transl_acc_cm=(5.0, 10.0),
-                 iou_acc=(0.25, 0.5, 0.75)):
+                 iou_acc=(0.25, 0.5, 0.75), cat_axes_align: bool = False):
         self.rot_acc_deg = tuple(rot_acc_deg)
         self.transl_acc_cm = tuple(transl_acc_cm)
         self.iou_acc = tuple(iou_acc)
         self._warned_missing: set = set()
+        # cat_axes_align: also report *_catalign rotation metrics, with the
+        # predicted axes re-labelled once per category by the best of the 24
+        # proper signed permutations (o3b.task.pose.cat_align). Needs every
+        # prediction at the end of the pass, so forward() keeps them here and
+        # o3b.run calls finalize() after the loop.
+        self.cat_axes_align = bool(cat_axes_align)
+        self._align_buf: list = []
+
+    # ── category axis alignment (opt-in) ─────────────────────────────────────
+    def reset(self) -> None:
+        """Drop the predictions kept for finalize() (start of an eval pass)."""
+        self._align_buf = []
+
+    def _keep_for_align(self, batch, pred, gt, syms, syms_cat) -> None:
+        cats = getattr(batch, "category", None)
+        if cats is None:
+            self._warn_once("catalign_cat", "PoseTask: cat_axes_align needs batch.category; "
+                            "*_catalign metrics are NOT computed.")
+            return
+        cats = cats.tolist() if isinstance(cats, torch.Tensor) else list(cats)
+        self._align_buf.append({
+            "category": [str(c) for c in cats],
+            "pred": pred[..., :3, :3].detach().cpu(),
+            "gt": gt[..., :3, :3].detach().cpu(),
+            "syms": None if syms is None else syms.detach().cpu().float(),
+            "syms_cat": None if syms_cat is None else syms_cat.detach().cpu().float(),
+        })
+
+    def finalize(self, distributed: bool = False) -> tuple[dict, dict]:
+        """Collective when distributed (every rank must call it): gathers the
+        kept predictions and returns ({metric: mean}, {variant: {category:
+        (P index, P, n)}}). Empty dicts when cat_axes_align is off."""
+        if not self.cat_axes_align:
+            return {}, {}
+        bufs = [self._align_buf]
+        if distributed:
+            from o3b import ddp
+            bufs = ddp.all_gather_object(self._align_buf)
+        recs = [r for b in bufs for r in b]
+        self._align_buf = []
+        if not recs:
+            return {}, {}
+        from o3b.task.pose.cat_align import category_axes_align
+
+        def _cat(key):
+            vals = [r[key] for r in recs]
+            # a variant is scored only if every batch carried it
+            return None if any(v is None for v in vals) else torch.cat(vals)
+
+        syms = {"": None, "_sym": _cat("syms"), "_symcat": _cat("syms_cat")}
+        return category_axes_align(
+            [c for r in recs for c in r["category"]], _cat("pred"), _cat("gt"),
+            syms, rot_acc_deg=self.rot_acc_deg)
 
     def _warn_once(self, key: str, msg: str) -> None:
         if key not in self._warned_missing:
@@ -178,6 +231,8 @@ class PoseTask(OD3D_Task):
                 obj_rot3d_obj_syms=syms_cat, lp_norm=2,
             )
             quant.pose_rot_err_rad_symcat = rot_err_symcat
+        if self.cat_axes_align:
+            self._keep_for_align(batch, pred, gt, syms, syms_cat)
 
         for deg in self.rot_acc_deg:
             thr = math.radians(deg)

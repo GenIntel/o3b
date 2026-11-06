@@ -1,0 +1,100 @@
+"""PoseTask(cat_axes_align=True): the per-category axis relabelling."""
+import math
+from types import SimpleNamespace
+
+import torch
+
+from o3b.cv.metric.pose import get_pose_diff, get_pose_diff_in_rad
+from o3b.task.pose.cat_align import category_axes_align, proper_signed_permutations
+from o3b.task.pose.task import PoseTask
+
+
+def _random_rot(n, gen):
+    q = torch.randn(n, 4, generator=gen)
+    q = q / q.norm(dim=-1, keepdim=True)
+    w, x, y, z = q.unbind(-1)
+    return torch.stack([
+        1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+        2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+        2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
+    ], -1).reshape(n, 3, 3)
+
+
+def _small_noise(n, deg, gen):
+    axis = torch.randn(n, 3, generator=gen)
+    axis = axis / axis.norm(dim=-1, keepdim=True)
+    ang = torch.rand(n, generator=gen) * math.radians(deg)
+    K = torch.zeros(n, 3, 3)
+    K[:, 0, 1], K[:, 0, 2], K[:, 1, 2] = -axis[:, 2], axis[:, 1], -axis[:, 0]
+    K = K - K.transpose(1, 2)
+    s, c = ang.sin()[:, None, None], ang.cos()[:, None, None]
+    return torch.eye(3) + s * K + (1 - c) * K @ K
+
+
+def _tform(R, scale=1.0):
+    T = torch.eye(4).repeat(R.shape[0], 1, 1)
+    T[:, :3, :3] = R * scale
+    return T
+
+
+def test_24_proper_permutations():
+    Ps = proper_signed_permutations()
+    assert Ps.shape == (24, 3, 3)
+    assert torch.equal(Ps[0], torch.eye(3))
+    assert torch.allclose(torch.det(Ps), torch.ones(24))
+    assert len({tuple(P.flatten().tolist()) for P in Ps}) == 24
+
+
+def test_identity_choice_matches_plain_and_sym_errors():
+    gen = torch.Generator().manual_seed(0)
+    n = 200
+    gt = _random_rot(n, gen)
+    pred = gt @ _small_noise(n, 60, gen)
+    syms = torch.tensor([[1, -1, 1], [1, 2, 1], [1, 1, 1], [2, 2, 2]]).float()[
+        torch.randint(0, 4, (n,), generator=gen)]
+    # one category: alignment can only help, and the identity column must
+    # equal the task's own errors
+    from o3b.task.pose.cat_align import _errors
+    D = gt.transpose(-1, -2) @ pred
+    e_plain = _errors(D, None)
+    e_sym = _errors(D, syms)
+    ref_plain = get_pose_diff_in_rad(_tform(pred, 0.3), _tform(gt, 0.7))
+    _, ref_sym = get_pose_diff(_tform(pred), _tform(gt), obj_rot3d_obj_syms=syms, lp_norm=2)
+    assert torch.allclose(e_plain, ref_plain, atol=1e-4)
+    assert torch.allclose(e_sym, ref_sym, atol=1e-4)
+
+
+def test_consistent_relabelling_is_undone_per_category():
+    gen = torch.Generator().manual_seed(1)
+    Ps = proper_signed_permutations()
+    n = 300
+    gt = _random_rot(n, gen)
+    cats = [["mug", "bottle", "chair"][i % 3] for i in range(n)]
+    true_P = {"mug": Ps[0], "bottle": Ps[5], "chair": Ps[17]}
+    pred = torch.stack([gt[i] @ _small_noise(1, 5, gen)[0] @ true_P[c].T
+                        for i, c in enumerate(cats)])
+    metrics, choice = category_axes_align(cats, pred, gt, {"": None}, device="cpu")
+    assert metrics["pose_rot_acc_10deg_catalign"] == 1.0
+    for c, P in true_P.items():
+        assert choice["plain"][c][1] == P.int().tolist()
+    assert metrics["pose_catalign_n_changed"] == 2.0
+
+
+def test_posetask_flag_off_by_default_and_on():
+    gen = torch.Generator().manual_seed(2)
+    n = 32
+    gt = _random_rot(n, gen)
+    P = proper_signed_permutations()[9]
+    pred = gt @ P.T
+    batch = SimpleNamespace(cam_tform4x4_obj_ncds=_tform(gt), pred_cam_tform4x4_obj=_tform(pred),
+                            obj_syms=torch.ones(n, 3), category=["mug"] * n)
+    off = PoseTask()
+    off(batch)
+    assert off.finalize() == ({}, {})
+    on = PoseTask(cat_axes_align=True)
+    quant, _ = on(batch)
+    assert quant.pose_rot_acc_30deg_sym.mean() < 1.0
+    metrics, _ = on.finalize()
+    assert metrics["pose_rot_acc_30deg_sym_catalign"] == 1.0
+    assert metrics["pose_rot_acc_10deg_catalign"] == 1.0
+    assert on._align_buf == []
