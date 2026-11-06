@@ -1238,6 +1238,10 @@ _GPU_FAULT_PATTERNS = [
     "CUDA driver initialization failed",
     "no CUDA-capable device is detected",
     "CUDA error: unspecified launch failure",
+    # CUDA error 802 at startup: torch sees no GPU, o3b.run then refuses to
+    # continue. dlc2gpu20 / 24 / 25 did this on 26-11-06 to every job they got.
+    "Error 802: system not yet initialized",
+    "config requests a CUDA device but no CUDA GPU is available",
     # NCCL hanging on the job's *first* collective: every rank enqueued it and
     # none completed it within the process-group timeout. Seen on single nodes
     # (dlc2gpu11, dlc2gpu15) where the identical job then trained elsewhere. A
