@@ -48,6 +48,7 @@ class LitePT(OD3D_Model):
         out_feat_append_in_feat = True,
         out_feats_append_in_feats = False,
         out_tokens = False,
+        out_tokens_stages = False,
         moe_experts: int = 0,
         moe_top_k: int = 2,
     ):
@@ -59,6 +60,12 @@ class LitePT(OD3D_Model):
         # attends over them (XAttnPool). out_feat_pool "none" then leaves
         # frames_pred.feat as it came in.
         self.out_tokens = out_tokens
+        # out_tokens_stages: every encoder stage's tokens, padded per sample, as
+        # frames_pred.tokens_stages = [(tokens, coord, mask), ...] from stage 0
+        # (finest, enc_channels[0]) to the last (= out_tokens'), for a decoder that
+        # reads all of them (ShapeHier). Stage s's output is the pooling parent of
+        # stage s+1, so this walks GridPooling's trace back from the result.
+        self.out_tokens_stages = out_tokens_stages
         self.out_feat_pool = out_feat_pool
         self.out_feat_append_in_feat = out_feat_append_in_feat
         self.out_feats_append_in_feats = out_feats_append_in_feats
@@ -172,6 +179,23 @@ class LitePT(OD3D_Model):
             frames_pred.tokens_mask = pad_sequence(
                 [torch.ones(c, dtype=torch.bool, device=res['feat'].device) for c in counts],
                 batch_first=True)
+        if self.out_tokens_stages:
+            from torch.nn.utils.rnn import pad_sequence
+            chain, p = [], res
+            while p is not None:
+                chain.append(p)
+                p = p.get("pooling_parent")
+            stages = []
+            for p in reversed(chain):
+                order = torch.argsort(p['batch'], stable=True)
+                counts = torch.bincount(p['batch'], minlength=B).tolist()
+                f, c = p['feat'][order], p['coord'][order]
+                stages.append((
+                    pad_sequence(torch.split(f, counts, dim=0), batch_first=True),
+                    pad_sequence(torch.split(c, counts, dim=0), batch_first=True),
+                    pad_sequence([torch.ones(n, dtype=torch.bool, device=f.device) for n in counts],
+                                 batch_first=True)))
+            frames_pred.tokens_stages = stages
         if self.out_feat_pool == "none":
             feat = None
         elif self.out_feat_pool == "max":
