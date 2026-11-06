@@ -435,6 +435,30 @@ def _desc_match(query_kpts_cam_q, pts_s, desc_s, pts_t, desc_t):
     return torch.gather(pts_t, 1, ids_t[..., None].expand(-1, -1, 3))
 
 
+def _desc_cand_cost(query_kpts_cam_q, pts_s, desc_s, pts_t, desc_t, cand_cam_t):
+    """Multiple choice through descriptors: (B, K, J) descriptor distance between each
+    query (snapped to its nearest src point, as _desc_match) and each candidate (the
+    trgt point nearest to the candidate's camera-space position)."""
+    dev = query_kpts_cam_q.device
+    pts_s, pts_t = pts_s.float().to(dev), pts_t.float().to(dev)
+    ids_s = torch.cdist(query_kpts_cam_q.float(), pts_s).argmin(dim=-1)                # (B, K)
+    desc_q = torch.gather(desc_s, 1, ids_s[..., None].expand(-1, -1, desc_s.shape[-1]))
+    ids_c = torch.cdist(torch.nan_to_num(cand_cam_t.float(), nan=1e6), pts_t).argmin(dim=-1)  # (B, J)
+    desc_c = torch.gather(desc_t, 1, ids_c[..., None].expand(-1, -1, desc_t.shape[-1]))
+    return torch.cdist(desc_q, desc_c)
+
+
+def _route_descs(batch, parts, dev):
+    """(pts_s, desc_s, pts_t, desc_t) of a descriptor route, or None."""
+    pts_s, pts_t = batch.src_pred_pts3d_shape, batch.trgt_pred_pts3d_shape
+    ds = [getattr(batch, f"src_pred_{p}_shape", None) for p in parts]
+    dt = [getattr(batch, f"trgt_pred_{p}_shape", None) for p in parts]
+    if any(x is None for x in [pts_s, pts_t, *ds, *dt]):
+        return None
+    return (pts_s, torch.cat([d.float().to(dev) for d in ds], dim=-1),
+            pts_t, torch.cat([d.float().to(dev) for d in dt], dim=-1))
+
+
 # ── keypoint symmetry (discrete + continuous rotational) ──────────────────────
 
 def _kpts_sym_candidates(trgt_kpts, trgt_ncds, obj_tform4x4_obj_syms):
@@ -662,7 +686,11 @@ class CamCrsp3DNNTask(OD3D_Task):
 
     ``dump_kpts2d``: a path; when set, every sample is appended to it as one
     JSON line (frame ids, 2-D threshold, per keypoint the GT pixel in both frames, visibility
-    and, per route, the predicted pixel and the symmetry-aware 2-D distance),
+    and, per route, the predicted pixel, the symmetry-aware 2-D distance and
+    ``mc_cost``, a K x K matrix scoring every target keypoint j as the answer to
+    query i: descriptor distance to the trgt point nearest keypoint j for the
+    descriptor routes (nocs, feat, nocs_feat), 3-D distance of the predicted
+    point to keypoint j otherwise),
     so the 2-D result can be re-scored on any keypoint / pair subset (the VLM
     keypoint test). The file is truncated on the first write of a process; under
     DDP each rank writes ``<path>.r<rank>``.
@@ -860,8 +888,22 @@ class CamCrsp3DNNTask(OD3D_Task):
                 quant.extra[f"cam_kpts_amodal_trgt_pck01_{name}"] = m["amodal"]
 
         if self.dump_kpts2d and threshold2d is not None:
+            # multiple choice: every target keypoint is a candidate; a route's cost of
+            # candidate j for query i is the descriptor distance (descriptor routes:
+            # the search restricted to the trgt points nearest the candidates) or the
+            # 3-D distance of the predicted point to the candidate (point routes)
+            cand_cost = {}
+            desc_parts = {"nocs": ("nocs",), "feat": ("feat",), "nocs_feat": ("nocs", "feat")}
+            for name, (pred, _) in routes2d.items():
+                if name in desc_parts:
+                    r = _route_descs(batch, desc_parts[name], dev)
+                    if r is not None:
+                        cand_cost[name] = _desc_cand_cost(query_kpts_cam_q, r[0], r[1], r[2], r[3],
+                                                          gt_trgt_kpts_cam_t)
+                else:
+                    cand_cost[name] = torch.cdist(pred.float().to(dev), gt_trgt_kpts_cam_t.float())
             self._dump_kpts2d(batch, routes2d, query_kpts_cam_q, gt_trgt_kpts_cam_t, trgt_intr,
-                              threshold2d, kpts_valid, src_vis, trgt_vis)
+                              threshold2d, kpts_valid, src_vis, trgt_vis, cand_cost)
 
         if self.qualit and return_qualit:
             qualit = self._render_qualit(
@@ -882,7 +924,7 @@ class CamCrsp3DNNTask(OD3D_Task):
         return quant, qualit
 
     def _dump_kpts2d(self, batch, routes2d, src_kpts_cam, gt_kpts_cam, intr, threshold2d,
-                     kpts_valid, src_vis, trgt_vis):
+                     kpts_valid, src_vis, trgt_vis, cand_cost=None):
         import json
         import os
         import torch.distributed as dist
@@ -918,7 +960,10 @@ class CamCrsp3DNNTask(OD3D_Task):
                     "trgt_vis": trgt_vis[b].tolist() if trgt_vis is not None else None,
                     "gt_uv": _uv(gt_uv[b]),
                     "src_uv": _uv(src_uv[b]) if src_uv is not None else None,
-                    "routes": {k: {"uv": _uv(uvs[k][b]), "d2sym": _f(d2[b].cpu())}
+                    "routes": {k: {"uv": _uv(uvs[k][b]), "d2sym": _f(d2[b].cpu()),
+                                   **({"mc_cost": [[round(float(c), 5) if math.isfinite(c) else None
+                                                    for c in row] for row in cand_cost[k][b].tolist()]}
+                                      if cand_cost and k in cand_cost else {})}
                                for k, (_, d2) in routes2d.items()},
                 }
                 f.write(json.dumps(rec) + "\n")
