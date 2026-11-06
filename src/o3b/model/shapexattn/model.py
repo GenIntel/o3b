@@ -96,6 +96,10 @@ layers, and the end-of-pass offset is added on top. The pose token is unaffected
 ``mid_aux: true`` hands those mid-pass points (and NOCS / features) to TrinityMethod
 as ``pts3d_shape_mid`` / ``nocs_shape_mid`` / ``feat_shape_mid`` for deep
 supervision of their own (``shape_*_l1_mid``).
+``rope_pos_grad: true`` keeps the gradient on the PointROPE positions of the queries
+(coarse points, anchors, the pose token's predicted centre), which are otherwise
+detached: the losses then also reach the point and pose heads that placed a token
+through the rotary angles of the layers that read it.
 ``surface_sees_pose: false`` makes self-attention one-way: the pose token still
 attends to the surface tokens, the surface tokens no longer attend to it.
 ``pose_layers: n`` takes the pose token out of the passes' layers: every pass runs
@@ -185,8 +189,10 @@ class ShapeXAttn(OD3D_Model):
         global_feat: bool = True,
         mid_update_after: int = 0,
         mid_aux: bool = False,
+        rope_pos_grad: bool = False,
     ):
         super().__init__()
+        self.rope_pos_grad = rope_pos_grad
         self.nocs = nocs
         self.pose_query = pose_query
         self.coarse_count = coarse_count
@@ -316,6 +322,11 @@ class ShapeXAttn(OD3D_Model):
         self.register_buffer("fold_grid", grid, persistent=False)
         self.fold = _mlp([dim + 2, fold_hidden_dim, fold_hidden_dim, self.out_ch])
 
+
+    def _rp(self, x: torch.Tensor) -> torch.Tensor:
+        """A query position for PointROPE: detached unless ``rope_pos_grad``."""
+        return x if self.rope_pos_grad else x.detach()
+
     def forward(self, frames_gt, frames_pred=None):
         if self.learned_queries:
             return self._forward_learned(frames_gt, frames_pred)
@@ -333,7 +344,7 @@ class ShapeXAttn(OD3D_Model):
         coarse = coarse_out[..., :3]                              # (B, C, 3)
 
         q = self.embed_pt(coarse) + self.embed_glob(feat)[:, None]
-        q_pos = coarse.detach() / self.rope_unit
+        q_pos = self._rp(coarse) / self.rope_unit
         if self.pose_query:
             # pose token first, at the cloud frame's origin (the observed
             # cloud's median), like XAttnPool's pose query
@@ -366,12 +377,12 @@ class ShapeXAttn(OD3D_Model):
             aux_extra.append(extra)
             out = self.point_head(h[:, p0:n_main])
             coarse, extra = coarse + out[..., :3], extra + out[..., 3:]
-            pos = [coarse.detach() / self.rope_unit, q_pos[:, n_main:]]
+            pos = [self._rp(coarse) / self.rope_unit, q_pos[:, n_main:]]
             if self.pose_query:
                 bag = _Bag(feat=h[:, 0], obj_tform4x4_obj_nocs_0c=frames_pred.obj_tform4x4_obj_nocs_0c)
                 _, bag = self.pose_head(None, bag)
                 aux_pose.append((bag.cam_tform4x4_obj, bag.obj_size3d))
-                pos.insert(0, self.pose_head.nets[0](h[:, 0]).detach()[:, None] / self.rope_unit)
+                pos.insert(0, self._rp(self.pose_head.nets[0](h[:, 0]))[:, None] / self.rope_unit)
             q_pos = torch.cat(pos, dim=1)
         q = self.norm_out(q)                                      # (B, [1 +] C [+ K], dim)
         if mask_pts is not None or qry_pts is not None or qry_feat is not None:
@@ -444,14 +455,14 @@ class ShapeXAttn(OD3D_Model):
             aux_extra.append(co[..., 3:])
             _, bag = self.pose_head(None, _Bag(feat=h0, obj_tform4x4_obj_nocs_0c=obj_tform))
             aux_pose.append((bag.cam_tform4x4_obj, bag.obj_size3d))
-            centre = self.pose_head.nets[0](h0).detach()
+            centre = self._rp(self.pose_head.nets[0](h0))
             e = self.embed_init(h0)[:, None]
             q = torch.cat([self.embed_init_pose(h0)[:, None], self.embed_pt(coarse) + e], dim=1)
-            q_pos = torch.cat([centre[:, None], coarse.detach()], dim=1) / self.rope_unit
+            q_pos = torch.cat([centre[:, None], self._rp(coarse)], dim=1) / self.rope_unit
         else:
             q = self.query[None].expand(B, -1, -1) + glob
             coarse = self.anchor[None].expand(B, -1, -1)
-            q_pos = coarse.detach() / self.rope_unit
+            q_pos = self._rp(coarse) / self.rope_unit
             if self.pose_query:
                 q = torch.cat([self.pose_query_embed[None].expand(B, -1, -1) + glob, q], dim=1)
                 q_pos = torch.cat([q_pos.new_zeros(B, 1, 3), q_pos], dim=1)
@@ -493,7 +504,7 @@ class ShapeXAttn(OD3D_Model):
                         if self.mid_aux:
                             mid_pts.append(coarse)
                             mid_extra.append(o_mid[..., 3:])
-                        q_pos = torch.cat([q_pos[:, :1], coarse.detach() / self.rope_unit, q_pos[:, n_main:]], dim=1)
+                        q_pos = torch.cat([q_pos[:, :1], self._rp(coarse) / self.rope_unit, q_pos[:, n_main:]], dim=1)
                 for layer in self.pose_layers:
                     qp = layer(qp, q_pos[:, :1], tok, tok_pos, tok_mask)
                 q = torch.cat([qp, qs], dim=1)
@@ -516,11 +527,11 @@ class ShapeXAttn(OD3D_Model):
                 aux_extra.append(extra)
                 if pose is not None:
                     aux_pose.append(pose)
-                    centre = self.pose_head.nets[0](h[:, 0]).detach()      # cloud-frame translation
-                    q_pos = torch.cat([centre[:, None] / self.rope_unit, coarse.detach() / self.rope_unit,
+                    centre = self._rp(self.pose_head.nets[0](h[:, 0]))      # cloud-frame translation
+                    q_pos = torch.cat([centre[:, None] / self.rope_unit, self._rp(coarse) / self.rope_unit,
                                        q_pos[:, n_main:]], dim=1)
                 else:
-                    q_pos = torch.cat([coarse.detach() / self.rope_unit, q_pos[:, n_main:]], dim=1)
+                    q_pos = torch.cat([self._rp(coarse) / self.rope_unit, q_pos[:, n_main:]], dim=1)
 
         if mask_pts is not None or qry_pts is not None or qry_feat is not None:
             self._mask_out(frames_pred, h[:, n_main:], mask_tgt, qry_pts, qry_feat)
