@@ -232,8 +232,10 @@ def _pred_featmap2d(batch, src_ncds, kpts_valid):
 
     for b in range(B):
         try:
-            src_fm  = batch.src_featmap[b].float()   # (F, Hf, Wf)
-            trgt_fm = batch.trgt_featmap[b].float()  # (F, Hf, Wf)
+            # on the CPU, with the depth / mask / pixel indices below (a method may
+            # leave its featmaps on the GPU)
+            src_fm  = batch.src_featmap[b].float().cpu()   # (F, Hf, Wf)
+            trgt_fm = batch.trgt_featmap[b].float().cpu()  # (F, Hf, Wf)
             Hf, Wf = src_fm.shape[-2:]
             H_s, W_s = _img_hw(batch.src_rgb, b)
             trgt_depth = batch.trgt_depth[b].float().cpu()  # (H, W)
