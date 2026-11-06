@@ -101,7 +101,9 @@ def main(argv=None) -> None:
     recs = collect(paths)
     ids = [i for r in recs for i in (r.get("frame_object_id") or [])]
     n = sum(len(r.get("category") or []) for r in recs)
-    print(f"{len(paths)} files, {n} samples, {len(set(map(str, ids)))} distinct frame ids")
+    print(f"{len(paths)} files, {n} samples"
+          + (f", {len(set(map(str, ids)))} distinct frame ids" if ids else
+             " (no frame_object_id in the dumps: duplicates only caught by shard index)"))
     if ids and len(set(map(str, ids))) != n:
         raise SystemExit("duplicate samples across dumps (overlapping shards?)")
     if args.expect is not None and n != args.expect:
