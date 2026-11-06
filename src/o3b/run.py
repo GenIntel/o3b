@@ -164,6 +164,23 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         if is_main:
             print(f"Eval:    subset_fraction={subset_fraction} -> "
                   f"{n_subset}/{len(dataset)} items")
+    # eval.shard_size + eval.shard_index score one contiguous block of the
+    # (subset) index list: items [i*size, (i+1)*size). For methods too slow for
+    # one job's walltime and without resume (SAM3D): many short jobs, each with
+    # eval.dump_samples, merged afterwards by `python -m o3b.task.pose.merge`.
+    # A block past the end scores nothing and the job ends here.
+    shard_size = eval_cfg.get("shard_size")
+    if shard_size:
+        shard_index = int(eval_cfg.get("shard_index", 0))
+        start = shard_index * int(shard_size)
+        indices = indices[start:start + int(shard_size)]
+        if is_main:
+            print(f"Eval:    shard {shard_index} (size {shard_size}) -> {len(indices)} items")
+        if not indices:
+            if is_main:
+                print("Eval:    shard is past the end of the eval set; nothing to do.")
+            ddp.cleanup_process_group()
+            return
     # rank r evaluates items r, r + W, r + 2W, …  Unlike DistributedSampler
     # this pads nothing, so the union over the ranks is exactly the dataset and
     # no item is scored twice — the shard sizes then differ by at most one,
@@ -399,7 +416,7 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
                 rec[k] = ([] if v is None else v.tolist() if isinstance(v, _torch.Tensor)
                           else list(v))
             for k in ("pred_cam_tform4x4_obj", "cam_tform4x4_obj_ncds", "cam_tform4x4_obj",
-                      "obj_syms", "obj_size3d", "pred_obj_size3d"):
+                      "obj_syms", "obj_syms_cat", "obj_size3d", "pred_obj_size3d"):
                 v = getattr(batch, k, None)
                 if isinstance(v, _torch.Tensor):
                     rec[k] = v.detach().cpu()
@@ -443,7 +460,10 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     t_eval_total   = time.perf_counter() - t_eval_start
     if dump_samples:
         from pathlib import Path as _Path
-        _dump_path = _Path(f"{dump_samples}.rank{rank}.pt")
+        # a path ending in "/" is a directory: one file per run, named after it
+        _dump_base = (f"{dump_samples}{run_name}" if str(dump_samples).endswith("/")
+                      else str(dump_samples))
+        _dump_path = _Path(f"{_dump_base}.rank{rank}.pt")
         _dump_path.parent.mkdir(parents=True, exist_ok=True)
         _torch.save(dumped, _dump_path)
         print(f"Dumped {sum(len(r.get('category') or []) for r in dumped)} samples → {_dump_path}")

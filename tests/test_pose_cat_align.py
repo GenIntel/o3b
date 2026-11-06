@@ -98,3 +98,37 @@ def test_posetask_flag_off_by_default_and_on():
     assert metrics["pose_rot_acc_30deg_sym_catalign"] == 1.0
     assert metrics["pose_rot_acc_10deg_catalign"] == 1.0
     assert on._align_buf == []
+
+
+def test_merge_of_shard_dumps_matches_one_pass(tmp_path):
+    from o3b.task.pose import merge as M
+    gen = torch.Generator().manual_seed(3)
+    Ps = proper_signed_permutations()
+    n = 96
+    gt = _random_rot(n, gen)
+    cats = [["mug", "bottle"][i % 2] for i in range(n)]
+    pred = torch.stack([gt[i] @ (Ps[4].T if c == "mug" else torch.eye(3)) for i, c in enumerate(cats)])
+    syms = torch.ones(n, 3)
+    # one pass over everything
+    task = PoseTask(cat_axes_align=True)
+    full = SimpleNamespace(cam_tform4x4_obj_ncds=_tform(gt), pred_cam_tform4x4_obj=_tform(pred),
+                           obj_syms=syms, category=cats)
+    q, _ = task(full)
+    ref, _ = task.finalize()
+    # three shard dumps, the mugs and bottles split across them; shard 1 twice
+    for s, (a, b) in enumerate([(0, 40), (40, 70), (70, 96)]):
+        qs, _ = PoseTask()(SimpleNamespace(cam_tform4x4_obj_ncds=_tform(gt[a:b]),
+                                           pred_cam_tform4x4_obj=_tform(pred[a:b]),
+                                           obj_syms=syms[a:b], category=cats[a:b]))
+        rec = {"category": cats[a:b], "frame_object_id": list(range(a, b)),
+               "pred_cam_tform4x4_obj": _tform(pred[a:b]), "cam_tform4x4_obj_ncds": _tform(gt[a:b]),
+               "obj_syms": syms[a:b]}
+        rec.update({k: getattr(qs, k) for k in qs._FIELDS if getattr(qs, k) is not None})
+        for rep in range(2 if s == 1 else 1):
+            torch.save([rec], tmp_path / f"0101_00000{rep}__pose_x__m__b40_s{s:03d}.rank0.pt")
+    recs = M.collect(sorted(map(str, tmp_path.glob("*.pt"))))
+    assert sum(len(r["category"]) for r in recs) == n
+    metrics, _ = M.merge(recs, cat_axes_align=True)
+    assert metrics["pose_rot_acc_30deg_sym"] == q.pose_rot_acc_30deg_sym.mean().item() == 0.5
+    for k in ("pose_rot_acc_30deg_sym_catalign", "pose_rot_acc_10deg_catalign"):
+        assert metrics[k] == ref[k] == 1.0
