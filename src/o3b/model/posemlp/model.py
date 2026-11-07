@@ -234,11 +234,17 @@ def pose_from_raw(raw: torch.Tensor, obj_tform4x4_obj_nocs_0c: torch.Tensor = No
     and refine the raw vector themselves (ShapeHier's per-level pose). With
     ``obj_tform4x4_obj_nocs_0c`` the outputs are in the normalised cloud frame and
     are mapped back as PoseMLP does."""
+    return pose_from_parts(raw[..., :3], rotation_6d_to_matrix(raw[..., 3:9]),
+                           _SOFTPLUS(raw[..., 9:12]), obj_tform4x4_obj_nocs_0c)
+
+
+def pose_from_parts(transl: torch.Tensor, rot: torch.Tensor, size: torch.Tensor,
+                    obj_tform4x4_obj_nocs_0c: torch.Tensor = None):
+    """``(cam_tform4x4_obj, obj_size3d)`` from a translation (B, 3), rotation (B, 3, 3)
+    and size (B, 3), mapped from the normalised cloud frame as PoseMLP does when
+    ``obj_tform4x4_obj_nocs_0c`` is given (ShapeHier's Umeyama pose)."""
     from o3b.cv.geometry.transform import (transf3d_broadcast, rot3x3, rem_scale_tform4x4,
                                            get_scale1d_tform4x4)
-    transl = raw[..., :3]
-    rot = rotation_6d_to_matrix(raw[..., 3:9])
-    size = _SOFTPLUS(raw[..., 9:12])
     if obj_tform4x4_obj_nocs_0c is not None:
         transl = transf3d_broadcast(pts3d=transl, transf4x4=obj_tform4x4_obj_nocs_0c)
         rot = rot3x3(rem_scale_tform4x4(obj_tform4x4_obj_nocs_0c)[..., :3, :3], rot)

@@ -67,6 +67,23 @@ surface never reads the pose token. The last level's pose is written as
 ``cam_tform4x4_obj`` / ``obj_size3d`` (no PoseMLP after this module); the earlier
 ones are ``pose_aux``, which TrinityMethod supervises only if ``train.loss`` weighs
 the ``pose_*_aux`` terms.
+
+``pose_umeyama: true`` (H08-T03, after DROID-SLAM's predict -> measure -> correct)
+reads the pose out of the NOCS instead of regressing it, at every level in
+``umeyama_levels``. A level's tokens give a NOCS each (the level's NOCS head; at the
+last level the output head and the output points) and a confidence (a zero-initialised
+linear head, softmax over the level's tokens, so uniform at the start). A weighted
+Umeyama fit of the NOCS onto the level's points (detached: the pose never moves the
+surface) gives ``s R``, ``t`` in the cloud frame (``o3b.cv.geometry.umeyama``, a
+gradient that stays finite at equal singular values). The size is ``2 s`` times the
+NOCS's trimmed extent per axis (``size_quantile``) over its longest one, so it agrees
+with the NCDS pose (longest side 2). The fit's residual per token, ``point - (s R nocs
++ t)``, with the NOCS and the confidence (all detached), is embedded (zero-initialised)
+into the token's children: the next level sees where the current pose and its NOCS
+disagree. The pose loss reaches the NOCS and the confidences through the fit; the
+NOCS also have their own objective (``shape_nocs_l1_*``). Needs ``nocs: true``; the
+last fitted level is ``cam_tform4x4_obj`` / ``obj_size3d``, the earlier ones
+``pose_aux``. No PoseMLP after this module.
 """
 import logging
 
@@ -152,6 +169,9 @@ class ShapeHier(OD3D_Model):
         pose_heads: int = 14,
         pose_layers: int = 3,
         pose_mlp_ratio: int = 4,
+        pose_umeyama: bool = False,
+        umeyama_levels=(1, 2, 3, 4),
+        size_quantile: float = 0.02,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -229,6 +249,50 @@ class ShapeHier(OD3D_Model):
                     head.weight.zero_()
                     head.bias.zero_()
 
+        self.pose_umeyama = pose_umeyama
+        if pose_umeyama:
+            if not nocs:
+                raise ValueError("ShapeHier: pose_umeyama needs nocs: true")
+            if pose_levels:
+                raise ValueError("ShapeHier: pose_umeyama and pose_levels exclude each other")
+            self.um_levels = sorted(int(l) for l in umeyama_levels)
+            if not self.um_levels or not all(0 <= l < L for l in self.um_levels):
+                raise ValueError(f"ShapeHier: umeyama_levels must lie in 0..{L - 1}")
+            self.size_quantile = size_quantile
+            self.um_conf = nn.ModuleDict({str(l): nn.Linear(dims[l], 1) for l in self.um_levels})
+            # residual (3) + NOCS (3) + confidence x n (1) of a parent -> its children
+            self.um_embed = nn.ModuleDict({str(l): _mlp([7, dims[l + 1], dims[l + 1]])
+                                           for l in self.um_levels if l < L - 1})
+            with torch.no_grad():
+                for m in self.um_conf.values():
+                    m.weight.zero_()
+                    m.bias.zero_()
+                for m in self.um_embed.values():
+                    m[-1].weight.zero_()
+                    m[-1].bias.zero_()
+
+    def _umeyama(self, l, h, pts):
+        """Weighted Umeyama fit of level ``l``'s NOCS onto its points (cloud frame).
+
+        Returns the pose (``pose_from_parts``'s cloud-frame inputs) and the feedback
+        features (B, n, 7) for the children."""
+        from o3b.cv.geometry.umeyama import weighted_umeyama
+        if l == self.L - 1:
+            o = self.out_head(h)
+            pts, nocs = pts + o[..., :3], o[..., 3:6]
+        else:
+            nocs = self.level_heads[l](h)[..., :3]
+        w = torch.softmax(self.um_conf[str(l)](h)[..., 0].float(), dim=1)
+        nocs = nocs.float()
+        s, R, t = weighted_umeyama(nocs, pts.detach().float(), w)
+        q = torch.tensor([self.size_quantile, 1 - self.size_quantile], device=nocs.device)
+        lo, hi = torch.quantile(nocs, q, dim=1)                       # (B, 3) each
+        ext = (hi - lo).clamp_min(1e-6)
+        size = 2 * s.abs()[:, None] * ext / ext.max(dim=1, keepdim=True).values
+        fit = s[:, None, None] * (nocs @ R.transpose(1, 2)) + t[:, None]
+        fb = torch.cat([pts.float() - fit, nocs, w[..., None] * w.shape[1]], dim=-1).detach()
+        return (t, R, size), fb
+
     def _rp(self, x):
         return x if self.rope_pos_grad else x.detach()
 
@@ -273,6 +337,7 @@ class ShapeHier(OD3D_Model):
         pts = self.init(feat).reshape(B, self.init_count, 3)      # L0 points, cloud frame
         q = self.slot[None] + self.embed_glob(feat)[:, None] + self.embed_pt(pts)
         level_pts, level_h = [], []
+        um_poses = []
         for l in range(self.L):
             tok, tok_coord, tok_mask = stages[self.L - 1 - l]
             tok, tok_coord = tok.float(), tok_coord.float()
@@ -286,6 +351,10 @@ class ShapeHier(OD3D_Model):
             h = self.norms[l](q)
             level_pts.append(pts)
             level_h.append(h)
+            fb = None
+            if self.pose_umeyama and l in self.um_levels:
+                pose_l, fb = self._umeyama(l, h, pts)
+                um_poses.append(pose_l)
             if l == self.L - 1:
                 break
             n = h.shape[1]
@@ -293,10 +362,19 @@ class ShapeHier(OD3D_Model):
             out = self.folds[l](torch.cat([h[:, :, None].expand(B, n, self.fold, h.shape[-1]), seed], dim=-1))
             off = torch.tanh(out[..., :3]) * (self.offset_scale * self.offset_decay ** l)
             pts = (pts[:, :, None] + off).reshape(B, n * self.fold, 3)
-            q = (self.skips[l](h)[:, :, None] + out[..., 3:] + self.embed_off[l](off)).reshape(B, n * self.fold, -1)
+            q = self.skips[l](h)[:, :, None] + out[..., 3:] + self.embed_off[l](off)
+            if fb is not None and str(l) in self.um_embed:
+                q = q + self.um_embed[str(l)](fb.to(q.dtype))[:, :, None]
+            q = q.reshape(B, n * self.fold, -1)
 
         if self.pose_levels:
             self._pose(frames_pred, level_pts, level_h, B)
+        if self.pose_umeyama:
+            from o3b.model.posemlp.model import pose_from_parts
+            obj_tform = frames_pred.obj_tform4x4_obj_nocs_0c
+            poses = [pose_from_parts(t, R, size, obj_tform) for t, R, size in um_poses]
+            frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = poses[-1]
+            frames_pred.pose_aux = poses[:-1]
 
         o = self.out_head(level_h[-1])
         fine = level_pts[-1] + o[..., :3]
