@@ -223,3 +223,24 @@ class PoseMLP(MLP):
         #     poses_rot6d = poses_rot6d * self.net_pose_rotations_othant_signs[None, None].to(
         #         device=self.device,
         #     )
+
+
+_SOFTPLUS = Softplus(beta=2 * np.log(2))
+
+
+def pose_from_raw(raw: torch.Tensor, obj_tform4x4_obj_nocs_0c: torch.Tensor = None):
+    """PoseMLP's decoding of its 12 outputs (translation 3, rotation 6D, size 3 before
+    the softplus) into ``(cam_tform4x4_obj, obj_size3d)``, for models that predict
+    and refine the raw vector themselves (ShapeHier's per-level pose). With
+    ``obj_tform4x4_obj_nocs_0c`` the outputs are in the normalised cloud frame and
+    are mapped back as PoseMLP does."""
+    from o3b.cv.geometry.transform import (transf3d_broadcast, rot3x3, rem_scale_tform4x4,
+                                           get_scale1d_tform4x4)
+    transl = raw[..., :3]
+    rot = rotation_6d_to_matrix(raw[..., 3:9])
+    size = _SOFTPLUS(raw[..., 9:12])
+    if obj_tform4x4_obj_nocs_0c is not None:
+        transl = transf3d_broadcast(pts3d=transl, transf4x4=obj_tform4x4_obj_nocs_0c)
+        rot = rot3x3(rem_scale_tform4x4(obj_tform4x4_obj_nocs_0c)[..., :3, :3], rot)
+        size = size * get_scale1d_tform4x4(obj_tform4x4_obj_nocs_0c, keepdim=False)[:, None]
+    return transf4x4_from_rot3x3_and_transl3(rot3x3=rot, transl3=transl), size

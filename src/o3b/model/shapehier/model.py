@@ -52,6 +52,21 @@ The module is a side branch: it reads ``feat`` and LitePT's
 ``tokens_stages`` (``out_tokens_stages: true``) and leaves ``feat`` alone, so it
 goes before the PoseMLP. The pose comes from the chain's own XAttnPool, MLP and
 PoseMLP.
+
+``pose_levels: true`` (H08-T03) moves the pose into the decoder, refined level by
+level. One pose token of width ``pose_dim`` (a learned parameter at L0) runs
+through ``pose_layers`` cross-attention layers per level (XAttnPool's layer, no
+self-attention) over that level's decoder tokens after the level's layers,
+projected to ``pose_dim``. The keys sit at the level's points, the query at the
+previous level's predicted centre (the cloud origin at L0), both in the level's
+RoPE unit. A head on the token gives PoseMLP's 12 raw outputs (translation, 6D
+rotation, size before the softplus): L0 predicts them, every later level adds a
+residual (zero-initialised, so all levels start at L0's pose). From L1 on the token
+also gets the embedded previous raw pose (detached; the residual sum is not). The
+surface never reads the pose token. The last level's pose is written as
+``cam_tform4x4_obj`` / ``obj_size3d`` (no PoseMLP after this module); the earlier
+ones are ``pose_aux``, which TrinityMethod supervises only if ``train.loss`` weighs
+the ``pose_*_aux`` terms.
 """
 import logging
 
@@ -132,6 +147,11 @@ class ShapeHier(OD3D_Model):
         knn: int = 0,
         knn_levels=(3, 4),
         rope_pos_grad: bool = False,
+        pose_levels: bool = False,
+        pose_dim: int = 252,
+        pose_heads: int = 14,
+        pose_layers: int = 3,
+        pose_mlp_ratio: int = 4,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -192,8 +212,48 @@ class ShapeHier(OD3D_Model):
             self.out_head.weight[:3].zero_()
             self.out_head.bias[:3].zero_()
 
+        self.pose_levels = pose_levels
+        if pose_levels:
+            if pose_dim % pose_heads or (pose_dim // pose_heads) % 6:
+                raise ValueError("ShapeHier: pose_dim / pose_heads must be a multiple of 6 (PointROPE)")
+            self.pose_token = nn.Parameter(torch.randn(1, pose_dim, generator=g) * 0.02)
+            self.pose_kv = nn.ModuleList([nn.Linear(d, pose_dim) for d in dims])
+            self.pose_blocks = nn.ModuleList([
+                nn.ModuleList([_Layer(pose_dim, pose_heads, pose_mlp_ratio, rope_freq, dropout, self_attn=False)
+                               for _ in range(pose_layers)]) for _ in range(L)])
+            self.pose_embed = nn.ModuleList([_mlp([12, pose_dim, pose_dim]) for _ in range(L - 1)])
+            self.pose_norm = nn.LayerNorm(pose_dim)
+            self.pose_out = nn.ModuleList([nn.Linear(pose_dim, 12) for _ in range(L)])
+            with torch.no_grad():
+                for head in self.pose_out[1:]:              # residual updates start at zero
+                    head.weight.zero_()
+                    head.bias.zero_()
+
     def _rp(self, x):
         return x if self.rope_pos_grad else x.detach()
+
+    def _pose(self, frames_pred, level_pts, level_h, B):
+        """The pose token through every level, refining PoseMLP's raw pose."""
+        from o3b.model.posemlp.model import pose_from_raw
+        obj_tform = frames_pred.obj_tform4x4_obj_nocs_0c
+        t = self.pose_token[None].expand(B, 1, -1)
+        raw, poses = None, []
+        for l in range(self.L):
+            u = self.rope_units[l]
+            if raw is None:
+                q_pos = level_pts[l].new_zeros(B, 1, 3)
+            else:
+                t = t + self.pose_embed[l - 1](raw.detach())[:, None]
+                q_pos = self._rp(raw[:, None, :3]) / u
+            kv = self.pose_kv[l](level_h[l])
+            kv_pos = self._rp(level_pts[l]) / u
+            for layer in self.pose_blocks[l]:
+                t = layer(t, q_pos, kv, kv_pos, None)
+            d = self.pose_out[l](self.pose_norm(t)[:, 0])
+            raw = d if raw is None else raw + d
+            poses.append(pose_from_raw(raw, obj_tform))
+        frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = poses[-1]
+        frames_pred.pose_aux = poses[:-1]
 
     def forward(self, frames_gt, frames_pred=None):
         feat = frames_pred.feat                                   # (B, in_dim) global
@@ -234,6 +294,9 @@ class ShapeHier(OD3D_Model):
             off = torch.tanh(out[..., :3]) * (self.offset_scale * self.offset_decay ** l)
             pts = (pts[:, :, None] + off).reshape(B, n * self.fold, 3)
             q = (self.skips[l](h)[:, :, None] + out[..., 3:] + self.embed_off[l](off)).reshape(B, n * self.fold, -1)
+
+        if self.pose_levels:
+            self._pose(frames_pred, level_pts, level_h, B)
 
         o = self.out_head(level_h[-1])
         fine = level_pts[-1] + o[..., :3]
