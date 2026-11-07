@@ -1,0 +1,23 @@
+# handal_train_aff_catfold_b_sharded — H12 unseen categories: train on fold B only.
+#
+#   o3b dataset init -d handal_train_aff_catfold_b_sharded -p slurm_lmbl40 --remote
+#
+# The complement of handal_train_aff_catfold_a_sharded (see there for the split):
+# fold B's 9 categories, 917 of 1,684 train sequences; tested on fold A's 8.
+
+defaults:
+  - handal_train_aff_sharded
+  - _self_
+
+categories:
+  - fixed_joint_pliers
+  - locking_pliers
+  - slip_joint_pliers
+  - claw_hammer
+  - screwdriver
+  - power_drill
+  - mug
+  - measuring_cup
+  - pot_and_pan
+
+sharded_name: handal_train_aff_r${img_size}_f32_catfold_b

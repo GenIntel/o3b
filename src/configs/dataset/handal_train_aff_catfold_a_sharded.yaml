@@ -1,0 +1,33 @@
+# handal_train_aff_catfold_a_sharded — H12 unseen categories: train on fold A only.
+#
+#   o3b dataset init -d handal_train_aff_catfold_a_sharded -p slurm_lmbl40 --remote
+#
+# handal_train_aff_sharded restricted to fold A's 8 categories (767 of 1,684 train
+# sequences). The model is then tested on fold B's 9 categories, which it never
+# sees (and on fold A's own test instances, for seen vs unseen at equal data).
+# The folds keep object families together, so no held-out category has a sibling
+# in training (no pliers next to pliers), and each fold mixes workshop tools and
+# kitchen items, so the split tests unseen categories rather than unseen domains:
+#   A: wrenches (adjustable, combination, ratchet) + long-handled kitchen tools
+#      (ladle, spatula, whisk, utensil, strainer)
+#   B: pliers (fixed / locking / slip joint) + hammer, screwdriver, power drill +
+#      vessels with a handle (mug, measuring cup, pot / pan)
+# HANDAL's train and test object instances are disjoint in every category.
+# Own sharded_name: shards are read back wholesale, so the full cache would
+# ignore the selection.
+
+defaults:
+  - handal_train_aff_sharded
+  - _self_
+
+categories:
+  - adjustable_wrench
+  - combination_wrench
+  - ratchet
+  - ladle
+  - spatula
+  - whisk
+  - utensil
+  - strainer
+
+sharded_name: handal_train_aff_r${img_size}_f32_catfold_a
