@@ -333,6 +333,9 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
     accum: dict[str, list] = {}
     dump_samples = eval_cfg.get("dump_samples")
+    # eval.dump_extra: further batch fields to dump (e.g. [rgb, cam_intr4x4] for
+    # drawing predictions afterwards); rgb is stored as uint8
+    dump_extra = tuple(eval_cfg.get("dump_extra") or ())
     dumped: list = []
     n_samples = 0
     qualit_log_batches = eval_cfg.get("qualit_log_batches", 8)
@@ -420,6 +423,13 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
                 v = getattr(batch, k, None)
                 if isinstance(v, _torch.Tensor):
                     rec[k] = v.detach().cpu()
+            for k in dump_extra:
+                v = getattr(batch, k, None)
+                if isinstance(v, _torch.Tensor):
+                    v = v.detach().cpu()
+                    if k == "rgb" and v.is_floating_point():
+                        v = (v.clamp(0, 1) * 255 if v.max() <= 1.0 else v.clamp(0, 255)).to(_torch.uint8)
+                    rec[k] = v
             for k in getattr(quant, "_FIELDS", ()):
                 v = getattr(quant, k, None)
                 if isinstance(v, _torch.Tensor):
