@@ -107,7 +107,8 @@ class PoseTask(OD3D_Task):
     """Compare predicted against GT object pose for each frame-object."""
 
     def __init__(self, rot_acc_deg=(5.0, 10.0, 30.0), transl_acc_cm=(5.0, 10.0),
-                 iou_acc=(0.25, 0.5, 0.75), cat_axes_align: bool = False):
+                 iou_acc=(0.25, 0.5, 0.75), cat_axes_align: bool = False,
+                 supercat_axes_align: bool = False):
         self.rot_acc_deg = tuple(rot_acc_deg)
         self.transl_acc_cm = tuple(transl_acc_cm)
         self.iou_acc = tuple(iou_acc)
@@ -118,6 +119,9 @@ class PoseTask(OD3D_Task):
         # prediction at the end of the pass, so forward() keeps them here and
         # o3b.run calls finalize() after the loop.
         self.cat_axes_align = bool(cat_axes_align)
+        # supercat_axes_align: the same, but one relabelling per UCO3D
+        # super-category (*_supercatalign; cat_align.supercategory_of)
+        self.supercat_axes_align = bool(supercat_axes_align)
         self._align_buf: list = []
 
     # ── category axis alignment (opt-in) ─────────────────────────────────────
@@ -144,7 +148,7 @@ class PoseTask(OD3D_Task):
         """Collective when distributed (every rank must call it): gathers the
         kept predictions and returns ({metric: mean}, {variant: {category:
         (P index, P, n)}}). Empty dicts when cat_axes_align is off."""
-        if not self.cat_axes_align:
+        if not (self.cat_axes_align or self.supercat_axes_align):
             return {}, {}
         bufs = [self._align_buf]
         if distributed:
@@ -162,9 +166,17 @@ class PoseTask(OD3D_Task):
             return None if any(v is None for v in vals) else torch.cat(vals)
 
         syms = {"": None, "_sym": _cat("syms"), "_symcat": _cat("syms_cat")}
-        return category_axes_align(
-            [c for r in recs for c in r["category"]], _cat("pred"), _cat("gt"),
-            syms, rot_acc_deg=self.rot_acc_deg)
+        cats = [c for r in recs for c in r["category"]]
+        pred, gt = _cat("pred"), _cat("gt")
+        metrics, choice = {}, {}
+        if self.cat_axes_align:
+            metrics, choice = category_axes_align(cats, pred, gt, syms, rot_acc_deg=self.rot_acc_deg)
+        if self.supercat_axes_align:
+            from o3b.task.pose.cat_align import supercategory_axes_align
+            m2, c2 = supercategory_axes_align(cats, pred, gt, syms, rot_acc_deg=self.rot_acc_deg)
+            metrics.update(m2)
+            choice.update(c2)
+        return metrics, choice
 
     def _warn_once(self, key: str, msg: str) -> None:
         if key not in self._warned_missing:
@@ -231,7 +243,7 @@ class PoseTask(OD3D_Task):
                 obj_rot3d_obj_syms=syms_cat, lp_norm=2,
             )
             quant.pose_rot_err_rad_symcat = rot_err_symcat
-        if self.cat_axes_align:
+        if self.cat_axes_align or self.supercat_axes_align:
             self._keep_for_align(batch, pred, gt, syms, syms_cat)
 
         for deg in self.rot_acc_deg:

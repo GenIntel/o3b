@@ -54,7 +54,7 @@ def collect(paths: list[str]) -> list[dict]:
 
 
 def merge(recs: list[dict], cat_axes_align: bool = False,
-          rot_acc_deg=(5.0, 10.0, 30.0)) -> tuple[dict, dict]:
+          rot_acc_deg=(5.0, 10.0, 30.0), supercat_axes_align: bool = False) -> tuple[dict, dict]:
     from o3b.task.datatypes.frame_object_quant import FrameObjectQuantBatch
 
     metrics: dict = {}
@@ -67,8 +67,8 @@ def merge(recs: list[dict], cat_axes_align: bool = False,
                 metrics[k] = v.mean().item()
     metrics["n_samples"] = float(sum(len(r.get("category") or []) for r in recs))
     choice: dict = {}
-    if cat_axes_align:
-        from o3b.task.pose.cat_align import category_axes_align
+    if cat_axes_align or supercat_axes_align:
+        from o3b.task.pose.cat_align import category_axes_align, supercategory_axes_align
 
         def _cat(key):
             vals = [r.get(key) for r in recs]
@@ -77,12 +77,16 @@ def merge(recs: list[dict], cat_axes_align: bool = False,
         gt = _cat("cam_tform4x4_obj_ncds")
         if gt is None:
             gt = _cat("cam_tform4x4_obj")
-        extra, choice = category_axes_align(
-            [str(c) for r in recs for c in r["category"]],
-            _cat("pred_cam_tform4x4_obj")[..., :3, :3], gt[..., :3, :3],
-            {"": None, "_sym": _cat("obj_syms"), "_symcat": _cat("obj_syms_cat")},
-            rot_acc_deg=rot_acc_deg)
-        metrics.update(extra)
+        args = ([str(c) for r in recs for c in r["category"]],
+                _cat("pred_cam_tform4x4_obj")[..., :3, :3], gt[..., :3, :3],
+                {"": None, "_sym": _cat("obj_syms"), "_symcat": _cat("obj_syms_cat")})
+        if cat_axes_align:
+            extra, choice = category_axes_align(*args, rot_acc_deg=rot_acc_deg)
+            metrics.update(extra)
+        if supercat_axes_align:
+            extra, c2 = supercategory_axes_align(*args, rot_acc_deg=rot_acc_deg)
+            metrics.update(extra)
+            choice.update(c2)
     return metrics, choice
 
 
@@ -90,6 +94,8 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("patterns", nargs="+", help="glob(s) of <dump>.rank<R>.pt files")
     ap.add_argument("--cat-axes-align", action="store_true")
+    ap.add_argument("--supercat-axes-align", action="store_true",
+                    help="one relabelling per UCO3D super-category (*_supercatalign)")
     ap.add_argument("--expect", type=int, default=None,
                     help="fail unless this many distinct samples were joined")
     ap.add_argument("--out", default=None, help="write metrics (+ choices) as JSON")
@@ -108,7 +114,8 @@ def main(argv=None) -> None:
         raise SystemExit("duplicate samples across dumps (overlapping shards?)")
     if args.expect is not None and n != args.expect:
         raise SystemExit(f"expected {args.expect} samples, joined {n} (shards missing?)")
-    metrics, choice = merge(recs, cat_axes_align=args.cat_axes_align)
+    metrics, choice = merge(recs, cat_axes_align=args.cat_axes_align,
+                            supercat_axes_align=args.supercat_axes_align)
     for k, v in metrics.items():
         print(f"  {k:<40} {v:.4f}")
     if args.out:

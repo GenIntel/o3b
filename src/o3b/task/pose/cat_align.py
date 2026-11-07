@@ -154,3 +154,46 @@ def category_axes_align(categories: list, pred_rot: torch.Tensor, gt_rot: torch.
             for c in range(C)
         }
     return metrics, choice
+
+
+def supercategory_of(category: str) -> str:
+    """UCO3D super-category of a category of any pose test set.
+
+    A UCO3D (Every9D) name maps directly; an Omni6DPose, ImageNet3D or HANDAL
+    name goes through that dataset's map to UCO3D first. A category no map
+    covers is its own group (``"unmapped:<category>"``), so it is aligned on its
+    own, as under cat_axes_align.
+    """
+    return _super_lookup().get(str(category), f"unmapped:{category}")
+
+
+_SUPER_LOOKUP: Optional[dict] = None
+
+
+def _super_lookup() -> dict:
+    global _SUPER_LOOKUP
+    if _SUPER_LOOKUP is None:
+        from o3b.dataset.uco3d.enum import MAP_UCO3D_CATEGORIES_TO_SUPER as SUP
+        from o3b.dataset.housecorr3d.omni6dpose_uco3d import MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D
+        from o3b.dataset.imagenet3d.enum import MAP_CATEGORIES_IMAGENET3D_TO_UCO3D
+        from o3b.dataset.handal.enum import MAP_CATEGORIES_HANDAL_TO_UCO3D
+        sup = {str(k): str(v) for k, v in SUP.items()}
+        lut = dict(sup)
+        for m in (MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D, MAP_CATEGORIES_IMAGENET3D_TO_UCO3D,
+                  MAP_CATEGORIES_HANDAL_TO_UCO3D):
+            for k, v in m.items():
+                if v is not None and str(k) not in lut and str(v) in sup:
+                    lut[str(k)] = sup[str(v)]
+        _SUPER_LOOKUP = lut
+    return _SUPER_LOOKUP
+
+
+def supercategory_axes_align(categories: list, pred_rot, gt_rot, syms: dict, **kw) -> tuple[dict, dict]:
+    """category_axes_align with one relabelling per UCO3D super-category:
+    metrics renamed ``*_catalign`` -> ``*_supercatalign``, choices keyed by
+    super-category."""
+    metrics, choice = category_axes_align([supercategory_of(c) for c in categories],
+                                          pred_rot, gt_rot, syms, **kw)
+    metrics = {k.replace("_catalign", "_supercatalign").replace("pose_catalign_", "pose_supercatalign_"): v
+               for k, v in metrics.items()}
+    return metrics, {f"super{k}" if k.startswith("_") else f"super_{k}": v for k, v in choice.items()}

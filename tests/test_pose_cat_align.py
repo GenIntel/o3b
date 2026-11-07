@@ -132,3 +132,27 @@ def test_merge_of_shard_dumps_matches_one_pass(tmp_path):
     assert metrics["pose_rot_acc_30deg_sym"] == q.pose_rot_acc_30deg_sym.mean().item() == 0.5
     for k in ("pose_rot_acc_30deg_sym_catalign", "pose_rot_acc_10deg_catalign"):
         assert metrics[k] == ref[k] == 1.0
+
+
+def test_supercategory_align_one_P_per_supercategory():
+    from o3b.task.pose.cat_align import supercategory_of, supercategory_axes_align
+    assert supercategory_of("apple") == supercategory_of("pear") == "fruit"
+    assert supercategory_of("not_a_category") == "unmapped:not_a_category"
+    gen = torch.Generator().manual_seed(4)
+    Ps = proper_signed_permutations()
+    n = 300
+    gt = _random_rot(n, gen)
+    cats = [["apple", "pear", "chair"][i % 3] for i in range(n)]
+    # apple and pear share a super-category but are turned differently: one P
+    # can fix only one of them; chair (furniture) is fixed on its own
+    true_P = {"apple": Ps[5], "pear": Ps[11], "chair": Ps[17]}
+    pred = torch.stack([gt[i] @ true_P[c].T for i, c in enumerate(cats)])
+    metrics, choice = supercategory_axes_align(cats, pred, gt, {"": None}, device="cpu")
+    assert abs(metrics["pose_rot_acc_10deg_supercatalign"] - 2 / 3) < 1e-6
+    assert set(choice["super_plain"]) == {"fruit", "furniture"}
+    assert metrics["pose_supercatalign_n_changed"] == 2.0
+    task = PoseTask(supercat_axes_align=True)
+    task(SimpleNamespace(cam_tform4x4_obj_ncds=_tform(gt), pred_cam_tform4x4_obj=_tform(pred),
+                         obj_syms=torch.ones(n, 3), category=cats))
+    m, _ = task.finalize()
+    assert "pose_rot_acc_30deg_sym_supercatalign" in m and not any(k.endswith("_catalign") for k in m)
