@@ -6,6 +6,34 @@ from o3b.cv.geometry.transform import rot3x3, rot3x3_broadcast, inv_tform4x4, in
 import math
 from o3b.cv.metric.pt3d_so3 import so3_log_map, so3_exp_map
 
+_SYM_CACHE = {}
+
+
+def _obj_rot3x3_obj_syms_padded(obj_rot3d_obj_syms, reflective, device):
+    """The symmetry rotations of every symmetry code in ``obj_rot3d_obj_syms`` (...x3),
+    as (N, S, 3, 3) padded with identities to the largest group S in the batch.
+
+    Same result as building ``get_obj_rot3x3_obj_sym`` per sample, but each distinct
+    code is built once per process (``_SYM_CACHE``) and the batch is one gather: the
+    per-sample loop cost ~90 ms per call at batch 32, paid by every pose metric."""
+    codes = obj_rot3d_obj_syms.reshape(-1, 3)
+    uniq, inv = torch.unique(codes, dim=0, return_inverse=True)
+    mats = []
+    for code in uniq.tolist():
+        key = (tuple(code), bool(reflective), str(device))
+        m = _SYM_CACHE.get(key)
+        if m is None:
+            m = get_obj_rot3x3_obj_sym(torch.tensor(code, device=device, dtype=codes.dtype),
+                                       reflective=reflective).float()
+            _SYM_CACHE[key] = m
+        mats.append(m)
+    S = max(1, max(m.shape[0] for m in mats))
+    table = torch.eye(3, device=device)[None, None].expand(len(mats), S, 3, 3).clone()
+    for u, m in enumerate(mats):
+        table[u, :m.shape[0]] = m
+    return table[inv.to(device)]
+
+
 def get_pose_diff3x3_in_rad(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2):
     """
     Args:
@@ -25,20 +53,8 @@ def get_pose_diff3x3_in_rad(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=None, 
         device = diff_rot3x3.device
         if obj_rot3d_obj_syms is not None:
             # TODO: doublecheck
-            obj_rot3x3_obj_syms = []
-            S = 1
-            B = 0
-            for _obj_rot3d_obj_syms in obj_rot3d_obj_syms.reshape(-1, 3):
-                B = B + 1
-                obj_rot3x3_obj_syms.append(get_obj_rot3x3_obj_sym(_obj_rot3d_obj_syms, reflective=reflective))
-                if obj_rot3x3_obj_syms[-1].shape[0] > S:
-                    S = obj_rot3x3_obj_syms[-1].shape[0]
-            _obj_rot3x3_obj_syms = torch.eye(3, device=device)[None, None]
-            _obj_rot3x3_obj_syms = _obj_rot3x3_obj_syms.expand((B, S, 3, 3)).clone()
-            for b in range(B):
-                s = obj_rot3x3_obj_syms[b].shape[0]
-                _obj_rot3x3_obj_syms[b, :s] = obj_rot3x3_obj_syms[b]
-            obj_rot3x3_obj_syms= _obj_rot3x3_obj_syms
+            obj_rot3x3_obj_syms = _obj_rot3x3_obj_syms_padded(obj_rot3d_obj_syms, reflective, device)
+            S = obj_rot3x3_obj_syms.shape[1]
             obj_rot3x3_obj_syms = obj_rot3x3_obj_syms.reshape(*(diff_rot3x3.shape[:-2] + (S,) + diff_rot3x3.shape[-2:]))
 
             diff_rot3x3 = rot3x3_broadcast(diff_rot3x3[..., None, :, :], obj_rot3x3_obj_syms)
@@ -395,20 +411,8 @@ def get_pose_diff3x3_with_syms(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=Non
         device = diff_rot3x3.device
         if obj_rot3d_obj_syms is not None:
             # TODO: doublecheck
-            obj_rot3x3_obj_syms = []
-            S = 1
-            B = 0
-            for _obj_rot3d_obj_syms in obj_rot3d_obj_syms.reshape(-1, 3):
-                B = B + 1
-                obj_rot3x3_obj_syms.append(get_obj_rot3x3_obj_sym(_obj_rot3d_obj_syms, reflective=reflective))
-                if obj_rot3x3_obj_syms[-1].shape[0] > S:
-                    S = obj_rot3x3_obj_syms[-1].shape[0]
-            _obj_rot3x3_obj_syms = torch.eye(3, device=device)[None, None]
-            _obj_rot3x3_obj_syms = _obj_rot3x3_obj_syms.expand((B, S, 3, 3)).clone()
-            for b in range(B):
-                s = obj_rot3x3_obj_syms[b].shape[0]
-                _obj_rot3x3_obj_syms[b, :s] = obj_rot3x3_obj_syms[b]
-            obj_rot3x3_obj_syms= _obj_rot3x3_obj_syms
+            obj_rot3x3_obj_syms = _obj_rot3x3_obj_syms_padded(obj_rot3d_obj_syms, reflective, device)
+            S = obj_rot3x3_obj_syms.shape[1]
             obj_rot3x3_obj_syms = obj_rot3x3_obj_syms.reshape(*(diff_rot3x3.shape[:-2] + (S,) + diff_rot3x3.shape[-2:]))
 
             diff_rot3x3 = rot3x3_broadcast(diff_rot3x3[..., None, :, :], obj_rot3x3_obj_syms)
