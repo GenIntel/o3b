@@ -200,3 +200,60 @@ def supercategory_axes_align(categories: list, pred_rot, gt_rot, syms: dict, **k
     metrics = {k.replace("_catalign", "_supercatalign").replace("pose_catalign_", "pose_supercatalign_"): v
                for k, v in metrics.items()}
     return metrics, {f"super{k}" if k.startswith("_") else f"super_{k}": v for k, v in choice.items()}
+
+
+def orientation_consistency(categories: list, pred_rot: torch.Tensor, gt_rot: torch.Tensor,
+                            syms: dict, thr_deg: float = 30.0, share: float = 0.2, min_n: int = 16,
+                            device: Optional[str] = None) -> tuple[dict, dict]:
+    """Is each category, and each super-category, predicted in one axis convention?
+
+    Per frame and per proper signed permutation P (24): correct if the error of
+    R_pred @ P is below thr_deg. For a group of frames, P1 = the P with the most
+    correct frames. The group is **inconsistent** if another P is correct on
+    >= ``share`` of the group's frames *that P1 gets wrong* (the frames P1 already
+    fixes are left out, so a P that symmetry makes equivalent to P1 never
+    counts): both conventions appear, and whichever single P is chosen the other
+    frames stay wrong.
+
+        pose_cat_consistent{suffix}       share of categories (>= min_n frames)
+                                          that are consistent
+        pose_supercat_consistent{suffix}  the same over UCO3D super-categories,
+                                          frames pooled, those with >= 2 categories
+
+    Returns (metrics, {f"{cat|supercat}{suffix}": {group: (consistent, n, P1, P2,
+    share of P1, share of P2)}}).
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    Ps = proper_signed_permutations().to(device=device, dtype=torch.float32)
+    D0 = _unit_rows(gt_rot.float().to(device)).transpose(-1, -2) @ _unit_rows(pred_rot.float().to(device))
+    thr = math.radians(thr_deg)
+    cats = [str(c) for c in categories]
+    groups = {"cat": {}, "supercat": {}}
+    for i, c in enumerate(cats):
+        groups["cat"].setdefault(c, []).append(i)
+        groups["supercat"].setdefault(supercategory_of(c), []).append(i)
+    n_cats_in = {s: len({cats[i] for i in ii}) for s, ii in groups["supercat"].items()}
+    metrics, detail = {}, {}
+    for suffix, s in syms.items():
+        if s is None and suffix != "":
+            continue
+        s_dev = None if s is None else s.to(device)
+        ok = torch.stack([_errors(D0 @ P, s_dev) for P in Ps]) < thr        # (24, N)
+        for level, gs in groups.items():
+            res = {}
+            for g, ii in gs.items():
+                if len(ii) < min_n or (level == "supercat" and n_cats_in[g] < 2):
+                    continue
+                o = ok[:, torch.tensor(ii, device=device)]
+                h = o.sum(1)
+                p1 = int(h.argmax())
+                h2 = (o & ~o[p1][None]).sum(1)
+                p2 = int(h2.argmax())
+                f1, f2 = h[p1].item() / len(ii), h2[p2].item() / len(ii)
+                res[g] = (f2 < share, len(ii), p1, p2, f1, f2)
+            key = f"pose_{level}_consistent{suffix}"
+            metrics[key] = sum(r[0] for r in res.values()) / len(res) if res else float("nan")
+            metrics[f"pose_{level}_consistent_n{suffix}"] = float(len(res))
+            detail[f"{level}{suffix}"] = res
+    return metrics, detail

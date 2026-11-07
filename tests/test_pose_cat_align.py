@@ -160,3 +160,33 @@ def test_supercategory_align_one_P_per_supercategory():
                          obj_syms=torch.ones(n, 3), category=cats))
     m, _ = task.finalize()
     assert "pose_rot_acc_30deg_sym_supercatalign" in m and not any(k.endswith("_catalign") for k in m)
+
+
+def test_orientation_consistency():
+    from o3b.task.pose.cat_align import orientation_consistency
+    gen = torch.Generator().manual_seed(5)
+    Ps = proper_signed_permutations()
+    n = 400
+    gt = _random_rot(n, gen)
+    cats = [["apple", "pear", "chair", "mug"][i % 4] for i in range(n)]
+    # apple: one convention; pear: 70 % as is, 30 % turned by P2 (inconsistent);
+    # chair: 90 % as is, 10 % turned (below the 20 % share: consistent);
+    # mug: all turned by the same P (consistent, just relabelled)
+    def P_of(i, c):
+        k = i // 4
+        if c == "pear" and k % 10 < 3: return Ps[2]
+        if c == "chair" and k % 10 == 0: return Ps[2]
+        if c == "mug": return Ps[7]
+        return Ps[0]
+    pred = torch.stack([gt[i] @ P_of(i, c).T for i, c in enumerate(cats)])
+    m, d = orientation_consistency(cats, pred, gt, {"": None}, device="cpu")
+    assert {g for g, r in d["cat"].items() if not r[0]} == {"pear"}
+    assert m["pose_cat_consistent"] == 0.75 and m["pose_cat_consistent_n"] == 4
+    # fruit pools apple + pear: P2 fixes 30 of its 200 frames = 15 % -> consistent;
+    # chair (furniture) and mug (kitchen) are alone in their super-category: skipped
+    assert set(d["supercat"]) == {"fruit"} and d["supercat"]["fruit"][0]
+    # a symmetric object: every yaw is equivalent, so P2 = 180 deg about top
+    # never counts against P1
+    syms = torch.tensor([[1.0, 2.0, 1.0]]).repeat(n, 1)  # continuous about Y (top)
+    m, _ = orientation_consistency(cats, pred, gt, {"_sym": syms}, device="cpu")
+    assert m["pose_cat_consistent_sym"] == 1.0

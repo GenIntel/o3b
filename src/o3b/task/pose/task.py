@@ -176,6 +176,13 @@ class PoseTask(OD3D_Task):
             m2, c2 = supercategory_axes_align(cats, pred, gt, syms, rot_acc_deg=self.rot_acc_deg)
             metrics.update(m2)
             choice.update(c2)
+        # pose_{cat,supercat}_consistent*: share of (super-)categories predicted
+        # in one axis convention (cat_align.orientation_consistency)
+        from o3b.task.pose.cat_align import orientation_consistency
+        m3, _ = orientation_consistency(cats, pred, gt, syms)
+        keep = (("pose_cat_",) if self.cat_axes_align else ()) + \
+            (("pose_supercat_",) if self.supercat_axes_align else ())
+        metrics.update({k: v for k, v in m3.items() if k.startswith(keep)})
         return metrics, choice
 
     def _warn_once(self, key: str, msg: str) -> None:
