@@ -177,13 +177,16 @@ def _super_lookup() -> dict:
         from o3b.dataset.housecorr3d.omni6dpose_uco3d import MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D
         from o3b.dataset.imagenet3d.enum import MAP_CATEGORIES_IMAGENET3D_TO_UCO3D
         from o3b.dataset.handal.enum import MAP_CATEGORIES_HANDAL_TO_UCO3D
-        sup = {str(k): str(v) for k, v in SUP.items()}
+        # the maps are keyed by enum members (str() of an IMAGENET3D_CATEGORIES
+        # member is "IMAGENET3D_CATEGORIES.AEROPLANE", not "aeroplane")
+        name = lambda x: str(getattr(x, "value", x))
+        sup = {name(k): name(v) for k, v in SUP.items()}
         lut = dict(sup)
         for m in (MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D, MAP_CATEGORIES_IMAGENET3D_TO_UCO3D,
                   MAP_CATEGORIES_HANDAL_TO_UCO3D):
             for k, v in m.items():
-                if v is not None and str(k) not in lut and str(v) in sup:
-                    lut[str(k)] = sup[str(v)]
+                if v is not None and name(k) not in lut and name(v) in sup:
+                    lut[name(k)] = sup[name(v)]
         _SUPER_LOOKUP = lut
     return _SUPER_LOOKUP
 

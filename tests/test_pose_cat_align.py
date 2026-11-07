@@ -138,6 +138,10 @@ def test_supercategory_align_one_P_per_supercategory():
     from o3b.task.pose.cat_align import supercategory_of, supercategory_axes_align
     assert supercategory_of("apple") == supercategory_of("pear") == "fruit"
     assert supercategory_of("not_a_category") == "unmapped:not_a_category"
+    # ImageNet3D names that differ from their UCO3D name (enum-keyed map)
+    assert supercategory_of("aeroplane") == supercategory_of("airplane")
+    from o3b.dataset.imagenet3d.enum import MAP_CATEGORIES_IMAGENET3D_TO_UCO3D as M
+    assert sum(supercategory_of(k.value).startswith("unmapped:") for k in M) <= 9
     gen = torch.Generator().manual_seed(4)
     Ps = proper_signed_permutations()
     n = 300
