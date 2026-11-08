@@ -15,6 +15,19 @@ import types
 from .dinov1 import ViTExtractor  # for selecting keys, querys, values
 
 
+def _cached_hub_dir(hub_repo: str):
+    """torch.hub's checkout of `owner/repo[:branch]` if it is cached, else None.
+
+    The branch defaults to `main`, which is what torch.hub would resolve for the
+    repos used here; finding the default branch is the network call this avoids.
+    """
+    import os
+
+    repo, _, branch = hub_repo.partition(":")
+    path = os.path.join(torch.hub.get_dir(), f"{repo.replace('/', '_')}_{(branch or 'main').replace('/', '_')}")
+    return path if os.path.isfile(os.path.join(path, "hubconf.py")) else None
+
+
 class DINOv2_WEIGHTS(str, ExtEnum):
     DEFAULT = "default"
     NONE = "none"
@@ -77,9 +90,14 @@ class DINOv2(OD3D_Model):
 
         if self.dinov2 or self.dinov3:
             if self.dinov2:
+                # Prefer the cached checkout: torch.hub.load(<github repo>) first asks
+                # the GitHub API for the default branch, even when the repo is cached,
+                # and a GitHub outage (HTTP 502 / hang, 26-11-08) then kills the job.
+                local = _cached_hub_dir(hub_repo)
                 self.extractor = torch.hub.load(
-                    hub_repo,
+                    local or hub_repo,
                     hub_model,
+                    source="local" if local else "github",
                     pretrained=weights == "default")
             elif self.dinov3:
                 #  weights[hub_model]
