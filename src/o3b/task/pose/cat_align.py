@@ -463,3 +463,60 @@ def pair_consistency(groups: list, pred_rot: torch.Tensor, gt_rot: torch.Tensor,
         if return_pairs:
             detail[f"pairs{suffix}"] = (a, b, cons)
     return metrics, detail
+
+
+def single_relabel_share(groups: list, pred_rot: torch.Tensor, gt_rot: torch.Tensor, syms: dict,
+                         thr_deg: float = 30.0, min_eligible: int = 4,
+                         device: Optional[str] = None) -> tuple[dict, dict]:
+    """How much of a group's accurate-up-to-convention predictions one axis
+    convention explains.
+
+    A frame is *eligible* if some proper signed permutation P (24) brings its
+    prediction within thr_deg of the GT (symmetry-aware): the method got the
+    object's orientation right up to the labelling of its axes. Per group (a
+    video, a category, an orientation category, ...), the share of its eligible
+    frames that the single best P makes correct:
+
+        share_g = max_P |{eligible i in g: R_pred,i @ P correct}| / |eligible in g|
+
+    1 if the group is predicted in one convention (whichever); lower the more
+    conventions are mixed. Frames that no P fixes are left out. Groups with
+    fewer than ``min_eligible`` eligible frames are skipped (with one frame the
+    share is 1 trivially); the chance level is not 1/24, because symmetric
+    objects make several P correct at once and small groups favour a high max.
+
+        pose_single_relabel{suffix}     mean over groups
+        pose_single_relabel_n{suffix}   groups scored
+        pose_single_relabel_eligible{suffix}  share of all frames eligible
+
+    Returns (metrics, {f"group{suffix}": {group: (eligible, share, best P)}}).
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    D0 = _unit_rows(gt_rot.float().to(device)).transpose(-1, -2) @ _unit_rows(pred_rot.float().to(device))
+    thr = math.radians(thr_deg)
+    Ps = proper_signed_permutations().to(device=device, dtype=torch.float32)
+    by = {}
+    for i, g in enumerate(groups):
+        by.setdefault(g, []).append(i)
+    metrics, detail = {}, {}
+    for suffix, s in syms.items():
+        if s is None and suffix != "":
+            continue
+        s = None if s is None else s.to(device)
+        ok = torch.stack([_errors(D0 @ P, s) for P in Ps]).cpu() < thr      # (24, N)
+        elig = ok.any(0)
+        res = {}
+        for g, ii in by.items():
+            t = torch.tensor(ii)
+            t = t[elig[t]]
+            if len(t) < min_eligible:
+                continue
+            h = ok[:, t].sum(1)
+            p = int(h.argmax())
+            res[g] = (len(t), h[p].item() / len(t), p)
+        metrics[f"pose_single_relabel{suffix}"] = (sum(r[1] for r in res.values()) / len(res)) if res else float("nan")
+        metrics[f"pose_single_relabel_n{suffix}"] = float(len(res))
+        metrics[f"pose_single_relabel_eligible{suffix}"] = elig.float().mean().item()
+        detail[f"group{suffix}"] = res
+    return metrics, detail

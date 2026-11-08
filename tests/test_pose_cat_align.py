@@ -266,3 +266,24 @@ def test_pair_consistency():
     # random rotations: about 1/24 under relabel
     m, _ = pair_consistency(cats, _random_rot(n, gen), gt, {"": None}, distinct=objs, max_pairs=500, device="cpu")
     assert m["pose_pair_consistent"] < 0.15
+
+
+def test_single_relabel_share():
+    from o3b.task.pose.cat_align import single_relabel_share
+    gen = torch.Generator().manual_seed(9)
+    Ps = proper_signed_permutations()
+    n = 160
+    gt = _random_rot(n, gen)
+    cats = [["a", "b"][i % 2] for i in range(n)]
+    # a: every frame relabelled by P7 (one convention, not the GT's) -> 1;
+    # b: 3/4 by P0, 1/4 by P2 -> 0.75; plus a quarter of a's frames plain wrong
+    def P_of(i, c):
+        if c == "a": return Ps[7]
+        return Ps[2] if (i // 2) % 4 == 0 else Ps[0]
+    pred = torch.stack([gt[i] @ _small_noise(1, 3, gen)[0] @ P_of(i, c).T for i, c in enumerate(cats)])
+    wrong = [i for i in range(0, n, 8)]                      # 20 of a's 80 frames
+    pred[wrong] = _random_rot(len(wrong), gen)
+    m, d = single_relabel_share(cats, pred, gt, {"": None}, device="cpu")
+    assert d["group"]["a"][1] == 1.0 and d["group"]["a"][2] == 7
+    assert abs(d["group"]["b"][1] - 0.75) < 1e-6
+    assert m["pose_single_relabel_eligible"] < 1.0
