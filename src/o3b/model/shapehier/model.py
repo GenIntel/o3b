@@ -68,6 +68,14 @@ surface never reads the pose token. The last level's pose is written as
 ones are ``pose_aux``, which TrinityMethod supervises only if ``train.loss`` weighs
 the ``pose_*_aux`` terms.
 
+``init_queries: true`` (H08-T03) starts L0 from learned queries instead: one learned
+query per slot, plus the projected global feature, runs through ``init_layers``
+layers (self-attention, cross-attention to the coarsest stage, FFN; the queries
+carry no position yet, the keys sit at the stage's points), and a linear head on each
+query gives that slot's point. The refined query plus its embedded point is the L0
+token. Each point is then read from the observed cloud by its own query, rather than
+all of them from one pooled vector.
+
 ``fold`` may be a list with one entry per upfold (H08-T03), e.g. ``init_count`` 128
 and ``fold: [4, 1, 1, 4]`` for 128 / 512 / 512 / 512 / 2048 tokens. A fold of 1 gives
 each token one child at a bounded offset (seed 0): the level refines the points
@@ -189,6 +197,8 @@ class ShapeHier(OD3D_Model):
         size_quantile: float = 0.02,
         pose_pool: bool = False,
         pose_pool_detach: bool = False,
+        init_queries: bool = False,
+        init_layers: int = 2,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -219,7 +229,16 @@ class ShapeHier(OD3D_Model):
         self._logged_stages = False
 
         g = torch.Generator().manual_seed(0)
-        self.init = _mlp([in_dim, init_hidden_dim, init_hidden_dim, init_count * 3])
+        self.init_queries = init_queries
+        if init_queries:
+            if init_layers < 1:
+                raise ValueError("ShapeHier: init_queries needs init_layers >= 1")
+            self.init_blocks = nn.ModuleList([_Layer(dims[0], num_heads[0], mlp_ratio, rope_freq, dropout, self_attn=True)
+                                              for _ in range(init_layers)])
+            self.init_norm = nn.LayerNorm(dims[0])
+            self.init_pt = nn.Linear(dims[0], 3)
+        else:
+            self.init = _mlp([in_dim, init_hidden_dim, init_hidden_dim, init_count * 3])
         self.slot = nn.Parameter(torch.randn(init_count, dims[0], generator=g) * 0.02)
         self.embed_glob = nn.Linear(in_dim, dims[0])
         self.embed_pt = _mlp([3, dims[0] // 2, dims[0]])
@@ -390,8 +409,18 @@ class ShapeHier(OD3D_Model):
                         ", ".join(f"{x.mean():.0f} / {x.max():.0f}" for x in n))
             self._logged_stages = True
 
-        pts = self.init(feat).reshape(B, self.init_count, 3)      # L0 points, cloud frame
-        q = self.slot[None] + self.embed_glob(feat)[:, None] + self.embed_pt(pts)
+        if self.init_queries:
+            tok, tok_coord, tok_mask = stages[-1]                 # coarsest stage
+            u = self.rope_units[0]
+            q = self.slot[None] + self.embed_glob(feat)[:, None]
+            q_pos = q.new_zeros(B, self.init_count, 3)
+            for layer in self.init_blocks:
+                q = layer(q, q_pos, tok.float(), tok_coord.float() / u, tok_mask)
+            pts = self.init_pt(self.init_norm(q))                 # L0 points, one per query
+            q = q + self.embed_pt(pts)
+        else:
+            pts = self.init(feat).reshape(B, self.init_count, 3)  # L0 points, cloud frame
+            q = self.slot[None] + self.embed_glob(feat)[:, None] + self.embed_pt(pts)
         level_pts, level_h = [], []
         um_poses = []
         for l in range(self.L):
