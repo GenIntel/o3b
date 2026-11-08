@@ -26,8 +26,9 @@ annotated target box, the benchmark's PCK@0.1_bbox. All SPair keypoints are
 annotated in both images, so ``obj_kpts2d_mask`` is True for the valid ones and
 there is no amodal split.
 
-The object mask is the instance of the segmentation that covers most of the
-annotated box (``cam_bbox2d``), which is also what the crop is taken around.
+The object mask is SPair's own (PASCAL VOC, hand-drawn) instance segmentation: the
+instance whose box best matches the annotated box (``cam_bbox2d``, also what the
+crop is taken around), plus its void border (``instance_mask``).
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+import cv2
 import numpy as np
 import torch
 import torchvision.io as tio
@@ -59,15 +61,50 @@ K_MAX = 32
 _SPLIT_DIRS = {"train": "trn", "trn": "trn", "val": "val", "test": "test"}
 
 
-def instance_mask(seg: np.ndarray, bbox) -> np.ndarray:
-    """(H, W) bool: the segmentation instance covering most of the box ``bbox``
-    (x0, y0, x1, y1, inclusive pixels). Empty when the box holds no instance."""
+def _box_iou(a, b) -> float:
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]) + 1)
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]) + 1)
+    area = lambda r: (r[2] - r[0] + 1) * (r[3] - r[1] + 1)  # noqa: E731
+    return ix * iy / (area(a) + area(b) - ix * iy)
+
+
+def instance_mask(seg: np.ndarray, bbox, void_px: int = 6, min_box_iou: float = 0.5) -> np.ndarray:
+    """(H, W) bool: SPair's (PASCAL VOC) segmentation instance that the annotated box
+    ``bbox`` (x0, y0, x1, y1, inclusive pixels) belongs to, plus its void border.
+
+    The instance is the one whose tight box best matches ``bbox`` (IoU), not the one
+    with most pixels inside it: in 146 of the 481 test images several instances share
+    the box, and the pixel count picked a neighbour in 15 of them. PASCAL draws a
+    ~5 px void band (255) around every instance; the band pixels within ``void_px``
+    of the chosen instance are added back, since silhouette keypoints (monitor
+    corners, chair legs, bicycle frames) sit on it.
+
+    When no instance's box matches the annotated one at IoU >= ``min_box_iou`` (or
+    the box holds none), the annotated object has no segmentation of its own (2 of
+    the 481 test images: a pottedplant and a bottle, where the best instance is an
+    animal statue and the person holding it) and the mask is the box itself."""
     x0, y0, x1, y1 = (int(round(v)) for v in bbox)
     win = seg[max(y0, 0):y1 + 1, max(x0, 0):x1 + 1]
-    ids, counts = np.unique(win[(win != 0) & (win != 255)], return_counts=True)
-    if len(ids) == 0:
-        return np.zeros(seg.shape, dtype=bool)
-    return seg == ids[np.argmax(counts)]
+    ids = [int(i) for i in np.unique(win) if i not in (0, 255)]
+    box = np.zeros(seg.shape, dtype=bool)
+    box[max(y0, 0):y1 + 1, max(x0, 0):x1 + 1] = True
+    if not ids:
+        return box
+
+    def _tight(i):
+        ys, xs = np.nonzero(seg == i)
+        return (xs.min(), ys.min(), xs.max(), ys.max())
+
+    ious = {i: _box_iou(_tight(i), (x0, y0, x1, y1)) for i in ids}
+    best = max(ious, key=ious.get)
+    if ious[best] < min_box_iou:
+        return box
+    m = seg == best
+    if void_px > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * void_px + 1, 2 * void_px + 1))
+        near = cv2.dilate(m.astype(np.uint8), k).astype(bool)
+        m = m | (near & (seg == 255))
+    return m
 
 
 def lift_px(uv: torch.Tensor, depth: torch.Tensor, intr3x3: torch.Tensor) -> torch.Tensor:
