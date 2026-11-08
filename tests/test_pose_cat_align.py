@@ -190,3 +190,29 @@ def test_orientation_consistency():
     syms = torch.tensor([[1.0, 2.0, 1.0]]).repeat(n, 1)  # continuous about Y (top)
     m, _ = orientation_consistency(cats, pred, gt, {"_sym": syms}, device="cpu")
     assert m["pose_cat_consistent_sym"] == 1.0
+
+
+def test_view_consistency():
+    from o3b.task.pose.cat_align import view_consistency
+    gen = torch.Generator().manual_seed(6)
+    Ps = proper_signed_permutations()
+    n = 160
+    gt = _random_rot(n, gen)
+    objs = [i // 16 for i in range(n)]   # 10 objects x 16 views
+    # objects 0-4: one wrong frame per object for all its views (consistent);
+    # objects 5-9: half the views also turned 180 deg about the object's top
+    # (P2, in the GT object frame, where a symmetry would act)
+    pred = torch.stack([gt[i] @ (Ps[2].T if o >= 5 and i % 2 else torch.eye(3)) @
+                        _small_noise(1, 5, gen)[0] @ Ps[7].T for i, o in enumerate(objs)])
+    m, d = view_consistency(objs, pred, gt, {"": None}, device="cpu")
+    assert all(d["obj"][o][1] == 1.0 for o in range(5))
+    # 16 views split 8 / 8: 2 * C(8, 2) = 56 of the 120 pairs agree
+    assert all(abs(d["obj"][o][1] - 56 / 120) < 1e-6 for o in range(5, 10))
+    assert m["pose_view_consistent_n"] == 10
+    # random rotations: almost no pair agrees within 30 degrees
+    m, _ = view_consistency(objs, _random_rot(n, gen), gt, {"": None}, device="cpu")
+    assert m["pose_view_consistent"] < 0.05
+    # a 2-fold symmetry about top makes the 180-degree turn invisible
+    syms = torch.tensor([[1.0, 2.0, 1.0]]).repeat(n, 1)
+    m, _ = view_consistency(objs, pred, gt, {"_sym": syms}, device="cpu")
+    assert m["pose_view_consistent_sym"] == 1.0

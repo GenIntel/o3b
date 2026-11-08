@@ -257,3 +257,65 @@ def orientation_consistency(categories: list, pred_rot: torch.Tensor, gt_rot: to
             metrics[f"pose_{level}_consistent_n{suffix}"] = float(len(res))
             detail[f"{level}{suffix}"] = res
     return metrics, detail
+
+
+def view_consistency(objects: list, pred_rot: torch.Tensor, gt_rot: torch.Tensor, syms: dict,
+                     thr_deg: float = 30.0, min_n: int = 2,
+                     device: Optional[str] = None) -> tuple[dict, dict]:
+    """Does a method see one object frame from every viewpoint of an object?
+
+    Per frame, D = R_gt^T R_pred takes the predicted object frame to the GT
+    one; the camera motion between views cancels in it. If a method assigns an
+    object the same frame from every view (rightly labelled or not), D is the
+    same on all of that object's frames, up to the object's symmetry, which acts
+    on the GT side: D_i = g_i D. So per pair of frames (i, j) of one object the
+    view disagreement is the (symmetry-aware) angle of D_i D_j^T, which is in
+    the symmetry group when the two views agree. Accuracy plays no part: a
+    method that is consistently wrong scores 1, random rotations near 0.
+
+        pose_view_consistent{suffix}     per object, the share of its frame pairs
+                                         that agree within thr_deg; mean over
+                                         objects (>= min_n frames)
+        pose_view_disagree_deg{suffix}   per object the median pair angle;
+                                         median over objects
+        pose_view_consistent_n{suffix}   number of objects scored
+
+    ``objects`` is any per-frame key of the object instance (its frame's GT
+    object frame must be one and the same across the frames sharing a key).
+    Returns (metrics, {f"obj{suffix}": {object: (n, share agreeing, median deg)}}).
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    D0 = _unit_rows(gt_rot.float().to(device)).transpose(-1, -2) @ _unit_rows(pred_rot.float().to(device))
+    groups = {}
+    for i, o in enumerate(objects):
+        groups.setdefault(o, []).append(i)
+    groups = {o: ii for o, ii in groups.items() if len(ii) >= min_n}
+    # every pair i < j of every object at once
+    a, b, owner = [], [], []
+    for k, ii in enumerate(groups.values()):
+        t = torch.tensor(ii)
+        iu = torch.triu_indices(len(ii), len(ii), 1)
+        a.append(t[iu[0]]); b.append(t[iu[1]]); owner.append(torch.full((iu.shape[1],), k))
+    metrics, detail = {}, {}
+    if not groups:
+        return metrics, detail
+    a, b, owner = (torch.cat(x).to(device) for x in (a, b, owner))
+    M = D0[a] @ D0[b].transpose(-1, -2)
+    thr = math.radians(thr_deg)
+    for suffix, s in syms.items():
+        if s is None and suffix != "":
+            continue
+        # a pair shares one object, hence one symmetry code
+        ang = _errors(M, None if s is None else s.to(device)[a])
+        ok = (ang < thr).float()
+        n_obj = len(groups)
+        share = torch.zeros(n_obj, device=device).index_add_(0, owner, ok) / \
+            torch.bincount(owner, minlength=n_obj).float()
+        med = torch.stack([ang[owner == k].median() for k in range(n_obj)])
+        metrics[f"pose_view_consistent{suffix}"] = share.mean().item()
+        metrics[f"pose_view_disagree_deg{suffix}"] = math.degrees(med.median().item())
+        metrics[f"pose_view_consistent_n{suffix}"] = float(n_obj)
+        detail[f"obj{suffix}"] = {o: (len(ii), share[k].item(), math.degrees(med[k].item()))
+                                  for k, (o, ii) in enumerate(groups.items())}
+    return metrics, detail
