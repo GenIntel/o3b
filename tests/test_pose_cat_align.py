@@ -235,3 +235,28 @@ def test_orientcategory_groups():
     m, d = orientation_consistency(cats, pred, gt, {"": None}, device="cpu")
     assert m["pose_cat_consistent"] == 1.0
     assert m["pose_orientcat_consistent"] == 0.0 and m["pose_orientcat_consistent_n"] == 1
+
+
+def test_pair_consistency():
+    from o3b.task.pose.cat_align import pair_consistency
+    gen = torch.Generator().manual_seed(8)
+    Ps = proper_signed_permutations()
+    n = 320
+    gt = _random_rot(n, gen)
+    objs = [i // 16 for i in range(n)]            # 20 objects x 16 views
+    cats = [f"c{o // 4}" for o in objs]           # 5 categories x 4 objects
+    # every frame wrong by P7, except category c1, whose objects 4-5 are wrong by P2:
+    # within videos all consistent; within c1 the cross-object pairs split
+    P_of = lambda o: Ps[2] if o in (4, 5) else Ps[7]
+    pred = torch.stack([gt[i] @ _small_noise(1, 3, gen)[0] @ P_of(o).T for i, o in enumerate(objs)])
+    m, d = pair_consistency(objs, pred, gt, {"": None}, device="cpu")
+    assert m["pose_pair_consistent"] == 1.0 and m["pose_pair_consistent_n"] == 20
+    m, d = pair_consistency(cats, pred, gt, {"": None}, distinct=objs, max_pairs=10000, device="cpu")
+    # c1: 6 object pairs, of which (4,5) and (6,7) agree -> 2/6
+    assert abs(d["group"]["c1"][1] - 2 / 6) < 1e-6
+    assert all(d["group"][c][1] == 1.0 for c in ("c0", "c2", "c3", "c4"))
+    # only cross-object pairs: 6 object pairs x 16 x 16 views
+    assert d["group"]["c0"][0] == 6 * 256
+    # sampling path and random rotations
+    m, _ = pair_consistency(cats, _random_rot(n, gen), gt, {"": None}, distinct=objs, max_pairs=500, device="cpu")
+    assert m["pose_pair_consistent"] < 0.05

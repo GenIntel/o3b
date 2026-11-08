@@ -348,3 +348,103 @@ def view_consistency(objects: list, pred_rot: torch.Tensor, gt_rot: torch.Tensor
         detail[f"obj{suffix}"] = {o: (len(ii), share[k].item(), math.degrees(med[k].item()))
                                   for k, (o, ii) in enumerate(groups.items())}
     return metrics, detail
+
+
+def pair_consistency(groups: list, pred_rot: torch.Tensor, gt_rot: torch.Tensor, syms: dict,
+                     distinct: Optional[list] = None, thr_deg: float = 30.0, max_pairs: int = 2000,
+                     seed: int = 0, device: Optional[str] = None,
+                     return_pairs: bool = False) -> tuple[dict, dict]:
+    """Are two predictions of one group off from the GT by the same rotation?
+
+    Per frame D = R_gt^T R_pred (predicted object frame -> GT frame). Two frames
+    i, j are *consistent relative to each other* if D_i D_j^T is within thr_deg of
+    the symmetry group, i.e. both predictions differ from their GT by one and the
+    same relabelling (none, if both are right). Pairs are drawn within a group
+    (``groups[i]``) and, if ``distinct`` is given, only between frames whose
+    ``distinct`` key differs, so
+
+        a video:               groups = object,                 distinct = None
+        a category:            groups = category,               distinct = object
+        an orientation cat.:   groups = orientcategory_of(cat), distinct = category
+
+    Per group, all valid pairs if there are <= max_pairs, else max_pairs drawn
+    uniformly (seeded). Score: per group the share of consistent pairs, mean
+    over groups. No relabelling is chosen on the test set, and accuracy only
+    enters as far as two right predictions are consistent: random rotations
+    score near 0, a method that is wrong the same way everywhere scores 1.
+
+    Symmetry: the pair's error is taken with the code of frame i and of frame
+    j and the smaller one kept (codes only differ where symmetry is labelled
+    per object, as in Omni6DPose).
+
+        pose_pair_consistent{suffix}     mean over groups
+        pose_pair_consistent_n{suffix}   groups with >= 1 valid pair
+
+    Returns (metrics, {f"group{suffix}": {group: (pairs, share consistent)}}),
+    plus ``detail[f"pairs{suffix}"] = (i, j, angle in rad)`` if return_pairs.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    D0 = _unit_rows(gt_rot.float().to(device)).transpose(-1, -2) @ _unit_rows(pred_rot.float().to(device))
+    gen = torch.Generator().manual_seed(seed)
+    by = {}
+    for i, g in enumerate(groups):
+        by.setdefault(g, []).append(i)
+    dk = None
+    if distinct is not None:
+        ids = {}
+        dk = torch.tensor([ids.setdefault(d, len(ids)) for d in distinct])
+    a, b, owner, names = [], [], [], []
+    for g, ii in by.items():
+        t = torch.tensor(ii)
+        n = len(ii)
+        if n < 2:
+            continue
+        n_all = n * (n - 1) // 2
+        if n_all <= max_pairs:
+            iu = torch.triu_indices(n, n, 1)
+            pa, pb = t[iu[0]], t[iu[1]]
+            if dk is not None:
+                keep = dk[pa] != dk[pb]
+                pa, pb = pa[keep], pb[keep]
+        else:
+            # rejection sampling of distinct-key pairs
+            pa, pb = [], []
+            tries = 0
+            while sum(map(len, pa)) < max_pairs and tries < 20:
+                x = t[torch.randint(n, (2 * max_pairs,), generator=gen)]
+                y = t[torch.randint(n, (2 * max_pairs,), generator=gen)]
+                keep = x != y if dk is None else dk[x] != dk[y]
+                pa.append(x[keep]); pb.append(y[keep]); tries += 1
+            pa, pb = torch.cat(pa)[:max_pairs], torch.cat(pb)[:max_pairs]
+        if len(pa) == 0:
+            continue
+        a.append(pa); b.append(pb); owner.append(torch.full((len(pa),), len(names))); names.append(g)
+    metrics, detail = {}, {}
+    if not names:
+        return metrics, detail
+    a, b, owner = (torch.cat(x).to(device) for x in (a, b, owner))
+    M = D0[a] @ D0[b].transpose(-1, -2)
+    thr = math.radians(thr_deg)
+    for suffix, s in syms.items():
+        if s is None and suffix != "":
+            continue
+        if s is None:
+            ang = _errors(M, None)
+        else:
+            s = s.to(device)
+            ang = _errors(M, s[a])
+            diff = (s[a] != s[b]).any(-1)
+            if diff.any():
+                ang[diff] = torch.minimum(ang[diff], _errors(M[diff], s[b][diff]))
+        ok = (ang < thr).float()
+        ng = len(names)
+        share = torch.zeros(ng, device=device).index_add_(0, owner, ok) / \
+            torch.bincount(owner, minlength=ng).float()
+        metrics[f"pose_pair_consistent{suffix}"] = share.mean().item()
+        metrics[f"pose_pair_consistent_n{suffix}"] = float(ng)
+        cnt = torch.bincount(owner, minlength=ng)
+        detail[f"group{suffix}"] = {g: (int(cnt[k]), share[k].item()) for k, g in enumerate(names)}
+        if return_pairs:
+            detail[f"pairs{suffix}"] = (a.cpu(), b.cpu(), ang.cpu())
+    return metrics, detail
