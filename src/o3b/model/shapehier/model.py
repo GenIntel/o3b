@@ -68,6 +68,21 @@ surface never reads the pose token. The last level's pose is written as
 ones are ``pose_aux``, which TrinityMethod supervises only if ``train.loss`` weighs
 the ``pose_*_aux`` terms.
 
+``fold`` may be a list with one entry per upfold (H08-T03), e.g. ``init_count`` 128
+and ``fold: [4, 1, 1, 4]`` for 128 / 512 / 512 / 512 / 2048 tokens. A fold of 1 gives
+each token one child at a bounded offset (seed 0): the level refines the points
+without adding any.
+
+``pose_pool: true`` (H08-T03) reads the pose once, after the decoder, from all of its
+levels at the same time instead of refining it level by level. A pose token (learned,
+plus the projected global feature, so it starts from what XAttnPool -> MLP pooled)
+runs through ``pose_layers`` cross-attention layers over the concatenated tokens of
+every level, each level's projected to ``pose_dim`` plus a learned level embedding,
+with RoPE at its points in its own level's unit (the query sits at the origin). A
+head gives PoseMLP's 12 raw outputs; ``cam_tform4x4_obj`` / ``obj_size3d`` come from it
+and no PoseMLP follows. ``pose_pool_detach: true`` stops the pose gradient at the
+decoder tokens, so the pose objective cannot change the surface.
+
 ``pose_umeyama: true`` (H08-T03, after DROID-SLAM's predict -> measure -> correct)
 reads the pose out of the NOCS instead of regressing it, at every level in
 ``umeyama_levels``. A level's tokens give a NOCS each (the level's NOCS head; at the
@@ -147,7 +162,7 @@ class ShapeHier(OD3D_Model):
         dims=(504, 252, 144, 72, 36),
         num_heads=(28, 14, 8, 4, 2),
         init_count: int = 8,
-        fold: int = 4,
+        fold=4,
         layers_per_level: int = 2,
         mlp_ratio: int = 2,
         rope_freq: float = 100.0,
@@ -172,6 +187,8 @@ class ShapeHier(OD3D_Model):
         pose_umeyama: bool = False,
         umeyama_levels=(1, 2, 3, 4),
         size_quantile: float = 0.02,
+        pose_pool: bool = False,
+        pose_pool_detach: bool = False,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -181,10 +198,13 @@ class ShapeHier(OD3D_Model):
             raise ValueError("ShapeHier: dims and num_heads must have one entry per level")
         if L < 2:
             raise ValueError("ShapeHier: needs at least two levels")
-        side = int(round(fold ** 0.5))
-        if side * side != fold:
-            raise ValueError(f"ShapeHier: fold must be a square, got {fold}")
-        self.dims, self.L, self.fold, self.init_count = dims, L, fold, init_count
+        folds = [int(fold)] * (L - 1) if isinstance(fold, int) else [int(f) for f in fold]
+        if len(folds) != L - 1:
+            raise ValueError(f"ShapeHier: fold needs one entry per upfold ({L - 1}), got {folds}")
+        for f in folds:
+            if f < 1 or int(round(f ** 0.5)) ** 2 != f:
+                raise ValueError(f"ShapeHier: every fold must be a square >= 1, got {folds}")
+        self.dims, self.L, self.fold_l, self.init_count = dims, L, folds, init_count
         # level l reads encoder stage L-1-l; LitePT's cell there is grid_size * 2**stage
         self.rope_units = (list(rope_units) if rope_units is not None
                            else [grid_size * 2 ** (L - 1 - l) for l in range(L)])
@@ -215,9 +235,12 @@ class ShapeHier(OD3D_Model):
             self.levels.append(nn.ModuleList(layers))
         self.norms = nn.ModuleList([nn.LayerNorm(d) for d in dims])
 
-        lin = torch.linspace(-fold_grid_scale, fold_grid_scale, side)
-        grid = torch.stack(torch.meshgrid(lin, lin, indexing="ij"), dim=-1).reshape(-1, 2)
-        self.register_buffer("fold_grid", grid, persistent=False)
+        for f in sorted(set(folds)):
+            side = int(round(f ** 0.5))
+            lin = (torch.linspace(-fold_grid_scale, fold_grid_scale, side) if side > 1
+                   else torch.zeros(1))                               # fold 1: one child, seed 0
+            grid = torch.stack(torch.meshgrid(lin, lin, indexing="ij"), dim=-1).reshape(-1, 2)
+            self.register_buffer(f"fold_grid_{f}", grid, persistent=False)
         # upfold l -> l+1: offset (3) + child feature (dims[l+1]) from token + seed
         self.folds = nn.ModuleList([_mlp([dims[l] + 2, fold_hidden_dim, fold_hidden_dim, 3 + dims[l + 1]])
                                     for l in range(L - 1)])
@@ -248,6 +271,23 @@ class ShapeHier(OD3D_Model):
                 for head in self.pose_out[1:]:              # residual updates start at zero
                     head.weight.zero_()
                     head.bias.zero_()
+
+        self.pose_pool, self.pose_pool_detach = pose_pool, pose_pool_detach
+        if pose_pool:
+            if pose_levels or pose_umeyama:
+                raise ValueError("ShapeHier: pose_pool excludes pose_levels and pose_umeyama")
+            if pose_dim % pose_heads or (pose_dim // pose_heads) % 6:
+                raise ValueError("ShapeHier: pose_dim / pose_heads must be a multiple of 6 (PointROPE)")
+            self.pp_token = nn.Parameter(torch.randn(1, pose_dim, generator=g) * 0.02)
+            self.pp_glob = nn.Linear(in_dim, pose_dim)
+            self.pp_kv = nn.ModuleList([nn.Linear(d, pose_dim) for d in dims])
+            self.pp_level = nn.Parameter(torch.randn(L, pose_dim, generator=g) * 0.02)
+            self.pp_blocks = nn.ModuleList([_Layer(pose_dim, pose_heads, pose_mlp_ratio, rope_freq, dropout,
+                                                   self_attn=False) for _ in range(pose_layers)])
+            self.pp_norm = nn.LayerNorm(pose_dim)
+            self.pp_out = nn.Linear(pose_dim, 12)
+        elif pose_pool_detach:
+            raise ValueError("ShapeHier: pose_pool_detach needs pose_pool: true")
 
         self.pose_umeyama = pose_umeyama
         if pose_umeyama:
@@ -319,6 +359,22 @@ class ShapeHier(OD3D_Model):
         frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = poses[-1]
         frames_pred.pose_aux = poses[:-1]
 
+    def _pose_pool(self, frames_pred, feat, level_pts, level_h, B):
+        """One pose token over the tokens of all levels at once."""
+        from o3b.model.posemlp.model import pose_from_raw
+        kv, kv_pos = [], []
+        for l in range(self.L):
+            h = level_h[l].detach() if self.pose_pool_detach else level_h[l]
+            kv.append(self.pp_kv[l](h) + self.pp_level[l])
+            kv_pos.append(self._rp(level_pts[l]) / self.rope_units[l])
+        kv, kv_pos = torch.cat(kv, dim=1), torch.cat(kv_pos, dim=1)
+        t = self.pp_token[None].expand(B, 1, -1) + self.pp_glob(feat)[:, None]
+        q_pos = kv_pos.new_zeros(B, 1, 3)
+        for layer in self.pp_blocks:
+            t = layer(t, q_pos, kv, kv_pos, None)
+        raw = self.pp_out(self.pp_norm(t)[:, 0])
+        frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = pose_from_raw(raw, frames_pred.obj_tform4x4_obj_nocs_0c)
+
     def forward(self, frames_gt, frames_pred=None):
         feat = frames_pred.feat                                   # (B, in_dim) global
         stages = frames_pred.tokens_stages
@@ -357,16 +413,18 @@ class ShapeHier(OD3D_Model):
                 um_poses.append(pose_l)
             if l == self.L - 1:
                 break
-            n = h.shape[1]
-            seed = self.fold_grid[None, None].expand(B, n, self.fold, 2)
-            out = self.folds[l](torch.cat([h[:, :, None].expand(B, n, self.fold, h.shape[-1]), seed], dim=-1))
+            n, f = h.shape[1], self.fold_l[l]
+            seed = getattr(self, f"fold_grid_{f}")[None, None].expand(B, n, f, 2)
+            out = self.folds[l](torch.cat([h[:, :, None].expand(B, n, f, h.shape[-1]), seed], dim=-1))
             off = torch.tanh(out[..., :3]) * (self.offset_scale * self.offset_decay ** l)
-            pts = (pts[:, :, None] + off).reshape(B, n * self.fold, 3)
+            pts = (pts[:, :, None] + off).reshape(B, n * f, 3)
             q = self.skips[l](h)[:, :, None] + out[..., 3:] + self.embed_off[l](off)
             if fb is not None and str(l) in self.um_embed:
                 q = q + self.um_embed[str(l)](fb.to(q.dtype))[:, :, None]
-            q = q.reshape(B, n * self.fold, -1)
+            q = q.reshape(B, n * f, -1)
 
+        if self.pose_pool:
+            self._pose_pool(frames_pred, feat, level_pts, level_h, B)
         if self.pose_levels:
             self._pose(frames_pred, level_pts, level_h, B)
         if self.pose_umeyama:
