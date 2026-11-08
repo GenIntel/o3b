@@ -1,0 +1,28 @@
+# SPair-71k test pairs (12,234 pairs, 18 categories, 481 images) as frame_object_pair
+# items, for 2-D semantic correspondence (o3b/dataset/spair/dataset.py).
+#
+# Depth + intrinsics are a monocular Depth Anything 3 estimate (SPair has neither),
+# computed once with o3b/dataset/spair/depth_da3.py into
+#   <path_preprocess>/depth/<extra.depth_type>/<category>/<image>.npz
+#
+#   o3b dataset viz -d spair71k_test_pair -c cat
+
+class_name: SPair71K
+
+path_datasets_raw: /data/lmbraid19/sommerl/datasets
+path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
+
+path_raw:        ${path_datasets_raw}/SPair71K
+path_preprocess: ${path_datasets_preprocess}/SPair71K_Preprocess
+
+item_type: frame_object_pair
+img_size: 512
+split: test
+
+# one category per run, as the HouseCorr3D pair benches (category/spair71k/<cat>.yaml)
+category: cat
+categories:
+  - ${category}
+
+extra:
+  depth_type: da3nested_giant_large_1.1

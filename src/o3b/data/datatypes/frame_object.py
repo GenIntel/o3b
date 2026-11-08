@@ -632,6 +632,9 @@ class FrameObjectPairBatch:
     # 3-D bounding-box corners in camera space
     src_cam_bbox3d:  Optional[Tensor] = None  # (B, 8, 3)
     trgt_cam_bbox3d: Optional[Tensor] = None  # (B, 8, 3)
+    # 2-D boxes (xyxy pixels of the frame as cropped), when the dataset annotates one
+    src_cam_bbox2d:  Optional[Tensor] = None  # (B, 4)
+    trgt_cam_bbox2d: Optional[Tensor] = None  # (B, 4)
     # frame ids, to key per-sample outputs (CamCrsp3DNNTask's dump_kpts2d)
     src_frame_id:  Optional[list] = None  # list of B str
     trgt_frame_id: Optional[list] = None
@@ -702,6 +705,7 @@ def collate_frame_object_pairs(
         setattr(out, f"{side}_meshes",                _meshes(side))
         setattr(out, f"{side}_category",              _cat(side))
         setattr(out, f"{side}_cam_bbox3d",            _get("cam_bbox3d", side))
+        setattr(out, f"{side}_cam_bbox2d",            _get("cam_bbox2d", side))
         setattr(out, f"{side}_frame_id",
                 [str(getattr(getattr(s, f"{side}_object"), "frame_id", "")) for s in samples])
     return out

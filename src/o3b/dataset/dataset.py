@@ -261,6 +261,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "ImageNet3D":   "o3b.dataset.imagenet3d.dataset",
     "HANDAL":       "o3b.dataset.handal.dataset",
     "Objectron":    "o3b.dataset.objectron.dataset",
+    "SPair71K":     "o3b.dataset.spair.dataset",
 }
 
 

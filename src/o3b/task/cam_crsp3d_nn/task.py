@@ -712,8 +712,15 @@ class CamCrsp3DNNTask(OD3D_Task):
         mesh_ncds_rescale: bool = False,
         mesh_ncds_recenter: bool = False,
         dump_kpts2d: Optional[str] = None,
+        bbox2d_from: str = "mask",
         **kwargs,
     ):
+        """``bbox2d_from``: the box whose larger side sets the 2-D PCK threshold —
+        ``mask`` (the target's visible-mask box, Morpheus's 2D@0.1) or
+        ``cam_bbox2d`` (the dataset's annotated box, e.g. SPair-71k's PCK@0.1_bbox)."""
+        if bbox2d_from not in ("mask", "cam_bbox2d"):
+            raise ValueError(f"CamCrsp3DNNTask: bbox2d_from={bbox2d_from!r}, expected mask | cam_bbox2d")
+        self.bbox2d_from = bbox2d_from
         self.qualit = qualit
         self.dump_kpts2d = dump_kpts2d
         self._dump_opened = False
@@ -833,7 +840,12 @@ class CamCrsp3DNNTask(OD3D_Task):
         # 2D: pixels of the target frame, 0.1 * max(w, h) of its visible-mask box.
         # Skipped (no keys) when the batch has no target mask or intrinsics.
         threshold2d = None
-        if batch.trgt_cam_intr4x4 is not None and batch.trgt_fo_mask is not None:
+        if self.bbox2d_from == "cam_bbox2d":
+            if batch.trgt_cam_intr4x4 is not None and batch.trgt_cam_bbox2d is not None:
+                bb = batch.trgt_cam_bbox2d.float().to(dev)
+                threshold2d = 0.1 * torch.maximum(bb[:, 2] - bb[:, 0], bb[:, 3] - bb[:, 1])
+                trgt_intr = batch.trgt_cam_intr4x4.float().to(dev)
+        elif batch.trgt_cam_intr4x4 is not None and batch.trgt_fo_mask is not None:
             threshold2d = 0.1 * _bbox2d_size_from_masks(batch.trgt_fo_mask, B, dev)
             trgt_intr = batch.trgt_cam_intr4x4.float().to(dev)
 
