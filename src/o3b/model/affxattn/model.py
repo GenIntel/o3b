@@ -33,6 +33,21 @@ The global feature (``in_dim``) is ShapeXAttn's input, ``feat_pre_pose``: the
 head sits last in the chain, after PoseMLP has replaced ``feat`` with the pose
 (and last so that the checkpoint keys of the modules before it keep their
 positions). Without ``feat_pre_pose`` it falls back to ``feat``.
+
+What the pixel queries attend to and what they start from are ablations (H12-T06):
+
+- ``pxl_kv``: ``litept`` (default) — LitePT's stage-4 tokens, as above;
+  ``surface`` — the predicted fine surface as tokens, each point's PPF-32
+  feature (``feat_shape_fine``, needs ``surface_feat_dim``) embedded by an MLP,
+  its position (detached) entering through PointROPE only. Surface queries keep
+  attending to LitePT's tokens.
+- ``pxl_query_inputs``: which of ``xyz`` (the lifted point), ``img`` (DINOv2 at
+  the pixel) and ``glob`` (the global feature) are added to the learned pixel
+  query embedding. With none, a query differs from another only by its position
+  (PointROPE), so its logit is a position-weighted read-out of the tokens.
+- ``kv_grad``: let the affordance loss reach the surface tokens' PPF-32
+  features (and through them ShapeXAttn); positions stay detached. Needed when
+  nothing else trains ShapeXAttn (from scratch with affordance losses only).
 """
 
 import logging
@@ -65,6 +80,9 @@ class AffXAttn(OD3D_Model):
         pts3d_opengl: bool = True,
         chunk: int = 2048,
         dropout: float = 0.0,
+        pxl_kv: str = "litept",
+        pxl_query_inputs=("xyz", "img", "glob"),
+        kv_grad: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -74,6 +92,17 @@ class AffXAttn(OD3D_Model):
         self.surface_feat_dim = surface_feat_dim
         self.pts3d_opengl = pts3d_opengl
         self.chunk = chunk
+        if pxl_kv not in ("litept", "surface"):
+            raise ValueError(f"AffXAttn: pxl_kv must be litept or surface, got {pxl_kv!r}")
+        bad = set(pxl_query_inputs) - {"xyz", "img", "glob"}
+        if bad:
+            raise ValueError(f"AffXAttn: unknown pxl_query_inputs {sorted(bad)}")
+        if pxl_kv == "surface" and not surface_feat_dim:
+            raise ValueError("AffXAttn: pxl_kv=surface needs surface_feat_dim (the PPF-32 channels)")
+        self.pxl_kv = pxl_kv
+        self.pxl_query_inputs = tuple(pxl_query_inputs)
+        self.kv_grad = kv_grad
+        self.embed_kv = _mlp([surface_feat_dim, dim // 2, dim]) if pxl_kv == "surface" else None
         self.embed_pt = _mlp([3, dim // 2, dim])
         self.embed_img = _mlp([img_feat_dim, dim])
         self.embed_glob = nn.Linear(in_dim, dim)
@@ -175,9 +204,23 @@ class AffXAttn(OD3D_Model):
             if pts_cam is None:
                 pts_cam = self._lift_pixels(frames_gt, pxl)
             xyz = self._cam_to_cloud(frames_pred, pts_cam.float()).detach()
-            q = (self.embed_pt(xyz) + self.embed_img(self._sample_featmap(frames_gt, frames_pred, pxl))
-                 + glob + self.query_type[0])
-            frames_pred.aff_logit_pxl = self._run(q, xyz / self.rope_unit, tok, tok_pos, tok_mask)
+            q = self.query_type[0].expand(xyz.shape[0], xyz.shape[1], -1)
+            if "xyz" in self.pxl_query_inputs:
+                q = q + self.embed_pt(xyz)
+            if "img" in self.pxl_query_inputs:
+                q = q + self.embed_img(self._sample_featmap(frames_gt, frames_pred, pxl))
+            if "glob" in self.pxl_query_inputs:
+                q = q + glob
+            if self.pxl_kv == "surface":
+                pts, f = frames_pred.pts3d_shape_fine, frames_pred.feat_shape_fine
+                if pts is None or f is None:
+                    raise RuntimeError("AffXAttn: pxl_kv=surface needs ShapeXAttn's "
+                                       "pts3d_shape_fine and feat_shape_fine (point_feat_dim > 0)")
+                f = f.float() if self.kv_grad else f.detach().float()
+                kv, kv_pos, kv_mask = self.embed_kv(f), pts.detach().float() / self.rope_unit, None
+            else:
+                kv, kv_pos, kv_mask = tok, tok_pos, tok_mask
+            frames_pred.aff_logit_pxl = self._run(q, xyz / self.rope_unit, kv, kv_pos, kv_mask)
 
         fine = frames_pred.pts3d_shape_fine
         if self.surface and fine is not None:
