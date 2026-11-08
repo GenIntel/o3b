@@ -209,6 +209,9 @@ class SPair71K(ConfigurableDataset):
 
     def _load_frame_object_pair(self, idx: int):
         ann = json.loads(self._pairs[idx].read_text())
-        src, trgt = self._load_side(ann, "src"), self._load_side(ann, "trg")
+        src = self._load_side(ann, "src")
+        # extra.self_pairs: the source image matched against itself, a pipeline check
+        # (depth lifting, mask, crop, projection): a method should land near 100 %
+        trgt = self._load_side(ann, "src") if (self.cfg.extra or {}).get("self_pairs") else self._load_side(ann, "trg")
         return FrameObjectPair(src_object=src, trgt_object=trgt,
                                src_object_id=src.object_id, trgt_object_id=trgt.object_id)
