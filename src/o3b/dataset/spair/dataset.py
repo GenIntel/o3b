@@ -37,8 +37,14 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torchvision.io as tio
+from PIL import Image
 
+from o3b.data.datatypes.frame_object import FrameObject, FrameObjectPair
 from o3b.dataset.dataset import ConfigurableDataset, register_dataset
+
+# Everything is imported at module level: a first import inside a DataLoader worker
+# trips wandb's import hook in the forked process (ForkedError, 26-11-08).
 
 SPAIR_CATEGORIES = (
     "aeroplane", "bicycle", "bird", "boat", "bottle", "bus", "car", "cat", "chair",
@@ -103,12 +109,9 @@ class SPair71K(ConfigurableDataset):
         return len(self._pairs)
 
     def _load_side(self, ann: dict, side: str):
-        from o3b.data.datatypes.frame_object import FrameObject
-
         cat = ann["category"]
         imname = ann[f"{side}_imname"]
         stem = Path(imname).stem
-        import torchvision.io as tio
         rgb = tio.read_image(str(self.path_raw / "JPEGImages" / cat / imname)).float() / 255.0
         if rgb.shape[0] == 1:
             rgb = rgb.expand(3, -1, -1)
@@ -123,7 +126,6 @@ class SPair71K(ConfigurableDataset):
         depth_mask = torch.isfinite(depth) & (depth > 1e-6)
         depth = torch.where(depth_mask, depth, torch.zeros_like(depth))
 
-        from PIL import Image
         seg = np.array(Image.open(self.path_raw / "Segmentation" / cat / f"{stem}.png"))
         bbox = ann["src_bndbox" if side == "src" else "trg_bndbox"]
         fo_mask = torch.from_numpy(instance_mask(seg, bbox))
@@ -169,8 +171,6 @@ class SPair71K(ConfigurableDataset):
         )
 
     def _load_frame_object_pair(self, idx: int):
-        from o3b.data.datatypes.frame_object import FrameObjectPair
-
         ann = json.loads(self._pairs[idx].read_text())
         src, trgt = self._load_side(ann, "src"), self._load_side(ann, "trg")
         return FrameObjectPair(src_object=src, trgt_object=trgt,
