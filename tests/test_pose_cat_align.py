@@ -216,3 +216,22 @@ def test_view_consistency():
     syms = torch.tensor([[1.0, 2.0, 1.0]]).repeat(n, 1)
     m, _ = view_consistency(objs, pred, gt, {"_sym": syms}, device="cpu")
     assert m["pose_view_consistent_sym"] == 1.0
+
+
+def test_orientcategory_groups():
+    from o3b.task.pose.cat_align import orientcategory_of, orientation_consistency
+    # same rule triple -> same group, across datasets' names
+    assert orientcategory_of("airplane") == orientcategory_of("aeroplane") == "-|move_backward|move_upward"
+    assert orientcategory_of("bench") != orientcategory_of("airplane")
+    assert orientcategory_of("not_a_category") == "unmapped:not_a_category"
+    gen = torch.Generator().manual_seed(7)
+    Ps = proper_signed_permutations()
+    n = 200
+    gt = _random_rot(n, gen)
+    # airplane and bus share move_backward / move_upward; bus turned by P2
+    cats = [["airplane", "bus"][i % 2] for i in range(n)]
+    assert orientcategory_of("bus") == orientcategory_of("airplane")
+    pred = torch.stack([gt[i] @ (Ps[2].T if c == "bus" else torch.eye(3)) for i, c in enumerate(cats)])
+    m, d = orientation_consistency(cats, pred, gt, {"": None}, device="cpu")
+    assert m["pose_cat_consistent"] == 1.0
+    assert m["pose_orientcat_consistent"] == 0.0 and m["pose_orientcat_consistent_n"] == 1

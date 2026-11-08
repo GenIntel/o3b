@@ -167,28 +167,52 @@ def supercategory_of(category: str) -> str:
     return _super_lookup().get(str(category), f"unmapped:{category}")
 
 
+def orientcategory_of(category: str) -> str:
+    """UCO3D orientation category of a category of any pose test set: the
+    categories that share one rule triple (left, back, top) of UCO3D's
+    orientation tree (``MAP_UCO3D_CATEGORY_TO_ORIENT_KEYS``), which Every9D's
+    canonical frames are labelled by, keyed ``"<left>|<back>|<top>"`` (``-`` for
+    an axis without a rule). Names map to UCO3D as in supercategory_of; a
+    category no map covers is its own group (``"unmapped:<category>"``)."""
+    return _orient_lookup().get(str(category), f"unmapped:{category}")
+
+
 _SUPER_LOOKUP: Optional[dict] = None
+_ORIENT_LOOKUP: Optional[dict] = None
+# the maps are keyed by enum members (str() of an IMAGENET3D_CATEGORIES member
+# is "IMAGENET3D_CATEGORIES.AEROPLANE", not "aeroplane")
+_name = lambda x: str(getattr(x, "value", x))
+
+
+def _via_uco3d(group: dict) -> dict:
+    """{category of any test set: group}, from {UCO3D category: group}."""
+    from o3b.dataset.housecorr3d.omni6dpose_uco3d import MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D
+    from o3b.dataset.imagenet3d.enum import MAP_CATEGORIES_IMAGENET3D_TO_UCO3D
+    from o3b.dataset.handal.enum import MAP_CATEGORIES_HANDAL_TO_UCO3D
+    lut = dict(group)
+    for m in (MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D, MAP_CATEGORIES_IMAGENET3D_TO_UCO3D,
+              MAP_CATEGORIES_HANDAL_TO_UCO3D):
+        for k, v in m.items():
+            if v is not None and _name(k) not in lut and _name(v) in group:
+                lut[_name(k)] = group[_name(v)]
+    return lut
 
 
 def _super_lookup() -> dict:
     global _SUPER_LOOKUP
     if _SUPER_LOOKUP is None:
         from o3b.dataset.uco3d.enum import MAP_UCO3D_CATEGORIES_TO_SUPER as SUP
-        from o3b.dataset.housecorr3d.omni6dpose_uco3d import MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D
-        from o3b.dataset.imagenet3d.enum import MAP_CATEGORIES_IMAGENET3D_TO_UCO3D
-        from o3b.dataset.handal.enum import MAP_CATEGORIES_HANDAL_TO_UCO3D
-        # the maps are keyed by enum members (str() of an IMAGENET3D_CATEGORIES
-        # member is "IMAGENET3D_CATEGORIES.AEROPLANE", not "aeroplane")
-        name = lambda x: str(getattr(x, "value", x))
-        sup = {name(k): name(v) for k, v in SUP.items()}
-        lut = dict(sup)
-        for m in (MAP_CATEGORIES_OMNI6DPOSE_TO_UCO3D, MAP_CATEGORIES_IMAGENET3D_TO_UCO3D,
-                  MAP_CATEGORIES_HANDAL_TO_UCO3D):
-            for k, v in m.items():
-                if v is not None and name(k) not in lut and name(v) in sup:
-                    lut[name(k)] = sup[name(v)]
-        _SUPER_LOOKUP = lut
+        _SUPER_LOOKUP = _via_uco3d({_name(k): _name(v) for k, v in SUP.items()})
     return _SUPER_LOOKUP
+
+
+def _orient_lookup() -> dict:
+    global _ORIENT_LOOKUP
+    if _ORIENT_LOOKUP is None:
+        from o3b.dataset.uco3d.map_orient_tree import MAP_UCO3D_CATEGORY_TO_ORIENT_KEYS as OK
+        key = lambda v: "|".join("-" if x is None else _name(x) for x in v)
+        _ORIENT_LOOKUP = _via_uco3d({_name(k): key(v) for k, v in OK.items()})
+    return _ORIENT_LOOKUP
 
 
 def supercategory_axes_align(categories: list, pred_rot, gt_rot, syms: dict, **kw) -> tuple[dict, dict]:
@@ -219,8 +243,11 @@ def orientation_consistency(categories: list, pred_rot: torch.Tensor, gt_rot: to
                                           that are consistent
         pose_supercat_consistent{suffix}  the same over UCO3D super-categories,
                                           frames pooled, those with >= 2 categories
+        pose_orientcat_consistent{suffix} the same over UCO3D orientation
+                                          categories (one rule triple of the
+                                          orientation tree, orientcategory_of)
 
-    Returns (metrics, {f"{cat|supercat}{suffix}": {group: (consistent, n, P1, P2,
+    Returns (metrics, {f"{cat|supercat|orientcat}{suffix}": {group: (consistent, n, P1, P2,
     share of P1, share of P2)}}).
     """
     if device is None:
@@ -229,11 +256,13 @@ def orientation_consistency(categories: list, pred_rot: torch.Tensor, gt_rot: to
     D0 = _unit_rows(gt_rot.float().to(device)).transpose(-1, -2) @ _unit_rows(pred_rot.float().to(device))
     thr = math.radians(thr_deg)
     cats = [str(c) for c in categories]
-    groups = {"cat": {}, "supercat": {}}
+    groups = {"cat": {}, "supercat": {}, "orientcat": {}}
     for i, c in enumerate(cats):
         groups["cat"].setdefault(c, []).append(i)
         groups["supercat"].setdefault(supercategory_of(c), []).append(i)
-    n_cats_in = {s: len({cats[i] for i in ii}) for s, ii in groups["supercat"].items()}
+        groups["orientcat"].setdefault(orientcategory_of(c), []).append(i)
+    n_cats_in = {lv: {g: len({cats[i] for i in ii}) for g, ii in groups[lv].items()}
+                 for lv in ("supercat", "orientcat")}
     metrics, detail = {}, {}
     for suffix, s in syms.items():
         if s is None and suffix != "":
@@ -243,7 +272,7 @@ def orientation_consistency(categories: list, pred_rot: torch.Tensor, gt_rot: to
         for level, gs in groups.items():
             res = {}
             for g, ii in gs.items():
-                if len(ii) < min_n or (level == "supercat" and n_cats_in[g] < 2):
+                if len(ii) < min_n or (level != "cat" and n_cats_in[level][g] < 2):
                     continue
                 o = ok[:, torch.tensor(ii, device=device)]
                 h = o.sum(1)

@@ -89,7 +89,7 @@ def merge(recs: list[dict], cat_axes_align: bool = False,
             choice.update(c2)
         from o3b.task.pose.cat_align import orientation_consistency
         extra, _ = orientation_consistency(*args)
-        keep = (("pose_cat_",) if cat_axes_align else ()) + (("pose_supercat_",) if supercat_axes_align else ())
+        keep = (("pose_cat_",) if cat_axes_align else ()) + (("pose_supercat_", "pose_orientcat_") if supercat_axes_align else ())
         metrics.update({k: v for k, v in extra.items() if k.startswith(keep)})
     return metrics, choice
 

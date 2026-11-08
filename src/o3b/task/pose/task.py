@@ -181,7 +181,7 @@ class PoseTask(OD3D_Task):
         from o3b.task.pose.cat_align import orientation_consistency
         m3, _ = orientation_consistency(cats, pred, gt, syms)
         keep = (("pose_cat_",) if self.cat_axes_align else ()) + \
-            (("pose_supercat_",) if self.supercat_axes_align else ())
+            (("pose_supercat_", "pose_orientcat_") if self.supercat_axes_align else ())
         metrics.update({k: v for k, v in m3.items() if k.startswith(keep)})
         return metrics, choice
 
