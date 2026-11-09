@@ -85,6 +85,12 @@ and ``fold: [4, 1, 1, 4]`` for 128 / 512 / 512 / 512 / 2048 tokens. A fold of 1 
 each token one child at a bounded offset (seed 0): the level refines the points
 without adding any.
 
+``out_fold: k`` (H08-T03) replaces the output head by a fold MLP, as ShapeXAttn's: each
+last-level token, with one of ``k`` 2-D seeds (spaced ``out_fold_grid_scale``), gives a
+child's point offset (unbounded) plus its NOCS / features, so the last level's ``n``
+tokens become ``n * k`` output points. With ``fold: [4, 1, 1, 1]`` and ``out_fold: 4``
+the last attention level has 512 tokens and the output still 2048 points.
+
 ``pose_pool: true`` (H08-T03) reads the pose once, after the decoder, from all of its
 levels at the same time instead of refining it level by level. A pose token (learned,
 plus the projected global feature, so it starts from what XAttnPool -> MLP pooled)
@@ -203,6 +209,8 @@ class ShapeHier(OD3D_Model):
         pose_pool_detach: bool = False,
         init_queries: bool = False,
         init_layers: int = 2,
+        out_fold: int = 1,
+        out_fold_grid_scale: float = 0.05,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -277,10 +285,21 @@ class ShapeHier(OD3D_Model):
         self.level_heads = nn.ModuleList([nn.Linear(dims[l], self.extra_ch) for l in range(L - 1)]
                                          if self.extra_ch else [])
         # output head: final point offset (zero at init) + NOCS / features
-        self.out_head = nn.Linear(dims[-1], 3 + self.extra_ch)
-        with torch.no_grad():
-            self.out_head.weight[:3].zero_()
-            self.out_head.bias[:3].zero_()
+        self.out_fold = int(out_fold)
+        if self.out_fold < 1 or int(round(self.out_fold ** 0.5)) ** 2 != self.out_fold:
+            raise ValueError(f"ShapeHier: out_fold must be a square >= 1, got {out_fold}")
+        if self.out_fold > 1:
+            # ShapeXAttn's fold: token + seed -> offset (3) + NOCS / features per child
+            side = int(round(self.out_fold ** 0.5))
+            lin = torch.linspace(-out_fold_grid_scale, out_fold_grid_scale, side)
+            grid = torch.stack(torch.meshgrid(lin, lin, indexing="ij"), dim=-1).reshape(-1, 2)
+            self.register_buffer("out_fold_grid", grid, persistent=False)
+            self.out_head = _mlp([dims[-1] + 2, fold_hidden_dim, fold_hidden_dim, 3 + self.extra_ch])
+        else:
+            self.out_head = nn.Linear(dims[-1], 3 + self.extra_ch)
+            with torch.no_grad():
+                self.out_head.weight[:3].zero_()
+                self.out_head.bias[:3].zero_()
 
         self.pose_levels = pose_levels
         if pose_levels:
@@ -322,6 +341,8 @@ class ShapeHier(OD3D_Model):
                 raise ValueError("ShapeHier: pose_umeyama needs nocs: true")
             if pose_levels:
                 raise ValueError("ShapeHier: pose_umeyama and pose_levels exclude each other")
+            if self.out_fold > 1 and L - 1 in [int(l) for l in umeyama_levels]:
+                raise ValueError("ShapeHier: pose_umeyama at the last level needs out_fold: 1")
             self.um_levels = sorted(int(l) for l in umeyama_levels)
             if not self.um_levels or not all(0 <= l < L for l in self.um_levels):
                 raise ValueError(f"ShapeHier: umeyama_levels must lie in 0..{L - 1}")
@@ -474,9 +495,17 @@ class ShapeHier(OD3D_Model):
             frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = poses[-1]
             frames_pred.pose_aux = poses[:-1]
 
-        o = self.out_head(level_h[-1])
-        fine = level_pts[-1] + o[..., :3]
-        extra_fine = o[..., 3:]
+        h = level_h[-1]
+        if self.out_fold > 1:
+            n, K = h.shape[1], self.out_fold
+            seed = self.out_fold_grid[None, None].expand(B, n, K, 2)
+            o = self.out_head(torch.cat([h[:, :, None].expand(B, n, K, h.shape[-1]), seed], dim=-1))
+            fine = (level_pts[-1][:, :, None] + o[..., :3]).reshape(B, n * K, 3)
+            extra_fine = o[..., 3:].reshape(B, n * K, self.extra_ch)
+        else:
+            o = self.out_head(h)
+            fine = level_pts[-1] + o[..., :3]
+            extra_fine = o[..., 3:]
         extra_lvl = [self.level_heads[l](level_h[l]) for l in range(self.L - 1)] if self.extra_ch else None
 
         k0 = 3 if self.nocs else 0
