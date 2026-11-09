@@ -1,0 +1,33 @@
+# oav2_train_sharded — every Orient Anything V2 render materialised into ONE
+# Arrow cache (all 3,720 categories), the training set of the
+# "Ours (Orient Anything V2)" row.
+#
+#   o3b dataset index -d oav2 -p slurm_lmbl40 --remote                   # once
+#   o3b dataset init  -d oav2_train_sharded -p slurm_lmbl40 --remote --chunks 10
+#
+# All frames, where od3d's oav2_train_sharded took a seeded half
+# (subset_fraction 0.5): the schedule is fixed in optimizer steps (50 x 2,000 x
+# 128 = 12.8M samples, ~11 passes over the full set), so the extra frames add
+# variety, not steps.
+
+defaults:
+  - oav2
+  - _self_
+
+categories:            # null = every category
+filter_count_max:      # null = no cap
+
+sharded_shard_size: 500
+sharded_num_workers: 8
+
+sharded_transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}
+  W: ${img_size}
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+transform:
+
+sharded_name: oav2_train_r${img_size}_all
+sharded_override: false

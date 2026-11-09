@@ -262,6 +262,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HANDAL":       "o3b.dataset.handal.dataset",
     "Objectron":    "o3b.dataset.objectron.dataset",
     "SPair71K":     "o3b.dataset.spair.dataset",
+    "OrientAnythingV2": "o3b.dataset.oav2.dataset",
 }
 
 
