@@ -20,7 +20,11 @@ so the keys and values need no projection between widths.
   plus its embedded point.
 * **Each level** runs ``layers_per_level`` layers. Each layer is self-attention
   among the level's tokens, then cross-attention to its encoder stage, then an
-  FFN (XAttnPool's layer), so self- and cross-attention alternate. The PointROPE
+  FFN (XAttnPool's layer), so self- and cross-attention alternate. A list gives one
+  count per level; 0 (H08-T03, e.g. ``[4, 4, 4, 4, 0]``) leaves that level without
+  attention: its tokens are the fold's output (skip + fold feature + embedded offset)
+  and go straight to the norm and the heads, so the level still has its points and
+  features but never reads its encoder stage or its neighbours. The PointROPE
   positions are the tokens' points / ``rope_units[l]``. By default
   ``rope_units[l]`` is the matching stage's cell (``grid_size * 2**stage``), which
   is LitePT's own unit at that stage.
@@ -171,7 +175,7 @@ class ShapeHier(OD3D_Model):
         num_heads=(28, 14, 8, 4, 2),
         init_count: int = 8,
         fold=4,
-        layers_per_level: int = 2,
+        layers_per_level=2,
         mlp_ratio: int = 2,
         rope_freq: float = 100.0,
         rope_units=None,
@@ -243,14 +247,18 @@ class ShapeHier(OD3D_Model):
         self.embed_glob = nn.Linear(in_dim, dims[0])
         self.embed_pt = _mlp([3, dims[0] // 2, dims[0]])
 
+        lpl = ([int(layers_per_level)] * L if isinstance(layers_per_level, int)
+               else [int(n) for n in layers_per_level])
+        if len(lpl) != L or min(lpl) < 0:
+            raise ValueError(f"ShapeHier: layers_per_level needs one count >= 0 per level ({L}), got {lpl}")
         self.levels = nn.ModuleList()
         for l in range(L):
             if l in self.knn_levels:
                 layers = [_LocalLayer(dims[l], num_heads[l], mlp_ratio, rope_freq, dropout, knn)
-                          for _ in range(layers_per_level)]
+                          for _ in range(lpl[l])]
             else:
                 layers = [_Layer(dims[l], num_heads[l], mlp_ratio, rope_freq, dropout, self_attn=True)
-                          for _ in range(layers_per_level)]
+                          for _ in range(lpl[l])]
             self.levels.append(nn.ModuleList(layers))
         self.norms = nn.ModuleList([nn.LayerNorm(d) for d in dims])
 
