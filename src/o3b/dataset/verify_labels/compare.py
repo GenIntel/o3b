@@ -168,6 +168,14 @@ def run_compare(root, tforms: dict, pack_root=None, out_csv=None, db_path=None, 
         off = official_box(tforms[seq], verts_of(seq))
         add(cohort, version, off, seq)
         add(f"{cohort}_blind", version, off, seq)
+        if version.get("start", record.get("start")) == store.PRELABELS:
+            add(f"{cohort}_prelabel_reviewed", version, off, seq)
+
+    for record in store.iter_all(root, store.PRELABELS):
+        # The model's boxes as they were, before review: how much the review changed.
+        seq = record["sequence_name"]
+        if seq in tforms:
+            add(f"claude_{split_of.get(seq, 'unsampled')}", record, official_box(tforms[seq], verts_of(seq)), seq)
 
     for record in store.iter_all(root, store.OLD):
         seq = record["sequence_name"]

@@ -481,6 +481,9 @@ def _build_dataset_parser(sub):
     p_obb.add_argument("--include-old", action="store_true",
                        help="Also queue the objects that have an old label, to re-annotate "
                             "them from scratch; a new annotation replaces the old label")
+    p_obb.add_argument("--prelabels", action="store_true",
+                       help="Start each unsaved box from prelabels_claude/ (a model's labels, "
+                            "blind to tform_obj) instead of the principal axes; saves record it")
     p_obb.add_argument("--official", default="every9d_v7", metavar="TFORM_OBJ_TYPE",
                        help="tform_obj type to compare with (default: %(default)s)")
 
@@ -1003,7 +1006,8 @@ def _run_dataset(args, parser=None, argv=None):
     elif args.dataset_command == "annotate-obb":
         from o3b.dataset.verify_labels.viewer import run_viewer
         run_viewer(cfg, args.root, pack_root=args.pack, port=args.port, annotator=args.annotator,
-                   official=args.official, include_old=args.include_old)
+                   official=args.official, include_old=args.include_old,
+                   prelabels="prelabels_claude" if args.prelabels else None)
         return
     elif args.dataset_command == "annotate-obb-compare":
         from o3b.dataset import tform_obj_store

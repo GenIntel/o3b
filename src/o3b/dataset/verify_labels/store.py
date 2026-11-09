@@ -37,6 +37,7 @@ ANNOTATIONS = "annotations"
 REPEATS = "annotations_repeat"
 OLD = "annotations_old"
 EMIL = "annotations_emil"
+PRELABELS = "prelabels_claude"   # model pre-labels, blind to tform_obj; start boxes only
 
 
 def corners(R: np.ndarray, center: np.ndarray, extents: np.ndarray) -> np.ndarray:

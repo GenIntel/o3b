@@ -3,8 +3,8 @@
     o3b dataset annotate-obb -d uco3d
 
 A viser page: the object's coloured point cloud (the mesh when a pack has none)
-with a box you drag in 3-D (the centre gizmo moves and turns it, one handle per
-face sizes it, keys swap / flip / tilt it), each axis arrow named right / top /
+with a box you adjust in 3-D (one drag handle per face sizes it along that face's
+normal, keys swap / flip / tilt / resize it; there is no free move or turn), each axis arrow named right / top /
 back, and real frames beside it with the box projected live, because the images
 are the evidence and the 3-D view only repeats the reconstruction.  Every save lands on disk at once, so a session resumes where
 it stopped.
@@ -93,7 +93,7 @@ class BoxState:
         return float(np.linalg.det(self.R)) > 0
 
     def display_R(self) -> np.ndarray:
-        """R as a rotation for the gizmos, which cannot show a mirrored frame."""
+        """R as a rotation for the face handles, which cannot show a mirrored frame."""
         R = self.R.copy()
         if not self.is_proper:
             R[2] *= -1
@@ -104,6 +104,13 @@ class BoxState:
         now = self.center + sign * self.extents[axis] / 2 * self.R[axis]
         d = float((np.asarray(face_world) - now) @ self.R[axis]) * sign
         d = max(d, 1e-3 * float(self.extents.max()) - self.extents[axis])
+        self.extents[axis] += d
+        self.center = self.center + sign * d / 2 * self.R[axis]
+
+    def resize(self, axis: int, sign: int, percent: float) -> None:
+        """Move one face out (or in) by ``percent`` of the largest extent; the opposite stays."""
+        step = percent / 100 * float(self.extents.max())
+        d = max(step, 1e-3 * float(self.extents.max()) - self.extents[axis])
         self.extents[axis] += d
         self.center = self.center + sign * d / 2 * self.R[axis]
 
@@ -194,8 +201,14 @@ class Annotator:
     """Queue, progress and persistence, separate from the page that drives them."""
 
     def __init__(self, root, samples: dict, pack_root=None, annotator: Optional[str] = None,
-                 seed: int = SEED, repeats: int = REPEAT_COUNT, include_old: bool = False):
+                 seed: int = SEED, repeats: int = REPEAT_COUNT, include_old: bool = False,
+                 prelabels: Optional[str] = None):
         self.root = Path(root)
+        # Start boxes from store.PRELABELS (a model's labels, blind to the official
+        # ones) instead of the principal axes; saves record it, compare splits it out.
+        self.prelabels = prelabels
+        self.start = "pca"
+        self.pre: Optional[dict] = None
         # Objects with an old label and box are done already; only the rest is queued.
         old = {r["sequence_name"] for r in store.iter_all(root, store.OLD) if r.get("center_raw")}
         # With include_old they are queued too, after the rest, starting from the
@@ -246,8 +259,13 @@ class Annotator:
         self.seq, self.kind = self.items[self.index]
         self.data = load_object(self.pack_root, self.seq)
         saved = store.load(self.root, self.seq, self.kind)
+        pre = store.load(self.root, self.seq, self.prelabels) if self.prelabels else None
+        self.pre = pre
+        self.start = (saved or {}).get("start") or (self.prelabels if pre else "pca")
         if saved and saved.get("status") == "done":
             self.box = BoxState(saved["R_obj_raw"], saved["center_raw"], saved["extents_raw"])
+        elif pre:
+            self.box = BoxState(pre["R_obj_raw"], pre["center_raw"], pre["extents_raw"])
         else:
             self.box = BoxState(*pca_box(self.data["verts"]))
         self.seconds_before = float(saved.get("seconds_spent", 0.0)) if saved else 0.0
@@ -257,6 +275,7 @@ class Annotator:
         split = next((n for n, ids in self.all_samples.items() if self.seq in ids), None)
         return {"sequence_name": self.seq, "split": split, "annotator": self.annotator,
                 "frame_convention": "o3b obj axes (X right, Y top, Z back), raw SfM frame",
+                "start": self.start,
                 "seconds_spent": self.seconds_before + time.monotonic() - self.started}
 
     def save(self, status: str = "done", reason: str = "") -> dict:
@@ -288,11 +307,20 @@ def label_ops() -> dict:
 # One keyboard column per view, top to bottom: look along an axis, tilt about it,
 # swap the two axes a quarter turn about it exchanges. Front looks along Z, top
 # along Y, right along X. Q/A W/S E/D are viser's camera keys too: key_script
-# takes them first, so the camera flies on the arrows alone.
+# takes them first, so the camera flies on the arrows alone. R/F T/G Y/H move the
+# top, back and right face out / in by 1 % of the largest extent, one face at a
+# time; with Shift, the bottom, front and left face.
 KEYS = {"1": "Front", "q": "Z +1", "a": "Z -1", "z": "Swap XY",
         "2": "Top", "w": "Y +1", "s": "Y -1", "x": "Swap ZX",
         "3": "Right", "e": "X +1", "d": "X -1", "c": "Swap YZ",
-        "4": "Flip X", "5": "Flip Y", "6": "Flip Z"}
+        "4": "Flip X", "5": "Flip Y", "6": "Flip Z",
+        "r": "Top +1%", "f": "Top -1%", "t": "Back +1%", "g": "Back -1%",
+        "y": "Right +1%", "h": "Right -1%",
+        "S-r": "Bottom +1%", "S-f": "Bottom -1%", "S-t": "Front +1%", "S-g": "Front -1%",
+        "S-y": "Left +1%", "S-h": "Left -1%"}
+# Face name -> (axis, sign) of its outward normal.
+FACES = {"Top": (1, 1), "Bottom": (1, -1), "Back": (2, 1), "Front": (2, -1),
+         "Right": (0, 1), "Left": (0, -1)}
 
 
 # View name -> ((axis, sign) the camera sits on, (axis, sign) that points up on screen).
@@ -313,14 +341,15 @@ def key_script() -> str:
     js = ("if(!window.__obbKeys){window.__obbKeys=1;var m={" + table + "};"
           "window.addEventListener('keydown',function(e){"
           "var t=e.target.tagName;if(t==='INPUT'||t==='TEXTAREA'||e.ctrlKey||e.metaKey||e.altKey)return;"
-          "var l=m[e.key.toLowerCase()];if(!l)return;"
+          "var k=e.key.toLowerCase(),l=(e.shiftKey&&m['S-'+k])||m[k];if(!l)return;"
           "var b=[].slice.call(document.querySelectorAll('button')).filter(function(x){return x.innerText.trim()===l})[0];"
           "if(b){b.click();e.preventDefault();e.stopImmediatePropagation()}},true)}")
     return f'<img src="x" style="display:none" onerror="{js}">'
 
 
 def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator: Optional[str] = None,
-               official: str = "every9d_v7", include_old: bool = False) -> None:
+               official: str = "every9d_v7", include_old: bool = False,
+               prelabels: Optional[str] = None) -> None:
     """Serve the page until interrupted."""
     import cv2
     import viser.transforms as vtf
@@ -333,12 +362,12 @@ def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator:
     samples = _sample_ids(root)
     if not samples:
         raise SystemExit(f"no samples under {root}/samples: run annotate-obb-sample first")
-    app = Annotator(root, samples, pack_root, annotator, include_old=include_old)
+    app = Annotator(root, samples, pack_root, annotator, include_old=include_old, prelabels=prelabels)
     server = make_viser_server(**({"port": port} if port else {}))
 
     lock = threading.RLock()
     dirty = threading.Event()
-    state = {"page": 0, "official": None, "images": [], "gizmo": None, "faces": []}
+    state = {"page": 0, "official": None, "images": [], "faces": []}
     official_table = {}
 
     def tforms():
@@ -377,7 +406,8 @@ def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator:
         server.gui.add_markdown(
             "Keys: **1** front, **Q/A** tilt ±1° about it, **Z** swap XY; "
             "**2** top, **W/S**, **X** swap ZX; **3** right, **E/D**, **C** swap YZ; "
-            "**4 5 6** flip X Y Z. The camera moves on the arrows.")
+            "**4 5 6** flip X Y Z; **R/F** top, **T/G** back, **Y/H** right face out / in "
+            "by 1 % of the largest extent, **Shift** for bottom / front / left. The camera moves on the arrows.")
         ops = label_ops()
         def relabel(ev):
             with lock:
@@ -390,6 +420,12 @@ def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator:
                 app.box.snapshot()
                 app.box.rotate("XYZ".index(axis), float(degrees))
                 sync()
+        def resize(ev):
+            face, percent = ev.target.value.split()
+            with lock:
+                app.box.snapshot()
+                app.box.resize(*FACES[face], float(percent.rstrip("%")))
+                sync()
         def view(ev):
             clients = [ev.client] if ev.client is not None else server.get_clients().values()
             for client in clients:
@@ -398,7 +434,10 @@ def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator:
         for axis, view_name in (("Z", "front"), ("Y", "top"), ("X", "right")):
             server.gui.add_button_group(f"Turn {axis} ({view_name})",
                                         [f"{axis} +1", f"{axis} -1"]).on_click(rotate)
-        server.gui.add_button_group("Swap", ["Swap XY", "Swap ZX", "Swap YZ"]).on_click(relabel)
+        for face in FACES:
+            server.gui.add_button_group(f"Size {face.lower()}",
+                                        [f"{face} +1%", f"{face} -1%"]).on_click(resize)
+        server.gui.add_button_group("Swap",["Swap XY", "Swap ZX", "Swap YZ"]).on_click(relabel)
         server.gui.add_button_group("Flip", ["Flip X", "Flip Y", "Flip Z"]).on_click(relabel)
         server.gui.add_html(key_script())
     with server.gui.add_folder("Compare with Every9D"):
@@ -429,9 +468,6 @@ def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator:
         with lock:
             box = app.box
             wxyz = faces_and_wire()
-            if state["gizmo"] is not None and state["gizmo"] is not skip_handle:
-                state["gizmo"].position = box.center
-                state["gizmo"].wxyz = wxyz
             for handle, (_, _, pos) in zip(state["faces"], box.faces()):
                 if handle is not skip_handle:
                     handle.position = pos
@@ -444,22 +480,8 @@ def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator:
         box = app.box
         size = float(box.extents.max())
         wxyz = vtf.SO3.from_matrix(box.display_R().T).wxyz
-        for h in state["faces"] + ([state["gizmo"]] if state["gizmo"] else []):
+        for h in state["faces"]:
             h.remove()
-        gizmo = server.scene.add_transform_controls(
-            "/gizmo", scale=size * 0.5, disable_sliders=True, position=box.center, wxyz=wxyz)
-        state["gizmo"] = gizmo
-
-        @gizmo.on_drag_start
-        def _(_ev):
-            app.box.snapshot()
-
-        @gizmo.on_update
-        def _(_ev):
-            with lock:
-                app.box.set_pose(vtf.SO3(np.asarray(gizmo.wxyz)).as_matrix().T, gizmo.position)
-                sync(skip_handle=gizmo)
-
         faces = []
         for axis, sign, pos in box.faces():
             active = tuple(i == axis for i in range(3))
@@ -540,6 +562,10 @@ def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator:
             rules = "  \n".join(t for t, _, _ in axis_rules_lines(cfg, seq.split("/")[0]))
             saved = app.saved()
             status = "no annotation yet" if not saved else f"saved: {saved.get('status')}"
+            if app.start != "pca":
+                dec = (app.pre or {}).get("decision", {})
+                status += (f"  \nStart box: **{app.start}** ({dec.get('confidence', '?')} confidence) — "
+                           f"check every axis and face.  \n_{dec.get('note', '')}_")
             md_object.content = (f"**{seq}**  \nItem {app.index + 1} of {len(app.items)} — {status}.  \n"
                                  f"Red = X right, green = Y top, blue = Z back: wrong ones are "
                                  f"fixed with the keys below (view, flip, swap, ±1° tilt).\n\n{rules}")
