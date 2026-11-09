@@ -116,7 +116,7 @@ import torch.nn.functional as F
 
 from o3b.model.model import OD3D_Model, register_model
 from o3b.model.shapemlp.model import _mlp
-from o3b.model.xattnpool.model import _Layer, rope3d
+from o3b.model.xattnpool.model import RopePos, _Layer, rope3d
 
 logger = logging.getLogger(__name__)
 
@@ -369,7 +369,7 @@ class ShapeHier(OD3D_Model):
                 t = t + self.pose_embed[l - 1](raw.detach())[:, None]
                 q_pos = self._rp(raw[:, None, :3]) / u
             kv = self.pose_kv[l](level_h[l])
-            kv_pos = self._rp(level_pts[l]) / u
+            kv_pos, q_pos = RopePos(self._rp(level_pts[l]) / u), RopePos(q_pos)
             for layer in self.pose_blocks[l]:
                 t = layer(t, q_pos, kv, kv_pos, None)
             d = self.pose_out[l](self.pose_norm(t)[:, 0])
@@ -388,7 +388,7 @@ class ShapeHier(OD3D_Model):
             kv_pos.append(self._rp(level_pts[l]) / self.rope_units[l])
         kv, kv_pos = torch.cat(kv, dim=1), torch.cat(kv_pos, dim=1)
         t = self.pp_token[None].expand(B, 1, -1) + self.pp_glob(feat)[:, None]
-        q_pos = kv_pos.new_zeros(B, 1, 3)
+        q_pos, kv_pos = RopePos(kv_pos.new_zeros(B, 1, 3)), RopePos(kv_pos)
         for layer in self.pp_blocks:
             t = layer(t, q_pos, kv, kv_pos, None)
         raw = self.pp_out(self.pp_norm(t)[:, 0])
@@ -413,9 +413,10 @@ class ShapeHier(OD3D_Model):
             tok, tok_coord, tok_mask = stages[-1]                 # coarsest stage
             u = self.rope_units[0]
             q = self.slot[None] + self.embed_glob(feat)[:, None]
-            q_pos = q.new_zeros(B, self.init_count, 3)
+            q_pos = RopePos(q.new_zeros(B, self.init_count, 3))
+            tok_pos = RopePos(tok_coord.float() / u)
             for layer in self.init_blocks:
-                q = layer(q, q_pos, tok.float(), tok_coord.float() / u, tok_mask)
+                q = layer(q, q_pos, tok.float(), tok_pos, tok_mask)
             pts = self.init_pt(self.init_norm(q))                 # L0 points, one per query
             q = q + self.embed_pt(pts)
         else:
@@ -428,6 +429,8 @@ class ShapeHier(OD3D_Model):
             tok, tok_coord = tok.float(), tok_coord.float()
             u = self.rope_units[l]
             q_pos, tok_pos = self._rp(pts) / u, tok_coord / u
+            if l not in self.knn_levels:                          # one cos / sin table per level
+                q_pos, tok_pos = RopePos(q_pos), RopePos(tok_pos)
             for layer in self.levels[l]:
                 if isinstance(layer, _LocalLayer):
                     q = layer(q, q_pos, pts, tok, tok_pos, tok_coord, tok_mask)

@@ -136,7 +136,7 @@ import torch.nn as nn
 
 from o3b.model.model import OD3D_Model, register_model
 from o3b.model.shapemlp.model import _mlp
-from o3b.model.xattnpool.model import _Layer
+from o3b.model.xattnpool.model import RopePos, _Layer
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +350,7 @@ class ShapeXAttn(OD3D_Model):
             # cloud's median), like XAttnPool's pose query
             q = torch.cat([self.embed_pose(feat)[:, None], q], dim=1)
             q_pos = torch.cat([q_pos.new_zeros(B, 1, 3), q_pos], dim=1)
-        tok_pos = tok_coord / self.rope_unit
+        tok_pos = RopePos(tok_coord / self.rope_unit)            # the keys sit still over the layers
         n_main, self_mask = q.shape[1], None
         mask_pts = getattr(frames_gt, "mask_pts3d_cam", None) if self.mask_tokens else None
         qry_pts = getattr(frames_gt, "query_pts3d_cam", None) if self.mask_tokens else None
@@ -437,7 +437,7 @@ class ShapeXAttn(OD3D_Model):
         obj_tform = frames_pred.obj_tform4x4_obj_nocs_0c
 
         glob = self._glob(feat)
-        tok_pos = tok_coord / self.rope_unit
+        tok_pos = RopePos(tok_coord / self.rope_unit)            # the keys sit still over the layers
         p0 = 1 if self.pose_query else 0
         aux_pts, aux_extra, aux_pose = [], [], []
         mid_pts, mid_extra = [], []

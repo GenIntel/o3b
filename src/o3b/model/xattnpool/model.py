@@ -78,24 +78,58 @@ from o3b.model.model import OD3D_Model, register_model
 logger = logging.getLogger(__name__)
 
 
-def rope3d(x: torch.Tensor, pos: torch.Tensor, base: float) -> torch.Tensor:
-    """PointROPE in torch: x (B, H, N, D), pos (B, N, 3) float.
+def _rope_inv(Q: int, base: float, device) -> torch.Tensor:
+    return base ** (-torch.arange(Q, device=device, dtype=torch.float32) / Q)  # (Q,)
+
+
+def _rope_cos_sin(pos: torch.Tensor, Q: int, base: float):
+    """cos / sin (B, 1, N, 3, Q) float32 of pos (B, N, 3) at PointROPE's frequencies."""
+    f = pos.float()[..., None] * _rope_inv(Q, base, pos.device)                 # (B, N, 3, Q)
+    return f.cos()[:, None], f.sin()[:, None]
+
+
+class RopePos:
+    """Positions (B, N, 3) whose PointROPE cos / sin tables are computed once and reused.
+
+    Pass one in place of a position tensor wherever the same positions feed several
+    attention calls (the layers of a level, queries and keys alike): ``rope3d``
+    then reads the cached tables instead of recomputing them per call, which at
+    batch 1 is most of an attention call's kernels (H08-T03 profile). Exactly the
+    values ``rope3d`` computes from the tensor itself.
+    """
+    __slots__ = ("pos", "_tab")
+
+    def __init__(self, pos: torch.Tensor):
+        self.pos, self._tab = pos, {}
+
+    def tables(self, Q: int, base: float, dtype):
+        key = (Q, float(base), dtype)
+        t = self._tab.get(key)
+        if t is None:
+            f32 = self._tab.get((Q, float(base), torch.float32))
+            if f32 is None:
+                f32 = self._tab[(Q, float(base), torch.float32)] = _rope_cos_sin(self.pos, Q, base)
+            t = self._tab[key] = f32 if dtype == torch.float32 else (f32[0].to(dtype), f32[1].to(dtype))
+        return t
+
+
+def rope3d(x: torch.Tensor, pos, base: float) -> torch.Tensor:
+    """PointROPE in torch: x (B, H, N, D), pos (B, N, 3) float or a ``RopePos``.
 
     The head dim is split into x/y/z thirds; in each, the first and second half
     are rotated as (u, v) pairs by pos[axis] * base^(-i / (D/6)) — the layout of
-    o3b.model.litept.pointrope's kernel.
+    o3b.model.litept.pointrope's kernel. All three axes in one set of ops.
     """
     D = x.shape[-1]
     Q = D // 6
-    inv = base ** (-torch.arange(Q, device=x.device, dtype=torch.float32) / Q)  # (Q,)
-    out = []
-    for a in range(3):
-        seg = x[..., a * 2 * Q:(a + 1) * 2 * Q]
-        u, v = seg[..., :Q], seg[..., Q:]
-        f = (pos[..., a, None].float() * inv)[:, None]                         # (B, 1, N, Q)
-        cos, sin = f.cos().to(x.dtype), f.sin().to(x.dtype)
-        out += [u * cos - v * sin, v * cos + u * sin]
-    return torch.cat(out, dim=-1)
+    if isinstance(pos, torch.Tensor):
+        cos, sin = _rope_cos_sin(pos, Q, base)
+        cos, sin = cos.to(x.dtype), sin.to(x.dtype)
+    else:                                                                       # a RopePos
+        cos, sin = pos.tables(Q, base, x.dtype)
+    xs = x.reshape(*x.shape[:-1], 3, 2, Q)
+    u, v = xs[..., 0, :], xs[..., 1, :]                                        # (B, H, N, 3, Q)
+    return torch.stack([u * cos - v * sin, v * cos + u * sin], dim=-2).reshape(x.shape)
 
 
 class _Attn(nn.Module):
@@ -275,15 +309,16 @@ class XAttnPool(OD3D_Model):
                 pos_s = self.observed_sphere(frames_pred.pts3d) / self.rope_unit
             q = torch.cat([q, q_s], dim=1)
             q_pos = torch.cat([q_pos, pos_s], dim=1)
-        tok_pos = tok_coord / self.rope_unit
+        tok_pos = RopePos(tok_coord / self.rope_unit)
         self_mask = None
         if self.surface_queries and not self.surface_pose_attn:
             # pose and surface queries do not see each other in self-attention;
             # each group still attends within itself
             g = torch.arange(q.shape[1], device=q.device) >= self.num_queries
             self_mask = g[:, None] == g[None, :]
+        q_rp = RopePos(q_pos)                                        # fixed over the layers
         for layer in self.layers:
-            q = layer(q, q_pos, tok, tok_pos, tok_mask, self_mask)
+            q = layer(q, q_rp, tok, tok_pos, tok_mask, self_mask)
         q = self.norm_out(q)
         if self.query_pool == "concat":
             pooled = q[:, :self.num_queries].flatten(1)              # (B, num_queries * dim)
