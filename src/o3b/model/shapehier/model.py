@@ -80,6 +80,13 @@ query gives that slot's point. The refined query plus its embedded point is the 
 token. Each point is then read from the observed cloud by its own query, rather than
 all of them from one pooled vector.
 
+``init_pos_layers: k`` (H08-T03, needs ``init_queries``) adds a second, posed stage to that
+start: after the ``init_layers`` unposed layers have given each query its point, the query
+plus its embedded point runs ``k`` more layers (self-attention, cross-attention to the
+coarsest stage, FFN) with PointROPE at that point, in L0's unit, so it probes the stage
+around where it sits. A zero-initialised head then moves each point by an offset, and the
+embedded offset is added to the token, as at an upfold. Those points and tokens are L0's.
+
 ``fold`` may be a list with one entry per upfold (H08-T03), e.g. ``init_count`` 128
 and ``fold: [4, 1, 1, 4]`` for 128 / 512 / 512 / 512 / 2048 tokens. A fold of 1 gives
 each token one child at a bounded offset (seed 0): the level refines the points
@@ -209,6 +216,7 @@ class ShapeHier(OD3D_Model):
         pose_pool_detach: bool = False,
         init_queries: bool = False,
         init_layers: int = 2,
+        init_pos_layers: int = 0,
         out_fold: int = 1,
         out_fold_grid_scale: float = 0.05,
         dropout: float = 0.0,
@@ -249,7 +257,24 @@ class ShapeHier(OD3D_Model):
                                               for _ in range(init_layers)])
             self.init_norm = nn.LayerNorm(dims[0])
             self.init_pt = nn.Linear(dims[0], 3)
+            self.init_pos_layers = int(init_pos_layers)
+            if self.init_pos_layers < 0:
+                raise ValueError("ShapeHier: init_pos_layers must be >= 0")
+            if self.init_pos_layers:
+                # second init stage: the queries at their points (RoPE), then a point offset
+                self.init_pos_blocks = nn.ModuleList([
+                    _Layer(dims[0], num_heads[0], mlp_ratio, rope_freq, dropout, self_attn=True)
+                    for _ in range(self.init_pos_layers)])
+                self.init_pos_norm = nn.LayerNorm(dims[0])
+                self.init_pos_off = nn.Linear(dims[0], 3)
+                self.init_pos_embed_off = nn.Linear(3, dims[0])
+                with torch.no_grad():                       # starts at the unposed stage's points
+                    self.init_pos_off.weight.zero_()
+                    self.init_pos_off.bias.zero_()
         else:
+            if init_pos_layers:
+                raise ValueError("ShapeHier: init_pos_layers needs init_queries: true")
+            self.init_pos_layers = 0
             self.init = _mlp([in_dim, init_hidden_dim, init_hidden_dim, init_count * 3])
         self.slot = nn.Parameter(torch.randn(init_count, dims[0], generator=g) * 0.02)
         self.embed_glob = nn.Linear(in_dim, dims[0])
@@ -448,6 +473,13 @@ class ShapeHier(OD3D_Model):
                 q = layer(q, q_pos, tok.float(), tok_pos, tok_mask)
             pts = self.init_pt(self.init_norm(q))                 # L0 points, one per query
             q = q + self.embed_pt(pts)
+            if self.init_pos_layers:                              # probe the stage at those points
+                q_pos = RopePos(self._rp(pts) / u)
+                for layer in self.init_pos_blocks:
+                    q = layer(q, q_pos, tok.float(), tok_pos, tok_mask)
+                off = self.init_pos_off(self.init_pos_norm(q))
+                pts = pts + off
+                q = q + self.init_pos_embed_off(off)
         else:
             pts = self.init(feat).reshape(B, self.init_count, 3)  # L0 points, cloud frame
             q = self.slot[None] + self.embed_glob(feat)[:, None] + self.embed_pt(pts)
