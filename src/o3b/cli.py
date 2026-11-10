@@ -484,6 +484,13 @@ def _build_dataset_parser(sub):
     p_obb.add_argument("--prelabels", action="store_true",
                        help="Start each unsaved box from prelabels_claude/ (a model's labels, "
                             "blind to tform_obj) instead of the principal axes; saves record it")
+    p_obb.add_argument("--samples", default=None, metavar="NAME[,NAME]",
+                       help="Queue only these sample lists (default: every list whose header "
+                            "does not say own_queue: true)")
+    p_obb.add_argument("--repeats", type=int, default=10, metavar="N",
+                       help="Objects per sample list redone at the end (default: %(default)s)")
+    p_obb.add_argument("--share", action="store_true",
+                       help="Print a public viser share URL for the page")
     p_obb.add_argument("--official", default="every9d_v7", metavar="TFORM_OBJ_TYPE",
                        help="tform_obj type to compare with (default: %(default)s)")
 
@@ -495,6 +502,24 @@ def _build_dataset_parser(sub):
     p_obb_cmp.add_argument("--root", default=OBB_ROOT, metavar="DIR")
     p_obb_cmp.add_argument("--pack", default=None, metavar="DIR")
     p_obb_cmp.add_argument("--official", default="every9d_v7", metavar="TFORM_OBJ_TYPE")
+    p_obb_cmp.add_argument("--mesh-type", default=None, metavar="MESH_TYPE",
+                           help="Take the official box from <path_preprocess>/mesh/<MESH_TYPE> "
+                                "instead of the pack's mesh (e.g. pcd99_alpha500); objects without "
+                                "that mesh are scored on rotation only, and the rows go to "
+                                "quantitative/h09_compare_<MESH_TYPE>.csv")
+
+    p_mesh = ds_sub.add_parser(
+        "build-mesh",
+        help="Build a pcd<q>_alpha<n> mesh type (od3d's alpha<n> on the point cloud trimmed to "
+             "its central q %% per canonical axis) for the objects of named subsets",
+    )
+    _add_config(p_mesh)
+    p_mesh.add_argument("--mesh-type", required=True, metavar="MESH_TYPE",
+                        help="e.g. pcd99_alpha500")
+    p_mesh.add_argument("-s", "--subset", required=True, metavar="NAME[,NAME]",
+                        help="Subset(s) under <path_preprocess>/subset/ naming the objects")
+    p_mesh.add_argument("--override", action="store_true", help="Rebuild existing meshes")
+    p_mesh.add_argument("--workers", type=int, default=4, metavar="N")
 
     p_obb_old = ds_sub.add_parser(
         "annotate-obb-import-old",
@@ -1007,7 +1032,9 @@ def _run_dataset(args, parser=None, argv=None):
         from o3b.dataset.verify_labels.viewer import run_viewer
         run_viewer(cfg, args.root, pack_root=args.pack, port=args.port, annotator=args.annotator,
                    official=args.official, include_old=args.include_old,
-                   prelabels="prelabels_claude" if args.prelabels else None)
+                   prelabels="prelabels_claude" if args.prelabels else None,
+                   only=args.samples.split(",") if args.samples else None,
+                   repeats=args.repeats, share=args.share)
         return
     elif args.dataset_command == "annotate-obb-compare":
         from o3b.dataset import tform_obj_store
@@ -1016,9 +1043,23 @@ def _run_dataset(args, parser=None, argv=None):
         if table is None:
             print(f"no tform_obj/{args.official}.db under {cfg.path_preprocess}", file=sys.stderr)
             sys.exit(1)
-        _, markdown = run_compare(args.root, table, args.pack,
-                                  db_path=tform_obj_store.db_path(cfg.path_preprocess, args.official))
+        mesh_root = out_csv = None
+        if args.mesh_type:
+            mesh_root = Path(cfg.path_preprocess) / "mesh" / args.mesh_type / "meta_mask" / "meta"
+            out_csv = Path(args.root) / "quantitative" / f"h09_compare_{args.mesh_type}.csv"
+        _, markdown = run_compare(args.root, table, args.pack, out_csv=out_csv,
+                                  db_path=tform_obj_store.db_path(cfg.path_preprocess, args.official),
+                                  mesh_root=mesh_root)
         print(markdown)
+        return
+    elif args.dataset_command == "build-mesh":
+        from o3b.dataset import subset_store
+        from o3b.dataset.uco3d.mesh_pcd import run_build
+        ids = {i for name in args.subset.split(",") for i in subset_store.load(cfg.path_preprocess, name).ids}
+        # A subset entry may name one frame of a sequence; the mesh is per sequence.
+        ids = {"/".join(i.split("/")[:2]) for i in ids}
+        failed = run_build(cfg, args.mesh_type, ids, override=args.override, workers=args.workers)
+        print(f"built {len(ids) - len(failed)} of {len(ids)}" + (f"; failed: {failed}" if failed else ""))
         return
     elif args.dataset_command == "annotate-obb-import-old":
         from o3b.dataset.verify_labels.import_old import run_import

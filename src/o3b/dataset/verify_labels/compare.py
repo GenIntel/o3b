@@ -69,10 +69,55 @@ def score(annotation: dict, official: dict, category: str) -> dict:
             calibrated = symmetry_calibrated_rot3x3(
                 torch.tensor(Ra.T, dtype=torch.float32)[None],
                 torch.tensor(Rb.T, dtype=torch.float32)[None], syms[None])[0].double().numpy()
-            # Sizes stay with their axes, as in cutoop's protocol (PoseTask).
-            out["iou_sym"] = bbox3d_iou_pair(
-                store.corners(store.G3 @ calibrated.T, ca, ea), corners_b)
+            # Sizes stay with their axes, as in cutoop's protocol (PoseTask). Any turn the
+            # symmetry allows is as valid as that one -- the box as drawn included -- so
+            # score the best overlap over all of them (_best_sym_iou), not only the turn
+            # closest in rotation, which for a non-round object free about an axis can
+            # land ~90 deg off with its extents swapped.
+            out["iou_sym"] = max(out["iou"], bbox3d_iou_pair(
+                store.corners(store.G3 @ calibrated.T, ca, ea), corners_b),
+                _best_sym_iou(Ra, Rb, ca, ea, corners_b, syms))
     return out
+
+
+def _axis_rot(axis: int, deg: float) -> np.ndarray:
+    a, b = (axis + 1) % 3, (axis + 2) % 3
+    c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+    Q = np.eye(3)
+    Q[a, a], Q[a, b], Q[b, a], Q[b, b] = c, -s, s, c
+    return Q
+
+
+def _best_sym_iou(Ra, Rb, ca, ea, corners_b, syms) -> float:
+    """Best IoU over every turn of the annotated box that its symmetry allows.
+
+    ``Ra`` / ``Rb`` map raw points to od3d's object axes, the ones ``syms`` is
+    written in. A half turn about one of the box's own axes maps the box onto
+    itself, so only continuous axes matter: one such axis is searched over
+    [0, 180) deg (a box repeats every half turn), 2 deg then 0.25 deg around the
+    best; full symmetry (all three continuous) puts the box on the reference's
+    axes with its extents in any of the six orders.
+    """
+    from itertools import permutations
+
+    from o3b.cv.metric.bbox3d import bbox3d_iou_pair
+
+    code = [int(round(float(c))) for c in syms]
+    free = [i for i, c in enumerate(code) if c < 0]
+    if not free:
+        return 0.0
+    if len(free) == 3:
+        return max(bbox3d_iou_pair(store.corners(store.G3 @ Rb, ca, np.asarray(ea)[list(p)]), corners_b)
+                   for p in permutations(range(3)))
+    axis = free[0]          # two continuous axes do not occur: two defined axes fix the third
+
+    def iou_at(deg):
+        return bbox3d_iou_pair(store.corners(store.G3 @ _axis_rot(axis, deg) @ Ra, ca, ea), corners_b)
+
+    coarse = {d: iou_at(d) for d in np.arange(0.0, 180.0, 2.0)}
+    best = max(coarse, key=coarse.get)
+    fine = {d: iou_at(d) for d in np.arange(best - 2.0, best + 2.0001, 0.25)}
+    return max(max(coarse.values()), max(fine.values()))
 
 
 def summarize(rows: list, seed: int = 0, n_boot: int = 2000) -> dict:
@@ -126,7 +171,23 @@ def _sample_ids(root) -> dict:
     return {p.stem: set(_parse(p.read_text())) for p in sorted((Path(root) / "samples").glob("*.yaml"))}
 
 
-def run_compare(root, tforms: dict, pack_root=None, out_csv=None, db_path=None, min_n: int = 0) -> tuple:
+def _sample_headers(root) -> dict:
+    """Sample list file stem -> its ``# key: value`` header lines, as strings."""
+    out = {}
+    for p in sorted((Path(root) / "samples").glob("*.yaml")):
+        head = {}
+        for line in p.read_text().splitlines():
+            if not line.startswith("#"):
+                break
+            key, sep, value = line[1:].partition(":")
+            if sep:
+                head[key.strip()] = value.strip()
+        out[p.stem] = head
+    return out
+
+
+def run_compare(root, tforms: dict, pack_root=None, out_csv=None, db_path=None, min_n: int = 0,
+                mesh_root=None) -> tuple:
     """Score every annotation on disk. Returns ``(cohorts, markdown)``.
 
     Cohorts: one per sample list (blind annotations plus the old labels it
@@ -135,18 +196,39 @@ def run_compare(root, tforms: dict, pack_root=None, out_csv=None, db_path=None, 
     themselves) and ``emil`` (old labels vs a second annotator).  An annotation
     edited after its official box was shown is scored at its last blind version;
     one with no blind version left is dropped and counted.
+
+    ``mesh_root`` (``<path_preprocess>/mesh/<mesh_type>/meta_mask/meta``) takes the
+    official box from another mesh type than the pack's; an object without that
+    mesh is scored on rotation only.
     """
     pack_root = Path(pack_root) if pack_root else default_dir()
     root = Path(root)
     samples = _sample_ids(root)
-    split_of = {i: name for name, ids in samples.items() for i in ids}
+    heads = _sample_headers(root)
+    flag = lambda name, key: heads.get(name, {}).get(key, "").lower() == "true"
+    # ``redo`` lists only re-open objects of other lists; ``exclude`` lists take
+    # their objects out of every cohort (cohort "excluded", kept visible).
+    split_of = {i: name for name, ids in samples.items()
+                if not flag(name, "redo") and not flag(name, "exclude") for i in ids}
+    split_of.update({i: "excluded" for name, ids in samples.items() if flag(name, "exclude") for i in ids})
+    after_review = 0
     rows, cannot, unblinded = [], {}, 0
 
+    verts_cache = {}
+
     def verts_of(seq):
-        try:
-            return load_object(pack_root, seq)["verts"]
-        except FileNotFoundError:
-            return None
+        if seq not in verts_cache:
+            try:
+                if mesh_root is not None:
+                    import trimesh
+                    path = Path(mesh_root) / seq / "mesh.ply"
+                    verts_cache[seq] = (np.asarray(trimesh.load(path, process=False).vertices)
+                                        if path.exists() else None)
+                else:
+                    verts_cache[seq] = load_object(pack_root, seq)["verts"]
+            except FileNotFoundError:
+                verts_cache[seq] = None
+        return verts_cache[seq]
 
     def add(cohort, version, reference, seq):
         rows.append({"cohort": cohort, "sequence_name": seq,
@@ -155,7 +237,13 @@ def run_compare(root, tforms: dict, pack_root=None, out_csv=None, db_path=None, 
     for record in store.iter_all(root, store.ANNOTATIONS):
         seq = record["sequence_name"]
         cohort = split_of.get(seq, "unsampled")
-        version = store.blind_version(record)
+        # A relabel asked for after the official box was reviewed is scored as
+        # saved: it is not blind, and the header counts how many there are.
+        if record.get("after_review"):
+            version = record
+            after_review += 1
+        else:
+            version = store.blind_version(record)
         if version is None:
             unblinded += 1
             continue
@@ -208,7 +296,8 @@ def run_compare(root, tforms: dict, pack_root=None, out_csv=None, db_path=None, 
                    f"{hashlib.sha256(Path(db_path).read_bytes()).hexdigest()[:12]}, "
                    f"mtime {int(Path(db_path).stat().st_mtime)}.")
     header = (f"**Compared {len(rows)} annotations.**{db_note}"
-              + (f" {unblinded} dropped: no blind version." if unblinded else ""))
+              + (f" {unblinded} dropped: no blind version." if unblinded else "")
+              + (f" {after_review} relabelled after reviewing the official box." if after_review else ""))
     out_csv = Path(out_csv) if out_csv else root / "quantitative" / "h09_compare.csv"
     if rows:
         out_csv.parent.mkdir(parents=True, exist_ok=True)

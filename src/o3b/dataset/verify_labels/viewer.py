@@ -202,8 +202,11 @@ class Annotator:
 
     def __init__(self, root, samples: dict, pack_root=None, annotator: Optional[str] = None,
                  seed: int = SEED, repeats: int = REPEAT_COUNT, include_old: bool = False,
-                 prelabels: Optional[str] = None):
+                 prelabels: Optional[str] = None, redo: Optional[set] = None):
         self.root = Path(root)
+        # Objects to label again although they have a label (new or old): queued like
+        # the rest, done only once saved with ``after_review``, which compare then scores.
+        self.redo = set(redo or ())
         # Start boxes from store.PRELABELS (a model's labels, blind to the official
         # ones) instead of the principal axes; saves record it, compare splits it out.
         self.prelabels = prelabels
@@ -214,7 +217,7 @@ class Annotator:
         # With include_old they are queued too, after the rest, starting from the
         # blind box like any other; the new annotation then replaces the old label.
         self.all_samples = samples
-        self.samples = {name: set(ids) - old for name, ids in samples.items()}
+        self.samples = {name: set(ids) - (old - self.redo) for name, ids in samples.items()}
         self.pack_root = Path(pack_root) if pack_root else default_dir()
         self.annotator = annotator or getpass.getuser()
         self.main, self.repeat = queue_of(self.samples, seed, repeats)
@@ -236,6 +239,8 @@ class Annotator:
         return [(s, store.ANNOTATIONS) for s in self.main] + [(s, store.REPEATS) for s in self.repeat]
 
     def is_done(self, seq: str, kind: str) -> bool:
+        if kind == store.ANNOTATIONS and seq in self.redo:
+            return bool((store.load(self.root, seq, kind) or {}).get("after_review"))
         return store.path_of(self.root, seq, kind).exists()
 
     def progress(self) -> dict:
@@ -261,9 +266,15 @@ class Annotator:
         saved = store.load(self.root, self.seq, self.kind)
         pre = store.load(self.root, self.seq, self.prelabels) if self.prelabels else None
         self.pre = pre
-        self.start = (saved or {}).get("start") or (self.prelabels if pre else "pca")
+        # A relabel of an object with only an old label continues from that label.
+        old = (store.load(self.root, self.seq, store.OLD)
+               if self.kind == store.ANNOTATIONS and self.seq in self.redo and not saved else None)
+        old = old if old and old.get("center_raw") is not None else None
+        self.start = (saved or {}).get("start") or (store.OLD if old else self.prelabels if pre else "pca")
         if saved and saved.get("status") == "done":
             self.box = BoxState(saved["R_obj_raw"], saved["center_raw"], saved["extents_raw"])
+        elif old:
+            self.box = BoxState(old["R_obj_raw"], old["center_raw"], old["extents_raw"])
         elif pre:
             self.box = BoxState(pre["R_obj_raw"], pre["center_raw"], pre["extents_raw"])
         else:
@@ -282,6 +293,7 @@ class Annotator:
         if status == "done" and not self.box.is_proper:
             raise ValueError("the axes are mirrored: pair this up with another swap or flip")
         record = {**self._common(), "status": status, "reason": reason,
+                  **({"after_review": True} if self.kind == store.ANNOTATIONS and self.seq in self.redo else {}),
                   **(self.box.record() if status == "done" else
                      {"R_obj_raw": None, "center_raw": None, "extents_raw": None})}
         return store.save(self.root, record, self.kind)
@@ -347,23 +359,56 @@ def key_script() -> str:
     return f'<img src="x" style="display:none" onerror="{js}">'
 
 
+def queued_samples(root, only: Optional[list] = None) -> dict:
+    """The sample lists one annotator's queue is drawn over: ``only``, or every
+    list whose header does not say ``own_queue: true``."""
+    from o3b.dataset.verify_labels.compare import _sample_headers, _sample_ids
+
+    samples = _sample_ids(root)
+    if not samples:
+        raise SystemExit(f"no samples under {root}/samples: run annotate-obb-sample first")
+    if only:
+        unknown = sorted(set(only) - set(samples))
+        if unknown:
+            raise SystemExit(f"no sample list {unknown} under {root}/samples (have {sorted(samples)})")
+        return {name: ids for name, ids in samples.items() if name in only}
+    own = {name for name, head in _sample_headers(root).items()
+           if head.get("own_queue", "").lower() == "true"}
+    return {name: ids for name, ids in samples.items() if name not in own}
+
+
 def run_viewer(cfg, root, pack_root=None, port: Optional[int] = None, annotator: Optional[str] = None,
                official: str = "every9d_v7", include_old: bool = False,
-               prelabels: Optional[str] = None) -> None:
-    """Serve the page until interrupted."""
+               prelabels: Optional[str] = None, only: Optional[list] = None,
+               repeats: int = REPEAT_COUNT, share: bool = False) -> None:
+    """Serve the page until interrupted.
+
+    ``only`` restricts the queue to those sample lists. Without it the queue is
+    every list except those whose header says ``own_queue: true`` -- lists added
+    later for a second annotator, which must not reshuffle the first queue (the
+    order and the repeats are drawn over all lists in it). A queued list whose
+    header says ``redo: true`` re-opens its objects although they are labelled;
+    their saves carry ``after_review`` (see compare). ``share`` asks viser for a
+    public URL to the page.
+    """
     import cv2
     import viser.transforms as vtf
 
     from o3b.data.viz import make_viser_server
     from o3b.dataset import tform_obj_store
     from o3b.dataset.axes_tform_obj import axis_rules_lines
-    from o3b.dataset.verify_labels.compare import _sample_ids, official_box, run_compare, score
+    from o3b.dataset.verify_labels.compare import official_box, run_compare, score
 
-    samples = _sample_ids(root)
-    if not samples:
-        raise SystemExit(f"no samples under {root}/samples: run annotate-obb-sample first")
-    app = Annotator(root, samples, pack_root, annotator, include_old=include_old, prelabels=prelabels)
+    samples = queued_samples(root, only)
+    from o3b.dataset.verify_labels.compare import _sample_headers
+    redo = {i for name, head in _sample_headers(root).items()
+            if name in samples and head.get("redo", "").lower() == "true" for i in samples[name]}
+    app = Annotator(root, samples, pack_root, annotator, repeats=repeats,
+                    include_old=include_old, prelabels=prelabels, redo=redo)
     server = make_viser_server(**({"port": port} if port else {}))
+    if share:
+        url = server.request_share_url()
+        print(f"share link: {url}" if url else "share link: viser could not open one")
 
     lock = threading.RLock()
     dirty = threading.Event()
