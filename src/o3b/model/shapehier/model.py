@@ -64,10 +64,13 @@ their own embeddings of that level's width plus the projected global feature, ru
 through the same layers as the surface tokens, change width at each upfold through
 their own linear map (no fold: K tokens at every level) and are read at the last
 level by ``mask_head`` (``mask_pred_ppf`` / ``mask_pred_xyz`` with ``mask_tgt_*``).
-They see only themselves (``mask_see_surface: false``, the only mode here): each layer
-runs on them as a separate set with an identity self-attention mask, so they never see
-the surface tokens or each other, and the surface tokens' computation is exactly that
-of a pass without them. At test time ``query_pts3d_cam`` / ``query_feat`` give
+Each layer runs on them as a separate set after it ran on the surface tokens, so the
+surface tokens never see them and their computation is exactly that of a pass without
+them; the masked tokens never see each other either. With ``mask_see_surface: false``
+they see only themselves (identity self-attention mask); with ``true`` their
+self-attention keys are that layer's input surface tokens (registers included) plus
+themselves, as ShapeXAttn's ``mask_see``, so the masked losses also train the surface
+tokens through those keys. At test time ``query_pts3d_cam`` / ``query_feat`` give
 ``query_pred_feat`` / ``query_pred_pts3d_cam`` the same way, as in ShapeXAttn.
 
 ``knn: k`` makes the cross-attention of the levels in ``knn_levels`` local: each
@@ -336,8 +339,6 @@ class ShapeHier(OD3D_Model):
         if mask_tokens:
             if not point_feat_dim:
                 raise ValueError("ShapeHier: mask_tokens needs point_feat_dim")
-            if mask_see_surface:
-                raise ValueError("ShapeHier: mask_tokens supports mask_see_surface: false only")
             if not 0 <= self.mask_start_level < L:
                 raise ValueError(f"ShapeHier: mask_start_level must lie in 0..{L - 1}")
             if self.knn_levels & set(range(self.mask_start_level, L)):
@@ -556,14 +557,17 @@ class ShapeHier(OD3D_Model):
             tok_pos = tok_coord / u
             if l not in self.knn_levels:                          # one cos / sin table per level
                 q_pos, tok_pos = RopePos(q_pos), RopePos(tok_pos)
+            surf_in = []                                          # each layer's input, for mask_see
             for layer in self.levels[l]:
+                if mset is not None and self.mask_see_surface:
+                    surf_in.append((q, q_pos))
                 if isinstance(layer, _LocalLayer):
                     q = layer(q, q_pos, pts, tok, tok_pos, tok_coord, tok_mask)
                 else:
                     q = layer(q, q_pos, tok, tok_pos, tok_mask)
             q = q[:, :n_surf]                                     # drop the registers
             if mset is not None and l >= self.mask_start_level:
-                qm = self._mask_level(l, mset, qm, feat, tok, tok_pos, tok_mask, B)
+                qm = self._mask_level(l, mset, qm, feat, tok, tok_pos, tok_mask, B, surf_in)
             h = self.norms[l](q)
             level_pts.append(pts)
             level_h.append(h)
@@ -655,8 +659,9 @@ class ShapeHier(OD3D_Model):
         return {"xyz": None if qry_pts is None else self._cam_to_cloud(frames_pred, qry_pts.float()),
                 "ppf": None if qry_feat is None else qry_feat.float(), "tgt": None}
 
-    def _mask_level(self, l, mset, qm, feat, tok, tok_pos, tok_mask, B):
-        """Level ``l``'s layers on the masked tokens alone, each seeing only itself."""
+    def _mask_level(self, l, mset, qm, feat, tok, tok_pos, tok_mask, B, surf_in=()):
+        """Level ``l``'s layers on the masked tokens: each sees itself and, with
+        ``mask_see_surface``, the surface tokens at that layer's input (``surf_in``)."""
         xyz, ppf = mset["xyz"], mset["ppf"]
         if l == self.mask_start_level:
             glob = self.mask_embed_glob(feat)[:, None]
@@ -674,10 +679,25 @@ class ShapeHier(OD3D_Model):
             pos.append(xyz / u)
         if ppf is not None:
             pos.append(ppf.new_zeros(B, ppf.shape[1], 3))
-        pos = RopePos(torch.cat(pos, dim=1))
-        eye = torch.eye(qm.shape[1], dtype=torch.bool, device=qm.device)
-        for layer in self.levels[l]:
-            qm = layer(qm, pos, tok, tok_pos, tok_mask, self_mask=eye)
+        pos = torch.cat(pos, dim=1)
+        K = qm.shape[1]
+        eye = torch.eye(K, dtype=torch.bool, device=qm.device)
+        if not self.mask_see_surface:
+            pos = RopePos(pos)
+            for layer in self.levels[l]:
+                qm = layer(qm, pos, tok, tok_pos, tok_mask, self_mask=eye)
+            return qm
+        n = surf_in[0][0].shape[1] if surf_in else 0
+        allow = torch.ones(K, n + K, dtype=torch.bool, device=qm.device)   # rows: masked tokens
+        allow[:, n:] = eye                                                 # the surface + itself
+        ctx_pos = RopePos(torch.cat([surf_in[0][1].pos, pos], dim=1)) if surf_in else None
+        pos = RopePos(pos)
+        for layer, (q_s, _) in zip(self.levels[l], surf_in):
+            h = layer.norm_sa(qm)
+            ctx = torch.cat([layer.norm_sa(q_s), h], dim=1)
+            qm = qm + layer.self_attn(h, pos, ctx, ctx_pos, pair_mask=allow)
+            qm = qm + layer.cross(layer.norm_q(qm), pos, layer.norm_kv(tok), tok_pos, tok_mask)
+            qm = qm + layer.ffn(layer.norm_ffn(qm))
         return qm
 
     def _mask_out(self, frames_pred, h, mset):
