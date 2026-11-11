@@ -47,6 +47,29 @@ features / NOCS) are handed to TrinityMethod as ``pts3d_shape_aux`` /
 (averaged over the list) then apply. Whether L3 (``*_coarse``) counts is the
 config's loss weight.
 
+``num_registers: r`` (H08-T03) gives every level ``r`` learned register tokens of the
+level's width (Darcet et al., "Vision Transformers Need Registers"; DINOv2-reg uses 4).
+They join the level's tokens in every layer (self-attention among all of them,
+cross-attention to the stage, FFN) at the RoPE origin, are new at every level (not
+carried through an upfold) and are dropped after the level's layers: no head, upfold
+or pose pooling reads them. Not with ``knn`` levels. The ``init_queries`` stage has none.
+
+``mask_tokens: true`` (H07 on ShapeHier, needs ``point_feat_dim``) adds ShapeXAttn's
+training-only masked tokens: the method puts GT surface points on ``frames_gt``
+(``mask_pts3d_cam``, ``mask_feat``); the first half know their XYZ (embedded, PointROPE
+at the point in each level's unit) and predict the features, the second half know the
+features (embedded, at the RoPE origin) and predict the XYZ (normalised cloud frame).
+They enter at level ``mask_start_level`` (0: all levels, ``L - 1``: the last only) with
+their own embeddings of that level's width plus the projected global feature, run
+through the same layers as the surface tokens, change width at each upfold through
+their own linear map (no fold: K tokens at every level) and are read at the last
+level by ``mask_head`` (``mask_pred_ppf`` / ``mask_pred_xyz`` with ``mask_tgt_*``).
+They see only themselves (``mask_see_surface: false``, the only mode here): each layer
+runs on them as a separate set with an identity self-attention mask, so they never see
+the surface tokens or each other, and the surface tokens' computation is exactly that
+of a pass without them. At test time ``query_pts3d_cam`` / ``query_feat`` give
+``query_pred_feat`` / ``query_pred_pts3d_cam`` the same way, as in ShapeXAttn.
+
 ``knn: k`` makes the cross-attention of the levels in ``knn_levels`` local: each
 query attends to its ``k`` nearest tokens of the stage, by distance from its
 (detached) point, instead of to all of them. ``rope_pos_grad: true`` keeps the
@@ -219,6 +242,10 @@ class ShapeHier(OD3D_Model):
         init_pos_layers: int = 0,
         out_fold: int = 1,
         out_fold_grid_scale: float = 0.05,
+        num_registers: int = 0,
+        mask_tokens: bool = False,
+        mask_see_surface: bool = False,
+        mask_start_level: int = 0,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -294,6 +321,35 @@ class ShapeHier(OD3D_Model):
                           for _ in range(lpl[l])]
             self.levels.append(nn.ModuleList(layers))
         self.norms = nn.ModuleList([nn.LayerNorm(d) for d in dims])
+
+        self.num_registers = int(num_registers)
+        if self.num_registers < 0:
+            raise ValueError("ShapeHier: num_registers must be >= 0")
+        if self.num_registers and self.knn_levels:
+            raise ValueError("ShapeHier: num_registers does not work with knn levels")
+        self.registers = (nn.ParameterList([nn.Parameter(torch.randn(self.num_registers, d, generator=g) * 0.02)
+                                            for d in dims]) if self.num_registers else None)
+
+        self.mask_tokens = mask_tokens
+        self.mask_see_surface = mask_see_surface
+        self.mask_start_level = int(mask_start_level)
+        if mask_tokens:
+            if not point_feat_dim:
+                raise ValueError("ShapeHier: mask_tokens needs point_feat_dim")
+            if mask_see_surface:
+                raise ValueError("ShapeHier: mask_tokens supports mask_see_surface: false only")
+            if not 0 <= self.mask_start_level < L:
+                raise ValueError(f"ShapeHier: mask_start_level must lie in 0..{L - 1}")
+            if self.knn_levels & set(range(self.mask_start_level, L)):
+                raise ValueError("ShapeHier: mask_tokens does not work with knn levels")
+            d0 = dims[self.mask_start_level]
+            self.mask_embed_pt = _mlp([3, max(d0 // 2, 16), d0])
+            self.mask_embed_feat = _mlp([point_feat_dim, max(d0 // 2, 16), d0])
+            self.mask_embed_glob = nn.Linear(in_dim, d0)
+            self.mask_type = nn.Parameter(torch.randn(2, d0, generator=g) * 0.02)  # 0: XYZ known, 1: features
+            self.mask_skips = nn.ModuleList([nn.Linear(dims[l], dims[l + 1])
+                                             for l in range(self.mask_start_level, L - 1)])
+            self.mask_head = _mlp([dims[-1], fold_hidden_dim, 3 + point_feat_dim])
 
         for f in sorted(set(folds)):
             side = int(round(f ** 0.5))
@@ -483,13 +539,21 @@ class ShapeHier(OD3D_Model):
         else:
             pts = self.init(feat).reshape(B, self.init_count, 3)  # L0 points, cloud frame
             q = self.slot[None] + self.embed_glob(feat)[:, None] + self.embed_pt(pts)
+        # H07 masked tokens (training) or test-time query tokens: (tokens, xyz or None, ...)
+        mset = self._mask_inputs(frames_gt, frames_pred) if self.mask_tokens else None
+        qm = None
         level_pts, level_h = [], []
         um_poses = []
         for l in range(self.L):
             tok, tok_coord, tok_mask = stages[self.L - 1 - l]
             tok, tok_coord = tok.float(), tok_coord.float()
             u = self.rope_units[l]
-            q_pos, tok_pos = self._rp(pts) / u, tok_coord / u
+            n_surf = q.shape[1]
+            q_pos = self._rp(pts) / u
+            if self.num_registers:                                # at the RoPE origin, new per level
+                q = torch.cat([q, self.registers[l][None].expand(B, -1, -1).to(q.dtype)], dim=1)
+                q_pos = torch.cat([q_pos, q_pos.new_zeros(B, self.num_registers, 3)], dim=1)
+            tok_pos = tok_coord / u
             if l not in self.knn_levels:                          # one cos / sin table per level
                 q_pos, tok_pos = RopePos(q_pos), RopePos(tok_pos)
             for layer in self.levels[l]:
@@ -497,6 +561,9 @@ class ShapeHier(OD3D_Model):
                     q = layer(q, q_pos, pts, tok, tok_pos, tok_coord, tok_mask)
                 else:
                     q = layer(q, q_pos, tok, tok_pos, tok_mask)
+            q = q[:, :n_surf]                                     # drop the registers
+            if mset is not None and l >= self.mask_start_level:
+                qm = self._mask_level(l, mset, qm, feat, tok, tok_pos, tok_mask, B)
             h = self.norms[l](q)
             level_pts.append(pts)
             level_h.append(h)
@@ -558,4 +625,73 @@ class ShapeHier(OD3D_Model):
         frames_pred.pts3d_shape_coarse = level_pts[coarse_l]
         frames_pred.pts3d_shape_fine = fine
         frames_pred.cam_tform4x4_pts3d_shape = frames_pred.obj_tform4x4_obj_nocs_0c
+        if qm is not None:
+            self._mask_out(frames_pred, self.norms[-1](qm), mset)
         return frames_gt, frames_pred
+
+    # ── H07 masked / query tokens ────────────────────────────────────────────
+
+    @staticmethod
+    def _cam_to_cloud(frames_pred, pts):
+        """Camera -> the normalised cloud frame the surface points live in."""
+        from o3b.cv.geometry.transform import inv_tform4x4, transf3d_broadcast
+        return transf3d_broadcast(pts3d=pts, transf4x4=inv_tform4x4(
+            frames_pred.obj_tform4x4_obj_nocs_0c.detach().float())[:, None])
+
+    def _mask_inputs(self, frames_gt, frames_pred):
+        """The XYZ-known points (cloud frame) and the feature-known features of this
+        pass: the H07 masked tokens in training (with their targets), else the
+        test-time queries; None when there are neither."""
+        pts = getattr(frames_gt, "mask_pts3d_cam", None)
+        if pts is not None:
+            pts = self._cam_to_cloud(frames_pred, pts.float())
+            ppf = frames_gt.mask_feat.float()
+            k1 = pts.shape[1] // 2
+            return {"xyz": pts[:, :k1], "ppf": ppf[:, k1:], "tgt": (ppf[:, :k1], pts[:, k1:])}
+        qry_pts = getattr(frames_gt, "query_pts3d_cam", None)
+        qry_feat = getattr(frames_gt, "query_feat", None)
+        if qry_pts is None and qry_feat is None:
+            return None
+        return {"xyz": None if qry_pts is None else self._cam_to_cloud(frames_pred, qry_pts.float()),
+                "ppf": None if qry_feat is None else qry_feat.float(), "tgt": None}
+
+    def _mask_level(self, l, mset, qm, feat, tok, tok_pos, tok_mask, B):
+        """Level ``l``'s layers on the masked tokens alone, each seeing only itself."""
+        xyz, ppf = mset["xyz"], mset["ppf"]
+        if l == self.mask_start_level:
+            glob = self.mask_embed_glob(feat)[:, None]
+            parts = []
+            if xyz is not None:
+                parts.append(self.mask_embed_pt(xyz) + self.mask_type[0])
+            if ppf is not None:
+                parts.append(self.mask_embed_feat(ppf) + self.mask_type[1])
+            qm = torch.cat(parts, dim=1) + glob
+        else:
+            qm = self.mask_skips[l - 1 - self.mask_start_level](self.norms[l - 1](qm))
+        u = self.rope_units[l]
+        pos = []
+        if xyz is not None:
+            pos.append(xyz / u)
+        if ppf is not None:
+            pos.append(ppf.new_zeros(B, ppf.shape[1], 3))
+        pos = RopePos(torch.cat(pos, dim=1))
+        eye = torch.eye(qm.shape[1], dtype=torch.bool, device=qm.device)
+        for layer in self.levels[l]:
+            qm = layer(qm, pos, tok, tok_pos, tok_mask, self_mask=eye)
+        return qm
+
+    def _mask_out(self, frames_pred, h, mset):
+        """Read the masked tokens: training targets or test-time query answers."""
+        out = self.mask_head(h)
+        k1 = 0 if mset["xyz"] is None else mset["xyz"].shape[1]
+        if mset["tgt"] is not None:
+            frames_pred.mask_pred_ppf, frames_pred.mask_tgt_ppf = out[:, :k1, 3:], mset["tgt"][0]
+            frames_pred.mask_pred_xyz, frames_pred.mask_tgt_xyz = out[:, k1:, :3], mset["tgt"][1]
+            return
+        if mset["xyz"] is not None:
+            frames_pred.query_pred_feat = out[:, :k1, 3:]
+        if mset["ppf"] is not None:
+            from o3b.cv.geometry.transform import transf3d_broadcast
+            frames_pred.query_pred_pts3d_cam = transf3d_broadcast(
+                pts3d=out[:, k1:, :3],
+                transf4x4=frames_pred.obj_tform4x4_obj_nocs_0c.float()[:, None])
