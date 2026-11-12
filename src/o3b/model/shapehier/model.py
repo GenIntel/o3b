@@ -118,6 +118,15 @@ and ``fold: [4, 1, 1, 4]`` for 128 / 512 / 512 / 512 / 2048 tokens. A fold of 1 
 each token one child at a bounded offset (seed 0): the level refines the points
 without adding any.
 
+``root_fold: k**3`` (H08-T03) replaces the init MLP by a root stage: one token (a learned
+slot plus the projected global feature) at the cloud origin runs ``root_layers`` layers
+over the coarsest stage (L0's layer type and unit; its self-attention is over itself),
+then a fold MLP reads it with each of ``k**3`` 3-D seeds (a ``k x k x k`` grid spaced
+``fold_grid_scale``) and gives every child an offset ``tanh(.) * root_offset_scale``
+from the origin plus a feature; the children's tokens are a linear map of the root, that
+feature and their embedded point. They are L0 (``init_count`` must equal ``root_fold``),
+e.g. ``root_fold: 125`` and ``fold: [4, 1, 1, 4]`` for 1 -> 125 / 500 / 500 / 500 / 2000.
+
 ``out_fold: k`` (H08-T03) replaces the output head by a fold MLP, as ShapeXAttn's: each
 last-level token, with one of ``k`` 2-D seeds (spaced ``out_fold_grid_scale``), gives a
 child's point offset (unbounded) plus its NOCS / features, so the last level's ``n``
@@ -245,6 +254,9 @@ class ShapeHier(OD3D_Model):
         init_pos_layers: int = 0,
         out_fold: int = 1,
         out_fold_grid_scale: float = 0.05,
+        root_fold: int = 0,
+        root_layers: int = 4,
+        root_offset_scale: float = 1.0,
         num_registers: int = 0,
         mask_tokens: bool = False,
         mask_see_surface: bool = False,
@@ -305,8 +317,32 @@ class ShapeHier(OD3D_Model):
             if init_pos_layers:
                 raise ValueError("ShapeHier: init_pos_layers needs init_queries: true")
             self.init_pos_layers = 0
+        self.root_fold = int(root_fold)
+        if self.root_fold:
+            side = int(round(self.root_fold ** (1 / 3)))
+            if self.root_fold < 2 or side ** 3 != self.root_fold:
+                raise ValueError(f"ShapeHier: root_fold must be a cube >= 8, got {root_fold}")
+            if init_queries:
+                raise ValueError("ShapeHier: root_fold and init_queries are two different L0 inits")
+            if init_count != self.root_fold:
+                raise ValueError(f"ShapeHier: root_fold gives L0 its tokens, so init_count must equal it "
+                                 f"({init_count} != {root_fold})")
+            if root_layers < 0:
+                raise ValueError("ShapeHier: root_layers must be >= 0")
+            self.root_blocks = nn.ModuleList([_Layer(dims[0], num_heads[0], mlp_ratio, rope_freq, dropout, self_attn=True)
+                                              for _ in range(root_layers)])
+            self.root_norm = nn.LayerNorm(dims[0])
+            lin = torch.linspace(-fold_grid_scale, fold_grid_scale, side)
+            grid = torch.stack(torch.meshgrid(lin, lin, lin, indexing="ij"), dim=-1).reshape(-1, 3)
+            self.register_buffer("root_grid", grid, persistent=False)
+            # root token + 3-D seed -> child offset (3) + child feature (dims[0])
+            self.root_fold_mlp = _mlp([dims[0] + 3, fold_hidden_dim, fold_hidden_dim, 3 + dims[0]])
+            self.root_skip = nn.Linear(dims[0], dims[0])
+            self.root_offset_scale = root_offset_scale
+        elif not init_queries:
             self.init = _mlp([in_dim, init_hidden_dim, init_hidden_dim, init_count * 3])
-        self.slot = nn.Parameter(torch.randn(init_count, dims[0], generator=g) * 0.02)
+        # the root stage has one token, so one slot
+        self.slot = nn.Parameter(torch.randn(1 if self.root_fold else init_count, dims[0], generator=g) * 0.02)
         self.embed_glob = nn.Linear(in_dim, dims[0])
         self.embed_pt = _mlp([3, dims[0] // 2, dims[0]])
 
@@ -537,6 +573,21 @@ class ShapeHier(OD3D_Model):
                 off = self.init_pos_off(self.init_pos_norm(q))
                 pts = pts + off
                 q = q + self.init_pos_embed_off(off)
+        elif self.root_fold:
+            # one root token at the cloud origin reads the coarsest stage, then folds into L0
+            tok, tok_coord, tok_mask = stages[-1]
+            u = self.rope_units[0]
+            r = self.slot[None] + self.embed_glob(feat)[:, None]   # (B, 1, d0)
+            r_pos = RopePos(r.new_zeros(B, 1, 3))
+            tok_pos = RopePos(tok_coord.float() / u)
+            for layer in self.root_blocks:
+                r = layer(r, r_pos, tok.float(), tok_pos, tok_mask)
+            h = self.root_norm(r)
+            n = self.root_fold
+            seed = self.root_grid[None].expand(B, n, 3)
+            out = self.root_fold_mlp(torch.cat([h.expand(B, n, h.shape[-1]), seed], dim=-1))
+            pts = torch.tanh(out[..., :3]) * self.root_offset_scale    # L0 points = root (origin) + offset
+            q = self.root_skip(h) + out[..., 3:] + self.embed_pt(pts)
         else:
             pts = self.init(feat).reshape(B, self.init_count, 3)  # L0 points, cloud frame
             q = self.slot[None] + self.embed_glob(feat)[:, None] + self.embed_pt(pts)
