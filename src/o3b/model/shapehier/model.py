@@ -229,6 +229,7 @@ class ShapeHier(OD3D_Model):
         rope_units=None,
         grid_size: float = 0.005,
         init_hidden_dim: int = 1024,
+        init_mlp_layers: int = 3,
         fold_hidden_dim: int = 256,
         fold_grid_scale: float = 1.0,
         offset_scale: float = 0.5,
@@ -340,7 +341,10 @@ class ShapeHier(OD3D_Model):
             self.root_skip = nn.Linear(dims[0], dims[0])
             self.root_offset_scale = root_offset_scale
         elif not init_queries:
-            self.init = _mlp([in_dim, init_hidden_dim, init_hidden_dim, init_count * 3])
+            # init_mlp_layers linear layers (ReLU between): 3 -> in, hidden, hidden, out; 1 -> one Linear
+            if init_mlp_layers < 1:
+                raise ValueError(f"ShapeHier: init_mlp_layers must be >= 1, got {init_mlp_layers}")
+            self.init = _mlp([in_dim] + [init_hidden_dim] * (init_mlp_layers - 1) + [init_count * 3])
         # the root stage has one token, so one slot
         self.slot = nn.Parameter(torch.randn(1 if self.root_fold else init_count, dims[0], generator=g) * 0.02)
         self.embed_glob = nn.Linear(in_dim, dims[0])
