@@ -1,0 +1,67 @@
+# HouseCat6D (Jung et al., CVPR 2024) — test scenes as frame-object items (H16-T02).
+#
+# Raw: test_scene.zip + obj_models.zip from https://sites.google.com/view/housecat6d/dataset
+# (the clusters cannot reach the TUM server: downloaded on the workstation, copied over).
+# Meta tree + inverted GT masks are written once by o3b.dataset.housecat6d.dataset.prepare:
+#
+#   python -c "from o3b.dataset.housecat6d.dataset import prepare; print(prepare('<raw>', '<preprocess>'))"
+#   o3b dataset index -d housecat6d -p slurm_lmbl40 --remote
+#
+# Object frame: HouseCat6D's own (NOCS convention), no UCO3D re-orientation; symmetry per category
+# in the loader (bottle / can / glass continuous about y).
+
+class_name: HouseCat6D
+
+path_datasets_raw: /data/lmbraid19/sommerl/datasets
+path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
+
+path_raw:        ${path_datasets_raw}/HouseCat6D
+path_preprocess: ${path_datasets_preprocess}/HouseCat6D_Preprocess
+
+item_type: frame_object
+
+mesh_type: "mc16"
+split: test
+
+# the labels are OpenCV cam <- obj; o3b is OpenGL
+cam_tform4x4_cam_raw:
+  - [ 1.00000,  0.00000,  0.00000,  0.00000]
+  - [ 0.00000, -1.00000,  0.00000,  0.00000]
+  - [ 0.00000,  0.00000, -1.00000,  0.00000]
+  - [ 0.00000,  0.00000,  0.00000,  1.00000]
+
+obj_gl_tform4x4_obj_raw:
+
+modalities:
+  - rgb
+  - depth
+  - depth_mask
+  - fo_mask
+  - fo_mask_amodal
+  - cam_intr4x4
+  - cam_tform4x4_obj
+  - cam_tform4x4_obj_ncds
+  - cam_bbox2d
+  - cam_bbox3d
+  - obj_bbox3d
+  - obj_syms
+  - obj_size3d
+  - category
+  - mesh
+
+img_size: 256
+
+transform:
+  class_name: CropCamBBox2D
+  H: ${img_size}
+  W: ${img_size}
+  bbox_overlap: 0.15
+  crop_type: "crop_large_side"
+
+categories:            # null = all 10
+filter_count_max:
+
+extra:
+  mask_type: gt          # mask/gt/<split>/<cat>/<seq>/<frame>.png, written by prepare()
+  map_to_uco3d: false
+  scale_to_m: 1.0
