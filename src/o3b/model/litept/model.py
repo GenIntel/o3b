@@ -152,6 +152,16 @@ class LitePT(OD3D_Model):
             "grid_size": self.grid_size, # 0.02 meters? = 2 cm?
             "batch": map_points2batch_id, 
         }
+        # Frames2FeatPCL's pts_count_min: drop the padding repeats, so each sample
+        # enters with its own number of points (the batch ids keep them apart).
+        pts3d_mask = getattr(frames_pred, "pts3d_mask", None)
+        if pts3d_mask is not None:
+            if not self.model.enc_mode or self.out_feat_pool == "cat":
+                raise ValueError("LitePT: pts3d_mask (variable points per sample) needs enc_mode and a "
+                                 "pooled / token output, not per-point feats or out_feat_pool 'cat'")
+            keep = pts3d_mask.reshape(-1)
+            for k in ("feat", "coord", "batch"):
+                data_dict[k] = data_dict[k][keep]
 
         res = self.model(data_dict=data_dict)
         # res['feat'].shape #  N x F ( B*num_points , F = 72)

@@ -24,6 +24,7 @@ def encode_axes(axes: torch.Tensor, dim: int) -> torch.Tensor:
 
 def frames2featpcl(frames_gt, frames_pred, 
                    pts_count=1024, 
+                   pts_count_min=None,
                    append_rays3d=True,
                    normalize_feats=False,
                    filter_median=False, 
@@ -36,6 +37,14 @@ def frames2featpcl(frames_gt, frames_pred,
                    scale_quantile=0.9,
                    opengl=False,
                    ):
+    # pts_count_min (H08-T03): None keeps the old behaviour, every sample has pts_count
+    # points and a mask with fewer valid pixels is filled by repeating them. An int k
+    # takes at most pts_count *distinct* pixels and repeats only to reach k: the tensor
+    # stays (B, pts_count, .), padded with repeats as before, and frames_pred.pts3d_mask
+    # (B, pts_count) marks the first min(pts_count, max(n_valid, k)) points as real
+    # (the sampling order puts the distinct points first). The cloud normalisation
+    # (median, scale quantile) reads only those, and LitePT drops the rest; consumers
+    # that ignore the mask still see valid (repeated) points.
     # opengl: unproject depth into OpenGL camera space (+Y up, -Z forward), the
     # convention o3b's poses are written in. With normalize_pts3d the predicted
     # translation is mapped back through the cloud's normalisation, so it lands
@@ -122,13 +131,18 @@ def frames2featpcl(frames_gt, frames_pred,
     rays3d = []
     #feats = []
     pxl2d = []
+    pts3d_mask = []
     for b in range(pts3d_grid.shape[0]):
         pts3d_b = pts3d_grid[b, pts3d_grid_mask[b, 0]]
         pxl2d_b = pxl2d_grid[b, pts3d_grid_mask[b, 0]]
         #feats_b = featmap_res_perm[b, pts3d_grid_mask[b, 0]]
+        n_valid = pts3d_b.shape[0]
         pts3d_b, pts_sampled_ids = random_sampling_with_fill(pts3d_cls=pts3d_b,
                                                             pts3d_count=pts_count,
                                                             return_ids=True)
+        if pts_count_min is not None:
+            keep_n = min(pts_count, max(n_valid, int(pts_count_min)))
+            pts3d_mask.append(torch.arange(pts_count, device=pts3d_b.device) < keep_n)
         pxl2d_b = pxl2d_b[pts_sampled_ids]
         #feats_b = feats_b[pts_sampled_ids]
         pts3d.append(pts3d_b)
@@ -142,6 +156,7 @@ def frames2featpcl(frames_gt, frames_pred,
 
     pts3d = torch.stack(pts3d)
     pxl2d = torch.stack(pxl2d)
+    pts3d_mask = torch.stack(pts3d_mask) if pts_count_min is not None else None
 
     feats = sample_pxl2d_pts(x=featmap_res, pxl2d=pxl2d / down_sample_rate)
     feats = feats.contiguous()
@@ -175,7 +190,10 @@ def frames2featpcl(frames_gt, frames_pred,
 
         #pts3d_center = (pts3d.max(dim=-2).values + pts3d.min(dim=-2).values) / 2.0 # B x 3
         #pts3d_center = pts3d.mean(dim=1) # B x 3
-        pts3d_center = pts3d.median(dim=1).values # B x 3
+        if pts3d_mask is None:
+            pts3d_center = pts3d.median(dim=1).values # B x 3
+        else:
+            pts3d_center = pts3d.masked_fill(~pts3d_mask[..., None], float('nan')).nanmedian(dim=1).values
 
         transl = -pts3d_center # (pts3d.max(dim=-2).values + pts3d.min(dim=-2).values) / 2.0
 
@@ -190,7 +208,11 @@ def frames2featpcl(frames_gt, frames_pred,
 
         #pts3d_dev = pts3d_c0.flatten(1).std(dim=-1)
         #pts3d_dev = ((pts3d_c0.abs().flatten(1).max(dim=-1).values))
-        pts3d_dev = (pts3d_c0.abs().flatten(1).quantile(scale_quantile, dim=-1))
+        if pts3d_mask is None:
+            pts3d_dev = (pts3d_c0.abs().flatten(1).quantile(scale_quantile, dim=-1))
+        else:
+            pts3d_dev = pts3d_c0.abs().masked_fill(~pts3d_mask[..., None], float('nan')).flatten(1).nanquantile(
+                scale_quantile, dim=-1)
 
         scale = (1.0 / (2 * pts3d_dev + 1e-5)) # this would map to -0.5, 0.5, #  -1, 1
         
@@ -228,5 +250,7 @@ def frames2featpcl(frames_gt, frames_pred,
         frames_pred.obj_tform4x4_obj_nocs_0c = inv_tform4x4(obj_nocs_0c_tform4x4_obj)
     
     frames_pred.pts3d = pts3d 
+    if pts3d_mask is not None:
+        frames_pred.pts3d_mask = pts3d_mask
 
     return frames_gt, frames_pred

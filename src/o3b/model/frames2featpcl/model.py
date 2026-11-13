@@ -12,6 +12,7 @@ class Frames2FeatPCL(OD3D_Model):
         normalize_feats=True,
         filter_median=False,
         pts_count=1024,
+        pts_count_min=None,  # see frames2featpcl: None = always pts_count points (repeats fill)
         featmap_upsample_rate=2,
         normalize_pts3d=False,
         augment_rot = True, # : False # True 
@@ -25,6 +26,7 @@ class Frames2FeatPCL(OD3D_Model):
         self.normalize_feats = normalize_feats
         self.filter_median = filter_median
         self.pts_count = pts_count
+        self.pts_count_min = pts_count_min
         self.featmap_upsample_rate = featmap_upsample_rate
         self.normalize_pts3d = normalize_pts3d
         self.augment_rot = augment_rot
@@ -36,6 +38,7 @@ class Frames2FeatPCL(OD3D_Model):
     def forward(self, frames_gt: FrameBatch, frames_pred: FrameBatch = None):
         frames_gt, frames_pred = frames2featpcl(frames_gt, frames_pred, 
                                                 pts_count=self.pts_count, 
+                                                pts_count_min=self.pts_count_min,
                                                 append_rays3d=self.append_rays3d,
                                                 normalize_feats=self.normalize_feats,
                                                 filter_median=self.filter_median,
