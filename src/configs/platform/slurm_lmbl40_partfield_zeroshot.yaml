@@ -1,0 +1,23 @@
+defaults:
+  - slurm_lmbl40
+  - _self_
+
+# slurm_lmbl40 plus the zeroshot and partfield dependency groups: SAM3D +
+# PartField, the frame-to-frame correspondence baseline of Every9Dv2's H15
+# (every9dv2/method/zeroshot/sam3d_partfield.py).
+#
+#   o3b platform setup -p slurm_lmbl40_partfield_zeroshot
+#   o3b bench rrun -p slurm_lmbl40 -b hc3d_crsp3d_frame_object_pair_nn \
+#       -a method/frame_object/sam3d_partfield.yaml,zeroshot/subset/s01.yaml
+#
+# As slurm_lmbl40_zeroshot.yaml: the method config declares the same deps,
+# python_version and HF_HOME, so rrun with plain slurm_lmbl40 lands in this env,
+# <repo>_py312_cu124_torch26_partfield_zeroshot.
+deps:
+  - zeroshot
+  - partfield
+
+python_version: "3.12"
+
+# the gated facebook/sam-3d-objects weights are already in this cache
+path_hf_home: ${.path_ws}/hf_cache
