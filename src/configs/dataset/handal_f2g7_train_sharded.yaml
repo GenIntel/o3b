@@ -1,0 +1,20 @@
+# handal_f2g7_train_sharded — HANDAL train scenes, the 7 categories F2G-Pose / Beyond 'Templates' evaluate
+# (arXiv 2610.31623 App. B.4: HANDAL categories with a SOPE counterpart; 92 instances over test + train
+# scenes), H16-T01. 16 frames per sequence, as handal_train_sharded.
+#
+#   o3b dataset init -d handal_f2g7_train_sharded -p slurm_lmbl40 --remote
+
+defaults:
+  - handal_train_sharded
+  - _self_
+
+categories:
+  - claw_hammer
+  - adjustable_wrench
+  - combination_wrench
+  - ladle
+  - measuring_cup
+  - mug
+  - pot_and_pan
+
+sharded_name: handal_train_r${img_size}_f2g7
