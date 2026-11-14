@@ -68,6 +68,22 @@ class FrameObjectQuantBatch:
     pose_bbox3d_auc_50_sym: Optional[Tensor] = None
     pose_bbox3d_auc_75_sym: Optional[Tensor] = None
 
+    # ── Omni6DPose's pose columns (cutoop), test only ────────────────────────
+    # _symcal: rotation error as the angle left after the prediction is turned
+    # within the object's symmetry group to the member closest to the GT
+    pose_rot_err_deg_symcal: Optional[Tensor] = None  # (B,) degrees
+    pose_transl_err_cm:      Optional[Tensor] = None  # (B,) cm
+    # accuracy at (deg, cm), and VUS: the share of threshold pairs on cutoop's
+    # 100 x 100 grid over [0, deg] x [0, cm] that the sample meets
+    pose_acc_5deg_2cm_symcal: Optional[Tensor] = None
+    pose_acc_5deg_5cm_symcal: Optional[Tensor] = None
+    pose_acc_10deg_2cm_symcal: Optional[Tensor] = None
+    pose_acc_10deg_5cm_symcal: Optional[Tensor] = None
+    pose_vus_5deg_2cm_symcal: Optional[Tensor] = None
+    pose_vus_5deg_5cm_symcal: Optional[Tensor] = None
+    pose_vus_10deg_2cm_symcal: Optional[Tensor] = None
+    pose_vus_10deg_5cm_symcal: Optional[Tensor] = None
+
     extra: dict = field(default_factory=dict)
 
     _FIELDS = (
@@ -84,6 +100,16 @@ class FrameObjectQuantBatch:
         "pose_bbox3d_iou_sym", "pose_bbox3d_acc_25_sym", "pose_bbox3d_acc_50_sym",
         "pose_bbox3d_acc_75_sym", "pose_bbox3d_auc_25_sym", "pose_bbox3d_auc_50_sym",
         "pose_bbox3d_auc_75_sym",
+        "pose_rot_err_deg_symcal",
+        "pose_transl_err_cm",
+        "pose_acc_5deg_2cm_symcal",
+        "pose_acc_5deg_5cm_symcal",
+        "pose_acc_10deg_2cm_symcal",
+        "pose_acc_10deg_5cm_symcal",
+        "pose_vus_5deg_2cm_symcal",
+        "pose_vus_5deg_5cm_symcal",
+        "pose_vus_10deg_2cm_symcal",
+        "pose_vus_10deg_5cm_symcal",
     )
 
     def mean(self) -> dict:

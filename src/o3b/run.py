@@ -304,9 +304,14 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
                 _loader = DataLoader(dataset, batch_size=batch_size,
                                      collate_fn=collate_fn, sampler=sampler,
                                      shuffle=False, num_workers=num_workers)
-                _metrics, _n = _eval_metric_means(
-                    method, task, _loader, distributed,
-                    desc=f"eval epoch {epoch}", show_bar=is_main)
+                # test-only metrics (PoseTask's *_symcal columns) stay out of val/*
+                task.during_training = True
+                try:
+                    _metrics, _n = _eval_metric_means(
+                        method, task, _loader, distributed,
+                        desc=f"eval epoch {epoch}", show_bar=is_main)
+                finally:
+                    task.during_training = False
                 if is_main:
                     print(f"Eval @ epoch {epoch} ({_n} samples): "
                           + " ".join(f"{k}={v:.4f}" for k, v in _metrics.items()))

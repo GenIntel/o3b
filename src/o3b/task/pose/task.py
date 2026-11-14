@@ -23,6 +23,14 @@ meaningless for PASCAL3D and ImageNet3D, whose poses are in normalised CAD
 units. They are still computed — suppressing them per dataset would put that
 knowledge in the task rather than in the reader — but the published table
 reports only the rotation columns for those two, and so should any comparison.
+
+**Omni6DPose's pose columns** (``*_symcal``: mean rotation error in degrees,
+accuracy and VUS at 5 deg 2 cm / 5 deg 5 cm / 10 deg 2 cm / 10 deg 5 cm, next
+to the mean translation error in cm) follow cutoop: the rotation error is the
+angle left after the prediction is turned within the object's symmetry group
+to the member closest to the GT -- the calibration ``pose_bbox3d_*_sym``
+uses. They are test-only: skipped while ``during_training`` is set, which
+``o3b.run`` does around the eval passes inside a training run.
 """
 from __future__ import annotations
 
@@ -89,6 +97,29 @@ def symmetry_calibrated_rot3x3(pred_rot: torch.Tensor, gt_rot: torch.Tensor,
     return out
 
 
+# cutoop's Metrics defaults: accuracy thresholds and VUS ranges (degrees, cm)
+_POSE_DEG_CM = ((5, 2), (5, 5), (10, 2), (10, 5))
+_VUS_STEPS = 100   # cutoop: 0.05 deg / 0.1 deg and 0.02 cm / 0.05 cm steps, i.e. 100 per axis
+
+
+def _share_of_thresholds_above(err: torch.Tensor, upper: float, steps: int = _VUS_STEPS) -> torch.Tensor:
+    """(B,) share of the ``steps`` bin midpoints of [0, upper] that ``err`` is
+    strictly below (cutoop's ``calc_auc`` grid)."""
+    step = upper / steps
+    mid = (torch.arange(steps, device=err.device, dtype=torch.float) + 0.5) * step
+    return (err.float()[:, None] < mid[None]).float().mean(dim=-1)
+
+
+def pose_vus(rot_err_deg: torch.Tensor, transl_err_cm: torch.Tensor,
+             deg: float, cm: float) -> torch.Tensor:
+    """(B,) per-sample volume under the (rotation, translation) accuracy
+    surface over [0, deg] x [0, cm]: the share of threshold pairs on cutoop's
+    100 x 100 midpoint grid that the sample meets. Its mean over samples is
+    cutoop's ``pose_auc`` (VUS) of that range, because the joint indicator of
+    one sample factorises over the two axes."""
+    return _share_of_thresholds_above(rot_err_deg, deg) * _share_of_thresholds_above(transl_err_cm, cm)
+
+
 def _aabb_iou(size_a: torch.Tensor, size_b: torch.Tensor) -> torch.Tensor:
     """3-D IoU of two origin-centred, axis-aligned boxes given their side lengths.
 
@@ -113,6 +144,9 @@ class PoseTask(OD3D_Task):
         self.transl_acc_cm = tuple(transl_acc_cm)
         self.iou_acc = tuple(iou_acc)
         self._warned_missing: set = set()
+        # Set by o3b.run around the eval passes of a training run (val/*):
+        # the test-only metrics (Omni6DPose's *_symcal columns) are skipped.
+        self.during_training = False
         # cat_axes_align: also report *_catalign rotation metrics, with the
         # predicted axes re-labelled once per category by the best of the 24
         # proper signed permutations (o3b.task.pose.cat_align). Needs every
@@ -269,6 +303,27 @@ class PoseTask(OD3D_Task):
         for cm in self.transl_acc_cm:
             setattr(quant, f"pose_transl_acc_{int(cm)}cm", (transl_err < cm / 100.0).float())
 
+        # ── Omni6DPose's pose columns (cutoop), test only ────────────────────
+        pred_cal = None
+        if syms is not None:
+            pred_cal = pred.clone()
+            pred_cal[..., :3, :3] = symmetry_calibrated_rot3x3(
+                _unit_rot3x3(pred), _unit_rot3x3(gt), syms.float().to(pred.device))
+        if pred_cal is not None and not self.during_training:
+            # the angle left after the calibration (cutoop's default, discrete
+            # criterion): pose_rot_err_rad_sym is first-order for continuous axes
+            rel = _unit_rot3x3(gt).transpose(-1, -2) @ pred_cal[..., :3, :3]
+            cos = (rel.diagonal(dim1=-2, dim2=-1).sum(-1) - 1) / 2
+            rot_deg = torch.rad2deg(torch.arccos(cos.clamp(-1, 1)))
+            transl_cm = transl_err * 100.0
+            quant.pose_rot_err_deg_symcal = rot_deg
+            quant.pose_transl_err_cm = transl_cm
+            for deg, cm in _POSE_DEG_CM:
+                setattr(quant, f"pose_acc_{deg}deg_{cm}cm_symcal",
+                        ((rot_deg < deg) & (transl_cm < cm)).float())
+                setattr(quant, f"pose_vus_{deg}deg_{cm}cm_symcal",
+                        pose_vus(rot_deg, transl_cm, deg, cm))
+
         r10 = quant.pose_rot_acc_10deg
         r30 = quant.pose_rot_acc_30deg
         t5 = quant.pose_transl_acc_5cm
@@ -311,10 +366,7 @@ class PoseTask(OD3D_Task):
             ious = {"": iou}
             # _sym: the predicted box turned within the object's symmetry group
             # to the member closest to the GT rotation first (cutoop's protocol)
-            if syms is not None:
-                pred_cal = pred.clone()
-                pred_cal[..., :3, :3] = symmetry_calibrated_rot3x3(
-                    _unit_rot3x3(pred), _unit_rot3x3(gt), syms.float().to(pred.device))
+            if pred_cal is not None:
                 iou_sym = bbox3d_iou(bbox3d_corners_from_pose(pred_cal, pred_size), gt_corners.float())
                 quant.pose_bbox3d_iou_sym = iou_sym
                 ious["_sym"] = iou_sym
