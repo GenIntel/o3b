@@ -33,6 +33,11 @@ class FrameObjectQuantBatch:
     pose_rot_acc_5deg_symcat:  Optional[Tensor] = None
     pose_rot_acc_10deg_symcat: Optional[Tensor] = None
     pose_rot_acc_30deg_symcat: Optional[Tensor] = None
+    # H19: continuous symmetry axes minimised exactly (cutoop's rot_diff_sym)
+    pose_rot_err_rad_symexact:  Optional[Tensor] = None
+    pose_rot_acc_5deg_symexact:  Optional[Tensor] = None
+    pose_rot_acc_10deg_symexact: Optional[Tensor] = None
+    pose_rot_acc_30deg_symexact: Optional[Tensor] = None
 
     # ── translation (metric; meaningless where the dataset is not metric) ────
     pose_transl_err_m:      Optional[Tensor] = None  # (B,) metres
@@ -92,6 +97,8 @@ class FrameObjectQuantBatch:
         "pose_rot_acc_5deg_sym", "pose_rot_acc_10deg_sym", "pose_rot_acc_30deg_sym",
         "pose_rot_err_rad_symcat", "pose_rot_acc_5deg_symcat", "pose_rot_acc_10deg_symcat",
         "pose_rot_acc_30deg_symcat",
+        "pose_rot_err_rad_symexact", "pose_rot_acc_5deg_symexact", "pose_rot_acc_10deg_symexact",
+        "pose_rot_acc_30deg_symexact",
         "pose_transl_err_m", "pose_transl_acc_5cm", "pose_transl_acc_10cm",
         "pose_rot_transl_acc_10deg_5cm", "pose_rot_transl_acc_30deg_10cm",
         "pose_size3d_err_m", "pose_bbox3d_iou", "pose_size3d_iou",

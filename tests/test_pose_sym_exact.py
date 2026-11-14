@@ -152,6 +152,10 @@ def test_posetask_symexact_equals_cutoop_rot_diff_sym(code, label):
     b = SimpleNamespace(cam_tform4x4_obj_ncds=gt, pred_cam_tform4x4_obj=pred, obj_size3d=size,
                         pred_obj_size3d=size, obj_syms=torch.tensor(code).float().repeat(n, 1))
     q = PoseTask()(b, return_qualit=False)[0]
+    m = q.mean()   # reported, not only set: FrameObjectQuantBatch reports declared fields alone
+    for k in ("pose_rot_err_rad_symexact", "pose_rot_acc_5deg_symexact",
+              "pose_rot_acc_10deg_symexact", "pose_rot_acc_30deg_symexact"):
+        assert k in m, k
     ours = torch.rad2deg(q.pose_rot_err_rad_symexact).double()
     sym = SymLabel(False, *label)
     ref = torch.tensor([math.degrees(rot_diff_sym(gt[i, :3, :3].double().numpy(),
