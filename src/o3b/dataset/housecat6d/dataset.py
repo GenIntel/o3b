@@ -63,6 +63,17 @@ class HouseCat6D(Od3dFrameDataset):
     def _path_preprocess(cls, cfg) -> Path:
         return Path(cfg.path_preprocess or cfg.root)
 
+    def _depth_path(self, row, meta) -> Optional[Path]:
+        """``extra.depth_dir`` swaps the scene's sensor ``depth/`` for another folder of the same
+        layout -- ``depth_gt``, the depth rendered from the GT meshes (object pixels only). The
+        sensor depth sits 5-50 mm behind it inside the object masks (H16-T02), so a method that
+        places its shape where the depth is cannot reach the GT shape from the sensor depth."""
+        p = super()._depth_path(row, meta)
+        depth_dir = (self.cfg.extra or {}).get("depth_dir")
+        if p is not None and depth_dir and depth_dir != "depth":
+            p = p.parent.parent / depth_dir / p.name
+        return p
+
     def __getitem__(self, idx: int):
         import torch
 

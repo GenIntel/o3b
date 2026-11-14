@@ -1,0 +1,17 @@
+# housecat6d_gtdepth_test_sharded -- housecat6d_test_sharded with the rendered depth_gt/ as the depth
+# input instead of the sensor depth/ (H16-T02: F2G-Pose's HouseCat6D Chamfer-L1 of 7.1 is reachable
+# only with it, 6.9 vs 10.8 from the sensor depth). depth_gt covers object pixels only.
+#
+#   o3b dataset init -d housecat6d_gtdepth_test_sharded -p slurm_lmbl40 --remote
+
+defaults:
+  - housecat6d_test_sharded
+  - _self_
+
+sharded_name: housecat6d_gtdepth_test_r${img_size}_all
+
+extra:
+  mask_type: gt
+  map_to_uco3d: false
+  scale_to_m: 1.0
+  depth_dir: depth_gt
