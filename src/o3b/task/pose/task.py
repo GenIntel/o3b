@@ -272,8 +272,16 @@ class PoseTask(OD3D_Task):
                 obj_rot3d_obj_syms=syms, lp_norm=2,
             )
             quant.pose_rot_err_rad_sym = rot_err_sym
+            # H19: continuous axes minimised exactly (cutoop's rot_diff_sym, NOCS'
+            # axis angle); _sym above is first order there and never smaller
+            _, rot_err_symexact = get_pose_diff(
+                pred_tform4x4=pred.clone(), gt_tform4x4=gt.clone(),
+                obj_rot3d_obj_syms=syms, lp_norm=2, exact=True,
+            )
+            quant.pose_rot_err_rad_symexact = rot_err_symexact
         else:
             rot_err_sym = None
+            rot_err_symexact = None
         # category-level symmetry next to an instance-level obj_syms (Omni6DPose):
         # od3d's table reports both for those datasets, instance first
         syms_cat = getattr(batch, "obj_syms_cat", None)
@@ -293,6 +301,8 @@ class PoseTask(OD3D_Task):
             if rot_err_sym is not None:
                 setattr(quant, f"pose_rot_acc_{int(deg)}deg_sym",
                         (rot_err_sym < thr).float())
+                setattr(quant, f"pose_rot_acc_{int(deg)}deg_symexact",
+                        (rot_err_symexact < thr).float())
             if rot_err_symcat is not None:
                 setattr(quant, f"pose_rot_acc_{int(deg)}deg_symcat",
                         (rot_err_symcat < thr).float())

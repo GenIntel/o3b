@@ -34,14 +34,20 @@ def _obj_rot3x3_obj_syms_padded(obj_rot3d_obj_syms, reflective, device):
     return table[inv.to(device)]
 
 
-def get_pose_diff3x3_in_rad(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2):
+def get_pose_diff3x3_in_rad(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2,
+                            exact=False):
     """
     Args:
         pose_diff3x3 (torch.Tensor): ...x3x3
         obj_rot3d_obj_syms (torch.Tensor): ...x3 # negative means continous symmetric around this axes
+        exact (bool): continuous axes minimised exactly (``_sym_residuals_exact``,
+            H19) instead of the log's component along the axis zeroed (first order)
     Returns:
         rot_diff_in_rad (torch.Tensor): ...
     """
+    if exact and obj_rot3d_obj_syms is not None:
+        return get_pose_diff3x3_with_syms(diff_rot3x3, obj_rot3d_obj_syms=obj_rot3d_obj_syms,
+                                          reflective=reflective, lp_norm=lp_norm, exact=True)[1]
     try:
         # diff_so3_log = rotation_matrix_to_axis_angle(diff_rot3x3.reshape(-1, 3, 3)).reshape(*diff_rot3x3.shape[:-2], 3)
         # diff_so3_log = So3.from_matrix(diff_rot3x3.reshape(-1, 3, 3)).log().reshape(*diff_rot3x3.shape[:-2], 3)
@@ -85,7 +91,8 @@ def get_pose_diff3x3_in_rad(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=None, 
     return diff_rot_angle_rad
 
 
-def get_pose_diff_in_rad(pred_tform4x4: torch.Tensor, gt_tform4x4: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2):
+def get_pose_diff_in_rad(pred_tform4x4: torch.Tensor, gt_tform4x4: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2,
+                         exact=False):
     """
     Args:
         pred_tform4x4 (torch.Tensor): ...x4x4
@@ -115,7 +122,65 @@ def get_pose_diff_in_rad(pred_tform4x4: torch.Tensor, gt_tform4x4: torch.Tensor,
     )
     # gt_obj_rot3x3_pred_obj
 
-    return get_pose_diff3x3_in_rad(diff_rot3x3, obj_rot3d_obj_syms=obj_rot3d_obj_syms, reflective=reflective, lp_norm=lp_norm)
+    return get_pose_diff3x3_in_rad(diff_rot3x3, obj_rot3d_obj_syms=obj_rot3d_obj_syms, reflective=reflective, lp_norm=lp_norm,
+                                   exact=exact)
+
+def _sym_residuals_exact(diff_rot3x3, obj_rot3d_obj_syms, reflective=False):
+    """H19: the residual rotations ``E = G^T D`` (...xSx3x3) of ``D = R_gt^T R_pred``
+    (...x3x3) against every member ``G`` of the object's symmetry group, the
+    continuous part minimised in closed form, so ``angle(E)`` is the exact
+    ``min_G angle(R_gt G, R_pred)`` for each discrete member ``S`` (S of them,
+    the axis' turn chosen optimally).
+
+    - one continuous axis ``a``: ``G = S Rot_a(-chi*)``, ``E = Rot_a(chi*) S^T D``,
+      ``chi*`` maximising ``tr(Rot_a(chi) M)`` with ``M = S^T D``:
+      ``atan2(tr(M [a]x), tr(M) - a^T M a)``. ``angle(E)`` is then
+      ``arccos(a^T M a)`` -- cutoop's ``rot_diff_sym`` / NOCS' axis angle.
+      ``chi*`` is detached: by the envelope theorem the minimum's gradient is
+      the one at fixed ``chi*``, and ``atan2`` has none where ``M a = -a``.
+    - two or more continuous axes: ``E = I`` (any rotation is a symmetry).
+      Assumes the discrete members keep a single continuous axis up to sign
+      (cutoop's ``cylinder``: 180 deg flips); with a 90 deg turn about another
+      axis the set is no group (it generates SO(3)) and neither code means much.
+    - none: ``E = S^T D``, the discrete minimum, as the first-order code.
+
+    The symmetry is applied on the *left* of ``D`` (the GT's object frame turned,
+    ``R_gt G``), so ``get_pose_diff``'s ``R_gt D E^T`` is exactly ``R_gt G``,
+    a symmetry-equivalent GT; the first-order code's ``D S`` gives ``R_gt D S^T D^T``
+    instead, a symmetry conjugated by the error, equivalent only as ``D -> I``.
+    """
+    device = diff_rot3x3.device
+    batch_shape = diff_rot3x3.shape[:-2]
+    G = _obj_rot3x3_obj_syms_padded(obj_rot3d_obj_syms, reflective, device)
+    S = G.shape[1]
+    G = G.reshape(*(batch_shape + (S, 3, 3))).to(diff_rot3x3.dtype)
+    M = G.transpose(-1, -2) @ diff_rot3x3[..., None, :, :]                 # (..., S, 3, 3)
+
+    cont = (obj_rot3d_obj_syms < 0).to(device)                              # (..., 3)
+    n_cont = cont.sum(dim=-1)                                               # (...)
+    one = (n_cont == 1)
+    a = (cont & one[..., None]).to(M.dtype)[..., None, :]                   # (..., 1, 3), unit or 0
+    with torch.no_grad():
+        Ma = (M @ a[..., None])[..., 0]                                     # (..., S, 3)
+        aMa = (a * Ma).sum(dim=-1)
+        trM = M.diagonal(dim1=-2, dim2=-1).sum(dim=-1)
+        ax = torch.zeros(a.shape[:-1] + (3, 3), dtype=M.dtype, device=device)
+        ax[..., 0, 1], ax[..., 0, 2] = -a[..., 2], a[..., 1]
+        ax[..., 1, 0], ax[..., 1, 2] = a[..., 2], -a[..., 0]
+        ax[..., 2, 0], ax[..., 2, 1] = -a[..., 1], a[..., 0]
+        B = (M * ax.transpose(-1, -2)).sum(dim=(-1, -2))                    # tr(M [a]x)
+        chi = torch.atan2(B, trM - aMa) * one[..., None].to(M.dtype)
+        c, s = torch.cos(chi)[..., None, None], torch.sin(chi)[..., None, None]
+        eye = torch.eye(3, dtype=M.dtype, device=device)
+        aaT = a[..., :, None] * a[..., None, :]
+        # chi = 0 wherever a = 0, so R = I there
+        R = c * eye + s * ax + (1 - c) * aaT                                # Rot_a(chi), (..., S, 3, 3)
+    E = R @ M
+    many = (n_cont >= 2)[..., None, None, None]
+    if many.any():
+        E = torch.where(many, torch.eye(3, dtype=M.dtype, device=device).expand_as(E), E)
+    return E
+
 
 def get_obj_tform4x4_obj_sym(obj_rot3d_obj_syms, reflective=False):
     """
@@ -390,16 +455,20 @@ def get_closest_B_to_A_rotated_around_axis6d(A, B, axis6d):
 
 
 
-def get_pose_diff3x3_with_syms(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2):
+def get_pose_diff3x3_with_syms(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2,
+                               exact=False):
     """
     Args:
         pose_diff3x3 (torch.Tensor): ...x3x3
         obj_rot3d_obj_syms (torch.Tensor): ...x3 # negative means continous symmetric around this axes
+        exact (bool): H19, see ``_sym_residuals_exact``
     Returns:
-        pose_diff3x3 (torch.Tensor): ...
+        pose_diff3x3 (torch.Tensor): ... the residual rotation left (exact: ``G^T D``)
         pose_diff_error (torch.Tensor): ...
     """
-    
+    if exact and obj_rot3d_obj_syms is not None:
+        return _pose_diff3x3_with_syms_exact(diff_rot3x3, obj_rot3d_obj_syms, reflective, lp_norm)
+
     try:
         # diff_so3_log = rotation_matrix_to_axis_angle(diff_rot3x3.reshape(-1, 3, 3)).reshape(*diff_rot3x3.shape[:-2], 3)
         # diff_so3_log = So3.from_matrix(diff_rot3x3.reshape(-1, 3, 3)).log().reshape(*diff_rot3x3.shape[:-2], 3)
@@ -459,8 +528,25 @@ def get_pose_diff3x3_with_syms(diff_rot3x3: torch.Tensor, obj_rot3d_obj_syms=Non
         diff_rot3x3 = diff_rot3x3.squeeze(-3)
     
     return diff_rot3x3, diff_rot_errors
-    
-def get_pose_diff(pred_tform4x4: torch.Tensor, gt_tform4x4: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2):
+
+
+def _pose_diff3x3_with_syms_exact(diff_rot3x3, obj_rot3d_obj_syms, reflective=False, lp_norm=2):
+    """``get_pose_diff3x3_with_syms(exact=True)``: residual and error of the
+    symmetry member closest to the prediction, continuous axes in closed form."""
+    E = _sym_residuals_exact(diff_rot3x3, obj_rot3d_obj_syms, reflective)  # (..., S, 3, 3)
+    log = so3_log_map(E.reshape(-1, 3, 3)).reshape(*E.shape[:-2], 3)
+    if lp_norm == "l1_smooth":
+        l1 = log.abs()
+        err = torch.where(l1 >= 1.0, l1, l1 ** 2).sum(dim=-1)
+    else:
+        err = torch.norm(log, dim=-1, p=lp_norm)
+    best = err.min(dim=-1)
+    idx = best.indices[..., None, None, None].expand(*best.indices.shape, 1, 3, 3)
+    return torch.gather(E, -3, idx).squeeze(-3), best.values
+
+
+def get_pose_diff(pred_tform4x4: torch.Tensor, gt_tform4x4: torch.Tensor, obj_rot3d_obj_syms=None, reflective=False, lp_norm=2,
+                  exact=False):
     """
     Args:
         pred_tform4x4 (torch.Tensor): ...x4x4
@@ -491,7 +577,7 @@ def get_pose_diff(pred_tform4x4: torch.Tensor, gt_tform4x4: torch.Tensor, obj_ro
     )
     # gt_obj_rot3x3_pred_obj
 
-    syms_gt_src_scaled_rot_diff3x3_pred_src_scaled, rot_diff = get_pose_diff3x3_with_syms(gt_src_scaled_rot_diff3x3_pred_src_scaled, obj_rot3d_obj_syms=obj_rot3d_obj_syms, reflective=reflective, lp_norm=lp_norm)
+    syms_gt_src_scaled_rot_diff3x3_pred_src_scaled, rot_diff = get_pose_diff3x3_with_syms(gt_src_scaled_rot_diff3x3_pred_src_scaled, obj_rot3d_obj_syms=obj_rot3d_obj_syms, reflective=reflective, lp_norm=lp_norm, exact=exact)
 
     gt_src_scaled_rot_diff3x3_pred_src_scaled = gt_src_scaled_rot_diff3x3_pred_src_scaled.detach()
     syms_gt_src_scaled_rot_diff3x3_pred_src_scaled = syms_gt_src_scaled_rot_diff3x3_pred_src_scaled.detach()
