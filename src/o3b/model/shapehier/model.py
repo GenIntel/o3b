@@ -146,6 +146,19 @@ decoder tokens, so the pose objective cannot change the surface.
 pose token with PoseMLP's head instead: three separate networks of ``n`` layers (hidden
 ``pose_pool_head_hidden``, ReLU, no dropout) for translation, 6D rotation and size. At
 ``n`` = 1 that is three linear layers, the same function class as the single one.
+``pose_pool_enc: true`` (H22) lets the pose token read the encoder as well: the
+``pose_layers`` cross-attention layers alternate between the decoder tokens of all
+levels (layers 0, 2, ...) and LitePT's tokens of all stages (layers 1, 3, ...), each
+stage projected to ``pose_dim`` plus its own learned stage embedding, at its voxel
+centres in its stage's unit. ``pose_pool_detach`` still detaches the decoder tokens
+only: the encoder already receives the pose gradient through the global feature.
+``pose_pool_queries: 5`` (H23; 7 also) pools with several pose queries instead of one:
+one at the cloud origin and the others ``pose_pool_query_radius`` away from it, on the
+corners of a tetrahedron (5) or along +-x, +-y, +-z (7), each with its own learned
+token; no attention among them. The head reads their concatenation. A query away from
+the origin needs keys and queries in one unit, so this requires
+``pose_pool_rope_unit`` (cloud units per RoPE cell, for every level and stage; unset =
+each level's own unit, as before, which only an origin query can use).
 
 ``pose_umeyama: true`` (H08-T03, after DROID-SLAM's predict -> measure -> correct)
 reads the pose out of the NOCS instead of regressing it, at every level in
@@ -256,6 +269,10 @@ class ShapeHier(OD3D_Model):
         pose_pool_detach: bool = False,
         pose_pool_head_layers: int = 0,
         pose_pool_head_hidden: int = 512,
+        pose_pool_enc: bool = False,
+        pose_pool_queries: int = 1,
+        pose_pool_query_radius: float = 0.5,
+        pose_pool_rope_unit: float = None,
         init_queries: bool = False,
         init_layers: int = 2,
         init_pos_layers: int = 0,
@@ -453,28 +470,50 @@ class ShapeHier(OD3D_Model):
                 raise ValueError("ShapeHier: pose_pool excludes pose_levels and pose_umeyama")
             if pose_dim % pose_heads or (pose_dim // pose_heads) % 6:
                 raise ValueError("ShapeHier: pose_dim / pose_heads must be a multiple of 6 (PointROPE)")
-            self.pp_token = nn.Parameter(torch.randn(1, pose_dim, generator=g) * 0.02)
+            nq = int(pose_pool_queries)
+            if nq not in (1, 5, 7):
+                raise ValueError("ShapeHier: pose_pool_queries must be 1, 5 or 7")
+            if nq > 1 and not pose_pool_rope_unit:
+                raise ValueError("ShapeHier: pose_pool_queries > 1 needs pose_pool_rope_unit")
+            self.pp_token = nn.Parameter(torch.randn(nq, pose_dim, generator=g) * 0.02)
             self.pp_glob = nn.Linear(in_dim, pose_dim)
             self.pp_kv = nn.ModuleList([nn.Linear(d, pose_dim) for d in dims])
             self.pp_level = nn.Parameter(torch.randn(L, pose_dim, generator=g) * 0.02)
             self.pp_blocks = nn.ModuleList([_Layer(pose_dim, pose_heads, pose_mlp_ratio, rope_freq, dropout,
                                                    self_attn=False) for _ in range(pose_layers)])
             self.pp_norm = nn.LayerNorm(pose_dim)
+            if pose_pool_enc:                               # H22: LitePT's stages as a second key set
+                self.pp_kv_enc = nn.ModuleList([nn.Linear(d, pose_dim) for d in dims])
+                self.pp_level_enc = nn.Parameter(torch.randn(L, pose_dim, generator=g) * 0.02)
+            if nq == 5:                                     # H23: origin + tetrahedron corners
+                off = torch.tensor([[1., 1., 1.], [1., -1., -1.], [-1., 1., -1.], [-1., -1., 1.]]) / 3 ** 0.5
+            elif nq == 7:                                   # origin + the six axis directions
+                off = torch.cat([torch.eye(3), -torch.eye(3)])
+            else:
+                off = torch.zeros(0, 3)
+            self.register_buffer("pp_qpos", torch.cat([torch.zeros(1, 3), off * float(pose_pool_query_radius)]),
+                                 persistent=False)
+            pose_dim_head = pose_dim * nq
             if pose_pool_head_layers:
                 # PoseMLP's head (o3b MLP with out_dims [3, 6, 3]): one network each for
                 # translation, 6D rotation and size, concatenated to the 12 raw outputs
                 def _head(out):
                     if pose_pool_head_layers == 1:
-                        return nn.Sequential(nn.Linear(pose_dim, out))
-                    net = [nn.Linear(pose_dim, pose_pool_head_hidden)]
+                        return nn.Sequential(nn.Linear(pose_dim_head, out))
+                    net = [nn.Linear(pose_dim_head, pose_pool_head_hidden)]
                     for _ in range(pose_pool_head_layers - 2):
                         net += [nn.ReLU(inplace=True), nn.Linear(pose_pool_head_hidden, pose_pool_head_hidden)]
                     return nn.Sequential(*net, nn.ReLU(inplace=True), nn.Linear(pose_pool_head_hidden, out))
                 self.pp_heads = nn.ModuleList([_head(o) for o in (3, 6, 3)])
             else:
-                self.pp_out = nn.Linear(pose_dim, 12)
+                self.pp_out = nn.Linear(pose_dim_head, 12)
         elif pose_pool_detach:
             raise ValueError("ShapeHier: pose_pool_detach needs pose_pool: true")
+        elif pose_pool_enc or int(pose_pool_queries) != 1:
+            raise ValueError("ShapeHier: pose_pool_enc / pose_pool_queries need pose_pool: true")
+        self.pose_pool_enc = bool(pose_pool_enc) and pose_pool
+        self.pose_pool_queries = int(pose_pool_queries) if pose_pool else 1
+        self.pose_pool_rope_unit = float(pose_pool_rope_unit) if pose_pool_rope_unit else None
 
         self.pose_umeyama = pose_umeyama
         if pose_umeyama:
@@ -548,20 +587,33 @@ class ShapeHier(OD3D_Model):
         frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = poses[-1]
         frames_pred.pose_aux = poses[:-1]
 
-    def _pose_pool(self, frames_pred, feat, level_pts, level_h, B):
-        """One pose token over the tokens of all levels at once."""
+    def _pose_pool(self, frames_pred, feat, level_pts, level_h, B, stages=None):
+        """The pose token(s) over the tokens of all levels at once (H22: and LitePT's)."""
         from o3b.model.posemlp.model import pose_from_raw
+        nq, cu = self.pose_pool_queries, self.pose_pool_rope_unit
         kv, kv_pos = [], []
         for l in range(self.L):
             h = level_h[l].detach() if self.pose_pool_detach else level_h[l]
             kv.append(self.pp_kv[l](h) + self.pp_level[l])
-            kv_pos.append(self._rp(level_pts[l]) / self.rope_units[l])
+            kv_pos.append(self._rp(level_pts[l]) / (cu or self.rope_units[l]))
         kv, kv_pos = torch.cat(kv, dim=1), torch.cat(kv_pos, dim=1)
-        t = self.pp_token[None].expand(B, 1, -1) + self.pp_glob(feat)[:, None]
-        q_pos, kv_pos = RopePos(kv_pos.new_zeros(B, 1, 3)), RopePos(kv_pos)
-        for layer in self.pp_blocks:
-            t = layer(t, q_pos, kv, kv_pos, None)
-        t = self.pp_norm(t)[:, 0]
+        t = self.pp_token[None].expand(B, nq, -1) + self.pp_glob(feat)[:, None]
+        q_pos = self.pp_qpos.to(kv_pos.dtype)[None].expand(B, nq, 3) / (cu or 1.0)   # all zero for one query
+        q_pos, kv_pos = RopePos(q_pos), RopePos(kv_pos)
+        if self.pose_pool_enc:
+            ekv, epos, emask = [], [], []
+            for l in range(self.L):
+                tok, tok_coord, tok_mask = stages[self.L - 1 - l]
+                ekv.append(self.pp_kv_enc[l](tok.float()) + self.pp_level_enc[l])
+                epos.append(tok_coord.float() / (cu or self.rope_units[l]))
+                emask.append(tok_mask)
+            ekv, epos, emask = torch.cat(ekv, dim=1), RopePos(torch.cat(epos, dim=1)), torch.cat(emask, dim=1)
+        for i, layer in enumerate(self.pp_blocks):
+            if self.pose_pool_enc and i % 2:
+                t = layer(t, q_pos, ekv, epos, emask)
+            else:
+                t = layer(t, q_pos, kv, kv_pos, None)
+        t = self.pp_norm(t).reshape(B, -1)
         raw = torch.cat([h(t) for h in self.pp_heads], dim=-1) if self.pose_pool_head_layers else self.pp_out(t)
         frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = pose_from_raw(raw, frames_pred.obj_tform4x4_obj_nocs_0c)
 
@@ -663,7 +715,7 @@ class ShapeHier(OD3D_Model):
             q = q.reshape(B, n * f, -1)
 
         if self.pose_pool:
-            self._pose_pool(frames_pred, feat, level_pts, level_h, B)
+            self._pose_pool(frames_pred, feat, level_pts, level_h, B, stages)
         if self.pose_levels:
             self._pose(frames_pred, level_pts, level_h, B)
         if self.pose_umeyama:
