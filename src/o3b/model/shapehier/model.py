@@ -142,6 +142,10 @@ with RoPE at its points in its own level's unit (the query sits at the origin). 
 head gives PoseMLP's 12 raw outputs; ``cam_tform4x4_obj`` / ``obj_size3d`` come from it
 and no PoseMLP follows. ``pose_pool_detach: true`` stops the pose gradient at the
 decoder tokens, so the pose objective cannot change the surface.
+``pose_pool_head_layers: n`` (H18; 0 = the single ``Linear(pose_dim, 12)``) reads the
+pose token with PoseMLP's head instead: three separate networks of ``n`` layers (hidden
+``pose_pool_head_hidden``, ReLU, no dropout) for translation, 6D rotation and size. At
+``n`` = 1 that is three linear layers, the same function class as the single one.
 
 ``pose_umeyama: true`` (H08-T03, after DROID-SLAM's predict -> measure -> correct)
 reads the pose out of the NOCS instead of regressing it, at every level in
@@ -250,6 +254,8 @@ class ShapeHier(OD3D_Model):
         size_quantile: float = 0.02,
         pose_pool: bool = False,
         pose_pool_detach: bool = False,
+        pose_pool_head_layers: int = 0,
+        pose_pool_head_hidden: int = 512,
         init_queries: bool = False,
         init_layers: int = 2,
         init_pos_layers: int = 0,
@@ -441,6 +447,7 @@ class ShapeHier(OD3D_Model):
                     head.bias.zero_()
 
         self.pose_pool, self.pose_pool_detach = pose_pool, pose_pool_detach
+        self.pose_pool_head_layers = int(pose_pool_head_layers) if pose_pool else 0
         if pose_pool:
             if pose_levels or pose_umeyama:
                 raise ValueError("ShapeHier: pose_pool excludes pose_levels and pose_umeyama")
@@ -453,7 +460,19 @@ class ShapeHier(OD3D_Model):
             self.pp_blocks = nn.ModuleList([_Layer(pose_dim, pose_heads, pose_mlp_ratio, rope_freq, dropout,
                                                    self_attn=False) for _ in range(pose_layers)])
             self.pp_norm = nn.LayerNorm(pose_dim)
-            self.pp_out = nn.Linear(pose_dim, 12)
+            if pose_pool_head_layers:
+                # PoseMLP's head (o3b MLP with out_dims [3, 6, 3]): one network each for
+                # translation, 6D rotation and size, concatenated to the 12 raw outputs
+                def _head(out):
+                    if pose_pool_head_layers == 1:
+                        return nn.Sequential(nn.Linear(pose_dim, out))
+                    net = [nn.Linear(pose_dim, pose_pool_head_hidden)]
+                    for _ in range(pose_pool_head_layers - 2):
+                        net += [nn.ReLU(inplace=True), nn.Linear(pose_pool_head_hidden, pose_pool_head_hidden)]
+                    return nn.Sequential(*net, nn.ReLU(inplace=True), nn.Linear(pose_pool_head_hidden, out))
+                self.pp_heads = nn.ModuleList([_head(o) for o in (3, 6, 3)])
+            else:
+                self.pp_out = nn.Linear(pose_dim, 12)
         elif pose_pool_detach:
             raise ValueError("ShapeHier: pose_pool_detach needs pose_pool: true")
 
@@ -542,7 +561,8 @@ class ShapeHier(OD3D_Model):
         q_pos, kv_pos = RopePos(kv_pos.new_zeros(B, 1, 3)), RopePos(kv_pos)
         for layer in self.pp_blocks:
             t = layer(t, q_pos, kv, kv_pos, None)
-        raw = self.pp_out(self.pp_norm(t)[:, 0])
+        t = self.pp_norm(t)[:, 0]
+        raw = torch.cat([h(t) for h in self.pp_heads], dim=-1) if self.pose_pool_head_layers else self.pp_out(t)
         frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = pose_from_raw(raw, frames_pred.obj_tform4x4_obj_nocs_0c)
 
     def forward(self, frames_gt, frames_pred=None):
