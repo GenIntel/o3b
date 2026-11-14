@@ -1,8 +1,9 @@
-"""HouseCat6D (Jung et al., CVPR 2024) — frame-object items, test scenes (H16-T02).
+"""HouseCat6D (Jung et al., CVPR 2024) — frame-object items; test scenes (H16-T02), train / val (H16-T03).
 
 Raw tree (https://sites.google.com/view/housecat6d/dataset, ``test_scene.zip`` +
 ``obj_models.zip``)::
 
+    scene<NN>/ (train, 34), val_scene<N>/ (2), test_scene<N>/ (5), each with
     test_scene<N>/rgb/<frame>.png              1096 x 852
     test_scene<N>/depth/<frame>.png            uint16 millimetres (D435-style sensor depth)
     test_scene<N>/instance/<frame>_<obj>.png   one mask per object: object = 1, background = 255
@@ -98,11 +99,13 @@ def prepare(path_raw: Path, path_preprocess: Path, *, split: str = "test", min_m
     import yaml
 
     path_raw, path_preprocess = Path(path_raw), Path(path_preprocess)
-    scene_dirs = sorted(p for p in path_raw.glob(f"{split}_scene*") if p.is_dir())
+    # test_scene<N> / val_scene<N>; the 34 training scenes are plain scene<NN>
+    pattern = "scene*" if split == "train" else f"{split}_scene*"
+    scene_dirs = sorted(p for p in path_raw.glob(pattern) if p.is_dir())
     if scenes:
         scene_dirs = [p for p in scene_dirs if p.name in scenes]
     if not scene_dirs:
-        raise FileNotFoundError(f"no {split}_scene* under {path_raw}")
+        raise FileNotFoundError(f"no {pattern} under {path_raw}")
     counts: dict = {}
     for sd in scene_dirs:
         K = np.loadtxt(sd / "intrinsics.txt")

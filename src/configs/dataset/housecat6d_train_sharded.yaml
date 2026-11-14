@@ -1,0 +1,13 @@
+# housecat6d_train_sharded -- every HouseCat6D training frame-object (34 scenes, all frames), 256-px crops,
+# sensor depth (what OPT-Pose and the HouseCat6D baselines feed; the rendered depth_gt is a target there).
+# H16-T03. Meta tree first:
+#
+#   python -c "from o3b.dataset.housecat6d.dataset import prepare; print(prepare('<raw>', '<preprocess>', split='train'))"
+#   o3b dataset init -d housecat6d_train_sharded -p slurm_lmbl40 --remote
+
+defaults:
+  - housecat6d_test_sharded
+  - _self_
+
+split: train
+sharded_name: housecat6d_train_r${img_size}_all

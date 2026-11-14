@@ -1,0 +1,8 @@
+# housecat6d_val_sharded -- the 2 HouseCat6D validation scenes (H16-T03), as housecat6d_train_sharded.
+
+defaults:
+  - housecat6d_test_sharded
+  - _self_
+
+split: val
+sharded_name: housecat6d_val_r${img_size}_all
