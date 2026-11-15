@@ -1,0 +1,25 @@
+# handal_f2g7_dynamic_sharded -- HANDAL's dynamic scenes (hand-held objects, real 640 x 480 sensor depth), the only
+# HANDAL data with sensor depth; F2G-Pose's 7 categories, of which only combination_wrench, ladle, measuring_cup and
+# mug have dynamic scenes (10 sequences, 10 objects, 5,459 frames). H16-T01.
+#
+# od3d never preprocessed these scenes. Their metas and visible masks are written by
+# research/hypotheses/h16-beyond-templates-housecat6d-handal/quantitative/handal_dynamic_prepare.py into
+# HANDAL_Preprocess (meta/frames/dynamic/, mask/dynamic_visib/). HANDAL ships only the full silhouette `mask` there,
+# so the visible mask is BOP's depth test against the rendered model, after removing each sequence's constant
+# GT-vs-sensor depth offset (-19 .. +27 mm).
+#
+#   o3b dataset init -d handal_f2g7_dynamic_sharded -p slurm_lmbl40 --remote
+
+defaults:
+  - handal_f2g7_test_sharded
+  - _self_
+
+split: dynamic
+
+extra:
+  frames_count_max_per_sequence:   # all frames: there are only 10 sequences
+  mask_source: preprocess
+  mask_type: dynamic_visib
+  ignore_frames_db: true           # frames.db holds the static splits only
+
+sharded_name: handal_dynamic_r${img_size}_f2g7
