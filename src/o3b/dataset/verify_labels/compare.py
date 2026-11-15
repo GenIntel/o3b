@@ -52,7 +52,9 @@ def score(annotation: dict, official: dict, category: str) -> dict:
     diff = torch.tensor(Ra @ Rb.T, dtype=torch.float32)[None]
     out = {"rot_deg": float(np.degrees(get_pose_diff3x3_in_rad(diff).item())),
            "rot_sym_deg": float("nan"), "iou": float("nan"), "iou_sym": float("nan"),
-           "center_pct_diag": float("nan"), "volume_ratio": float("nan")}
+           "center_pct_diag": float("nan"), "volume_ratio": float("nan"),
+           "trans_pct_maxext": float("nan"), "extent_pct_maxext": float("nan"),
+           "trans_pct_gt_diag": float("nan"), "extent_pct_gt_diag": float("nan")}
     out["rot_sym_deg"] = out["rot_deg"] if syms is None else float(np.degrees(
         get_pose_diff3x3_in_rad(diff, obj_rot3d_obj_syms=syms[None]).item()))
 
@@ -63,6 +65,20 @@ def score(annotation: dict, official: dict, category: str) -> dict:
         out["iou"] = bbox3d_iou_pair(store.corners(annotation["R_obj_raw"], ca, ea), corners_b)
         out["center_pct_diag"] = float(100 * np.linalg.norm(ca - cb) / np.linalg.norm(eb))
         out["volume_ratio"] = float(np.prod(ea) / np.prod(eb))
+        # Translation and extent error in % of the largest extent of the hand-drawn box
+        # (``annotation``, the ground truth here). Extents are compared axis by axis after
+        # pairing each axis of one box with the closest axis of the other, so a symmetric
+        # relabelling of the frame (or a rotation error) is not counted as an extent error.
+        out["trans_pct_maxext"] = float(100 * np.linalg.norm(ca - cb) / ea.max())
+        out["extent_pct_maxext"] = float(100 * np.abs(ea - eb[_axis_match(
+            np.asarray(annotation["R_obj_raw"], dtype=np.float64),
+            np.asarray(official["R_obj_raw"], dtype=np.float64))]).max() / ea.max())
+        # The same two in % of the hand-drawn box's diagonal, the numbers the paper quotes.
+        # The extent error here is the difference of the two diagonals' lengths: it needs no
+        # pairing of axes, but an error along a short axis hardly moves it (the IoU does).
+        diag = float(np.linalg.norm(ea))
+        out["trans_pct_gt_diag"] = float(100 * np.linalg.norm(ca - cb) / diag)
+        out["extent_pct_gt_diag"] = float(100 * abs(np.linalg.norm(eb) - diag) / diag)
         out["iou_sym"] = out["iou"]
         if syms is not None:
             from o3b.task.pose.task import symmetry_calibrated_rot3x3
@@ -78,6 +94,13 @@ def score(annotation: dict, official: dict, category: str) -> dict:
                 store.corners(store.G3 @ calibrated.T, ca, ea), corners_b),
                 _best_sym_iou(Ra, Rb, ca, ea, corners_b, syms))
     return out
+
+
+def _axis_match(Ra: np.ndarray, Rb: np.ndarray) -> list:
+    """For each axis of box a, the axis of box b closest to it (a permutation)."""
+    from itertools import permutations
+    cos = np.abs(Ra @ Rb.T)
+    return list(max(permutations(range(3)), key=lambda p: sum(cos[i, p[i]] for i in range(3))))
 
 
 def _axis_rot(axis: int, deg: float) -> np.ndarray:
@@ -143,6 +166,10 @@ def summarize(rows: list, seed: int = 0, n_boot: int = 2000) -> dict:
         "iou_sym_median": stats(iou, np.median),
         "iou_sym_ge50": stats(iou, lambda v: 100 * (v >= 0.5).mean()),
         "iou_sym_ge75": stats(iou, lambda v: 100 * (v >= 0.75).mean()),
+        "trans_median": stats([r["trans_pct_gt_diag"] for r in rows], np.median),
+        "trans_le10": stats([r["trans_pct_gt_diag"] for r in rows], lambda v: 100 * (v <= 10).mean()),
+        "extent_median": stats([r["extent_pct_gt_diag"] for r in rows], np.median),
+        "extent_le10": stats([r["extent_pct_gt_diag"] for r in rows], lambda v: 100 * (v <= 10).mean()),
     }
 
 
@@ -152,16 +179,17 @@ def _fmt(stat, unit: str = "") -> str:
 
 def summary_markdown(cohorts: dict, header: str = "", min_n: int = 0) -> str:
     lines = [header, "",
-             "| cohort | n | cannot | sym° median | ≤10° % | ≤30° % | >90° | IoU sym median | IoU≥0.5 % | IoU≥0.75 % |",
-             "|---|--:|--:|---|---|---|--:|---|---|---|"]
+             "| cohort | n | cannot | sym° median | ≤10° % | ≤30° % | >90° | IoU sym median | IoU≥0.5 % | IoU≥0.75 % | transl. ≤10 % diag | diag ≤10 % |",
+             "|---|--:|--:|---|---|---|--:|---|---|---|---|---|"]
     for name, c in cohorts.items():
         s = c["summary"]
         if s["n"] < min_n and not name.startswith("floor_") and name != "old_anchored":
-            lines.append(f"| {name} | {s['n']} | {c['cannot']} | hidden until {min_n} are saved | | | | | | |")
+            lines.append(f"| {name} | {s['n']} | {c['cannot']} | hidden until {min_n} are saved | | | | | | | | |")
             continue
         lines.append(f"| {name} | {s['n']} | {c['cannot']} | {_fmt(s['rot_sym_median'])} | "
                      f"{_fmt(s['rot_sym_le10'])} | {_fmt(s['rot_sym_le30'])} | {s['rot_sym_gt90']} | "
-                     f"{_fmt(s['iou_sym_median'])} | {_fmt(s['iou_sym_ge50'])} | {_fmt(s['iou_sym_ge75'])} |")
+                     f"{_fmt(s['iou_sym_median'])} | {_fmt(s['iou_sym_ge50'])} | {_fmt(s['iou_sym_ge75'])} | "
+                     f"{_fmt(s['trans_le10'])} | {_fmt(s['extent_le10'])} |")
     return "\n".join(lines)
 
 
