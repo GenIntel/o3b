@@ -90,7 +90,8 @@ def test_posetask_flag_off_by_default_and_on():
                             obj_syms=torch.ones(n, 3), category=["mug"] * n)
     off = PoseTask()
     off(batch)
-    assert off.finalize() == ({}, {})
+    m_off, c_off = off.finalize()
+    assert c_off == {} and not any(k.endswith("_catalign") for k in m_off)
     on = PoseTask(cat_axes_align=True)
     quant, _ = on(batch)
     assert quant.pose_rot_acc_30deg_sym.mean() < 1.0

@@ -139,7 +139,7 @@ class PoseTask(OD3D_Task):
 
     def __init__(self, rot_acc_deg=(5.0, 10.0, 30.0), transl_acc_cm=(5.0, 10.0),
                  iou_acc=(0.25, 0.5, 0.75), cat_axes_align: bool = False,
-                 supercat_axes_align: bool = False):
+                 supercat_axes_align: bool = False, class_mean: bool = True):
         self.rot_acc_deg = tuple(rot_acc_deg)
         self.transl_acc_cm = tuple(transl_acc_cm)
         self.iou_acc = tuple(iou_acc)
@@ -147,6 +147,13 @@ class PoseTask(OD3D_Task):
         # Set by o3b.run around the eval passes of a training run (val/*):
         # the test-only metrics (Omni6DPose's *_symcal columns) are skipped.
         self.during_training = False
+        # class_mean: at test time also report every metric as <metric>_classmean,
+        # cutoop's average (per category, then over categories, each category
+        # weighted equally) -- the average of the Omni6DPose / GenPose++ /
+        # Beyond 'Templates' / F2G-Pose tables. Needs batch.category and every
+        # sample's values, kept here until finalize().
+        self.class_mean = bool(class_mean)
+        self._cm_buf: list = []
         # cat_axes_align: also report *_catalign rotation metrics, with the
         # predicted axes re-labelled once per category by the best of the 24
         # proper signed permutations (o3b.task.pose.cat_align). Needs every
@@ -162,6 +169,7 @@ class PoseTask(OD3D_Task):
     def reset(self) -> None:
         """Drop the predictions kept for finalize() (start of an eval pass)."""
         self._align_buf = []
+        self._cm_buf = []
 
     def _keep_for_align(self, batch, pred, gt, syms, syms_cat) -> None:
         cats = getattr(batch, "category", None)
@@ -178,12 +186,43 @@ class PoseTask(OD3D_Task):
             "syms_cat": None if syms_cat is None else syms_cat.detach().cpu().float(),
         })
 
+    def _keep_for_class_means(self, batch, quant) -> None:
+        cats = getattr(batch, "category", None)
+        if cats is None:
+            self._warn_once("classmean_cat", "PoseTask: class_mean needs batch.category; "
+                            "*_classmean metrics are NOT computed.")
+            return
+        cats = cats.tolist() if isinstance(cats, torch.Tensor) else list(cats)
+        rec = {"category": [str(c) for c in cats]}
+        for k in quant._FIELDS:
+            v = getattr(quant, k, None)
+            if isinstance(v, torch.Tensor) and v.reshape(-1).numel() == len(cats):
+                rec[k] = v.detach().float().reshape(-1).cpu()
+        self._cm_buf.append(rec)
+
+    def _finalize_class_means(self, distributed: bool) -> dict:
+        """Collective when distributed: <metric>_classmean + n_classes over the
+        whole pass (o3b.task.pose.merge.class_means), {} when off or empty."""
+        if not self.class_mean:
+            return {}
+        bufs = [self._cm_buf]
+        if distributed:
+            from o3b import ddp
+            bufs = ddp.all_gather_object(self._cm_buf)
+        self._cm_buf = []
+        recs = [r for b in bufs for r in b]
+        if not recs:
+            return {}
+        from o3b.task.pose.merge import class_means
+        return class_means(recs)
+
     def finalize(self, distributed: bool = False) -> tuple[dict, dict]:
         """Collective when distributed (every rank must call it): gathers the
         kept predictions and returns ({metric: mean}, {variant: {category:
         (P index, P, n)}}). Empty dicts when cat_axes_align is off."""
+        metrics_cm = self._finalize_class_means(distributed)
         if not (self.cat_axes_align or self.supercat_axes_align):
-            return {}, {}
+            return metrics_cm, {}
         bufs = [self._align_buf]
         if distributed:
             from o3b import ddp
@@ -191,7 +230,7 @@ class PoseTask(OD3D_Task):
         recs = [r for b in bufs for r in b]
         self._align_buf = []
         if not recs:
-            return {}, {}
+            return metrics_cm, {}
         from o3b.task.pose.cat_align import category_axes_align
 
         def _cat(key):
@@ -217,6 +256,7 @@ class PoseTask(OD3D_Task):
         keep = (("pose_cat_",) if self.cat_axes_align else ()) + \
             (("pose_supercat_", "pose_orientcat_") if self.supercat_axes_align else ())
         metrics.update({k: v for k, v in m3.items() if k.startswith(keep)})
+        metrics.update(metrics_cm)
         return metrics, choice
 
     def _warn_once(self, key: str, msg: str) -> None:
@@ -401,4 +441,6 @@ class PoseTask(OD3D_Task):
                             calc_auc_for_vals_larger_than_thresh(
                                 v.float(), thresh_min=thr, thresh_max=1.0, steps=100))
 
+        if self.class_mean and not self.during_training:
+            self._keep_for_class_means(batch, quant)
         return quant, None

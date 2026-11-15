@@ -92,3 +92,25 @@ def test_symexact_columns():
     assert q["pose_rot_err_deg_symexact"] < 0.05
     assert q["pose_rot_err_deg_symcal"] == pytest.approx(1.8, abs=0.05)
     assert q["pose_vus_5deg_2cm_symexact"] > q["pose_vus_5deg_2cm_symcal"] + 0.2
+
+
+def test_class_means_at_test_time():
+    """<metric>_classmean: per category, then over categories (cutoop), at test
+    time only; one category with 1 sample weighs as much as one with 99."""
+    task = PoseTask()
+    task.reset()
+    b = _batch(n=100, rot_deg=0.0, transl_m=0.0)
+    b.pred_cam_tform4x4_obj[0, 0, 3] += 1.0              # one sample 100 cm off
+    b.category = ["a"] + ["b"] * 99
+    q, _ = task(b, return_qualit=False)
+    inst = q.mean()["pose_transl_err_cm"]
+    m, _ = task.finalize()
+    assert inst == pytest.approx(1.0, rel=1e-3)
+    assert m["pose_transl_err_cm_classmean"] == pytest.approx(50.0, rel=1e-3)
+    assert m["n_classes"] == 2.0
+    assert task.finalize()[0] == {}                       # buffer emptied
+
+    task.during_training = True
+    task(b, return_qualit=False)
+    task.during_training = False
+    assert task.finalize()[0] == {}                       # nothing kept in training
