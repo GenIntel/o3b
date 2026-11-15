@@ -1,0 +1,15 @@
+# handal_f2g7_meshdepth_test_sharded -- handal_f2g7_test_sharded with the object's BOP model rasterised
+# under the GT pose as the depth input (extra.depth_type: mesh_gt) instead of HANDAL's depth_nerf, the
+# only depth HANDAL ships for its static scenes (H16-T01: does F2G-Pose's HANDAL number need it, as its
+# HouseCat6D Chamfer needed depth_gt). Object pixels only. Needs a GPU node (EGL rasteriser).
+#
+#   o3b dataset init -d handal_f2g7_meshdepth_test_sharded -p slurm_lmbl40 --remote
+
+defaults:
+  - handal_f2g7_test_sharded
+  - _self_
+
+sharded_name: handal_test_r${img_size}_f2g7_meshdepth
+
+extra:
+  depth_type: mesh_gt

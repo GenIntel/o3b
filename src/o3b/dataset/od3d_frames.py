@@ -631,6 +631,10 @@ class Od3dFrameDataset(ConfigurableDataset):
         return None
 
     def _depth_path(self, row, meta) -> Optional[Path]:
+        # depth_type: mesh_gt has no file: the depth is the object's mesh
+        # rasterised under the GT pose, in _load_frame_object.
+        if (self.cfg.extra or {}).get("depth_type") == "mesh_gt":
+            return None
         if meta.get("rfpath_depth"):
             return self.path_raw / meta["rfpath_depth"]
         extra = self.cfg.extra or {}
@@ -847,6 +851,26 @@ class Od3dFrameDataset(ConfigurableDataset):
                     fo_mask_amodal.cpu()).float()
             if not _want("fo_mask_amodal", mods):
                 fo_mask_amodal = None
+
+        # extra.depth_type: mesh_gt — the depth input is the object's mesh
+        # rasterised under the GT pose (metres, object pixels only), instead of
+        # the dataset's own depth: HouseCat6D's depth_gt for a dataset that
+        # ships none (HANDAL's only depth is a NeRF render, H16-T01). Occluders
+        # are not drawn; the visible mask cuts them out downstream. A frame
+        # that cannot be rendered is dropped, like one without rgb.
+        if (self.cfg.extra or {}).get("depth_type") == "mesh_gt" \
+                and (_want("depth", mods) or _want("depth_mask", mods)):
+            d = None
+            if mesh is not None and cam_tform4x4_obj_ncds is not None \
+                    and cam_intr4x4 is not None:
+                d = self._render_mesh_depth(mesh, cam_tform4x4_obj_ncds, cam_intr4x4,
+                                            H=rgb.shape[-2], W=rgb.shape[-1])
+            if d is None or not bool((d > 0).any()):
+                logger.warning(f"{self.meta_path(row)}: depth_type mesh_gt could not be "
+                               f"rendered; frame dropped")
+                return None
+            depth = d.float().cpu() if _want("depth", mods) else None
+            depth_mask = (d > 0).cpu() if _want("depth_mask", mods) else None
 
         from o3b.data.datatypes.frame_object import FrameObject
 
@@ -1088,7 +1112,12 @@ class Od3dFrameDataset(ConfigurableDataset):
         return (_r(mesh) if mesh is not None else None), size3d, bbox3d, tform
 
     def _render_mesh_mask(self, mesh, cam_tform4x4_obj_ncds, cam_intr4x4, H: int, W: int):
-        """(H, W) bool silhouette of `mesh` rasterised under the given pose.
+        """(H, W) bool silhouette of `mesh` rasterised under the given pose."""
+        depth = self._render_mesh_depth(mesh, cam_tform4x4_obj_ncds, cam_intr4x4, H, W)
+        return None if depth is None else depth > 0        # 0 = no hit = background
+
+    def _render_mesh_depth(self, mesh, cam_tform4x4_obj_ncds, cam_intr4x4, H: int, W: int):
+        """(H, W) float depth in metres (0 = background) of `mesh` under the given pose.
 
         Shares HouseCorr3D's rasteriser, so the silhouette lands on the same
         pixels its fo_mask_amodal would. Only this object is drawn, so occluders
@@ -1119,7 +1148,7 @@ class Od3dFrameDataset(ConfigurableDataset):
                     "it cannot initialise. Run on a compute node (srun/sbatch)."
                 )
             return None
-        return depth > 0        # 0 = no hit = background
+        return depth
 
     # ── shard build ──────────────────────────────────────────────────────────
 
