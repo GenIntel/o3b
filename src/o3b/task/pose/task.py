@@ -333,6 +333,19 @@ class PoseTask(OD3D_Task):
                         ((rot_deg < deg) & (transl_cm < cm)).float())
                 setattr(quant, f"pose_vus_{deg}deg_{cm}cm_symcal",
                         pose_vus(rot_deg, transl_cm, deg, cm))
+        # the same columns from the exact error (cutoop's rot_diff_sym, which is what
+        # cutoop / Omni6DPose report for the degree columns; the sampled calibration
+        # above leaves up to 1.8 deg on a perfect prediction about a continuous axis)
+        if rot_err_symexact is not None and not self.during_training:
+            rot_deg_x = torch.rad2deg(rot_err_symexact)
+            transl_cm = transl_err * 100.0
+            quant.pose_rot_err_deg_symexact = rot_deg_x
+            quant.pose_transl_err_cm = transl_cm
+            for deg, cm in _POSE_DEG_CM:
+                setattr(quant, f"pose_acc_{deg}deg_{cm}cm_symexact",
+                        ((rot_deg_x < deg) & (transl_cm < cm)).float())
+                setattr(quant, f"pose_vus_{deg}deg_{cm}cm_symexact",
+                        pose_vus(rot_deg_x, transl_cm, deg, cm))
 
         r10 = quant.pose_rot_acc_10deg
         r30 = quant.pose_rot_acc_30deg

@@ -71,7 +71,24 @@ def test_skipped_during_training():
     task = PoseTask()
     task.during_training = True
     q = task(_batch(n=8), return_qualit=False)[0].mean()
-    assert not any(k.endswith("_symcal") or k == "pose_transl_err_cm" for k in q)
+    assert not any(k.endswith("_symcal") or k == "pose_transl_err_cm" or k.startswith(("pose_vus", "pose_acc_", "pose_rot_err_deg")) for k in q)
     assert "pose_bbox3d_auc_25_sym" in q
     task.during_training = False
     assert "pose_vus_5deg_2cm_symcal" in task(_batch(n=8), return_qualit=False)[0].mean()
+
+
+def test_symexact_columns():
+    """_symexact: without symmetry equal to _symcal; about a continuous axis an
+    off-grid turn is free exactly, where the sampled calibration leaves up to
+    pi / 100 (1.8 deg)."""
+    q = PoseTask()(_batch(), return_qualit=False)[0].mean()
+    for k in ("pose_rot_err_deg", "pose_acc_5deg_2cm", "pose_vus_10deg_5cm"):
+        assert q[k + "_symexact"] == pytest.approx(q[k + "_symcal"], abs=1e-3)
+    b = _batch(n=50, rot_deg=0.0, transl_m=0.0, code=(1, -1, 1))
+    a = math.radians(73.8)   # half-way between two of the sampled 2 pi / 100 steps
+    turn = torch.tensor([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]])
+    b.pred_cam_tform4x4_obj[:, :3, :3] = b.cam_tform4x4_obj_ncds[:, :3, :3] @ turn
+    q = PoseTask()(b, return_qualit=False)[0].mean()
+    assert q["pose_rot_err_deg_symexact"] < 0.05
+    assert q["pose_rot_err_deg_symcal"] == pytest.approx(1.8, abs=0.05)
+    assert q["pose_vus_5deg_2cm_symexact"] > q["pose_vus_5deg_2cm_symcal"] + 0.2

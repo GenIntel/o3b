@@ -88,6 +88,17 @@ class FrameObjectQuantBatch:
     pose_vus_5deg_5cm_symcal: Optional[Tensor] = None
     pose_vus_10deg_2cm_symcal: Optional[Tensor] = None
     pose_vus_10deg_5cm_symcal: Optional[Tensor] = None
+    # _symexact: the same columns from the exact symmetric error (cutoop's
+    # rot_diff_sym; continuous axes minimised exactly) -- what to report (H24)
+    pose_rot_err_deg_symexact: Optional[Tensor] = None  # (B,) degrees
+    pose_acc_5deg_2cm_symexact: Optional[Tensor] = None
+    pose_acc_5deg_5cm_symexact: Optional[Tensor] = None
+    pose_acc_10deg_2cm_symexact: Optional[Tensor] = None
+    pose_acc_10deg_5cm_symexact: Optional[Tensor] = None
+    pose_vus_5deg_2cm_symexact: Optional[Tensor] = None
+    pose_vus_5deg_5cm_symexact: Optional[Tensor] = None
+    pose_vus_10deg_2cm_symexact: Optional[Tensor] = None
+    pose_vus_10deg_5cm_symexact: Optional[Tensor] = None
 
     extra: dict = field(default_factory=dict)
 
@@ -117,6 +128,15 @@ class FrameObjectQuantBatch:
         "pose_vus_5deg_5cm_symcal",
         "pose_vus_10deg_2cm_symcal",
         "pose_vus_10deg_5cm_symcal",
+        "pose_rot_err_deg_symexact",
+        "pose_acc_5deg_2cm_symexact",
+        "pose_acc_5deg_5cm_symexact",
+        "pose_acc_10deg_2cm_symexact",
+        "pose_acc_10deg_5cm_symexact",
+        "pose_vus_5deg_2cm_symexact",
+        "pose_vus_5deg_5cm_symexact",
+        "pose_vus_10deg_2cm_symexact",
+        "pose_vus_10deg_5cm_symexact",
     )
 
     def mean(self) -> dict:
