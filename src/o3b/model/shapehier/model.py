@@ -159,6 +159,8 @@ token; no attention among them. The head reads their concatenation. A query away
 the origin needs keys and queries in one unit, so this requires
 ``pose_pool_rope_unit`` (cloud units per RoPE cell, for every level and stage; unset =
 each level's own unit, as before, which only an origin query can use).
+``pose_self_attn_every: k`` lets the pose queries self-attend in every k-th of the
+``pose_layers`` layers (H23-T02: 4 layers, k = 2), before that layer's cross-attention.
 
 ``pose_umeyama: true`` (H08-T03, after DROID-SLAM's predict -> measure -> correct)
 reads the pose out of the NOCS instead of regressing it, at every level in
@@ -185,7 +187,7 @@ import torch.nn.functional as F
 
 from o3b.model.model import OD3D_Model, register_model
 from o3b.model.shapemlp.model import _mlp
-from o3b.model.xattnpool.model import RopePos, _Layer, rope3d
+from o3b.model.xattnpool.model import RopePos, _Layer, query_offsets, rope3d
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +275,7 @@ class ShapeHier(OD3D_Model):
         pose_pool_queries: int = 1,
         pose_pool_query_radius: float = 0.5,
         pose_pool_rope_unit: float = None,
+        pose_self_attn_every: int = 0,
         init_queries: bool = False,
         init_layers: int = 2,
         init_pos_layers: int = 0,
@@ -479,20 +482,18 @@ class ShapeHier(OD3D_Model):
             self.pp_glob = nn.Linear(in_dim, pose_dim)
             self.pp_kv = nn.ModuleList([nn.Linear(d, pose_dim) for d in dims])
             self.pp_level = nn.Parameter(torch.randn(L, pose_dim, generator=g) * 0.02)
+            # pose_self_attn_every k (H23): the pose queries self-attend in every k-th layer
+            # (layers k-1, 2k-1, ..., as XAttnPool's self_attn_every), before its cross-attention
+            se = int(pose_self_attn_every)
             self.pp_blocks = nn.ModuleList([_Layer(pose_dim, pose_heads, pose_mlp_ratio, rope_freq, dropout,
-                                                   self_attn=False) for _ in range(pose_layers)])
+                                                   self_attn=bool(se) and (i + 1) % se == 0)
+                                            for i in range(pose_layers)])
             self.pp_norm = nn.LayerNorm(pose_dim)
             if pose_pool_enc:                               # H22: LitePT's stages as a second key set
                 self.pp_kv_enc = nn.ModuleList([nn.Linear(d, pose_dim) for d in dims])
                 self.pp_level_enc = nn.Parameter(torch.randn(L, pose_dim, generator=g) * 0.02)
-            if nq == 5:                                     # H23: origin + tetrahedron corners
-                off = torch.tensor([[1., 1., 1.], [1., -1., -1.], [-1., 1., -1.], [-1., -1., 1.]]) / 3 ** 0.5
-            elif nq == 7:                                   # origin + the six axis directions
-                off = torch.cat([torch.eye(3), -torch.eye(3)])
-            else:
-                off = torch.zeros(0, 3)
-            self.register_buffer("pp_qpos", torch.cat([torch.zeros(1, 3), off * float(pose_pool_query_radius)]),
-                                 persistent=False)
+            # H23: origin (+ tetrahedron corners for 5, + the six axis directions for 7)
+            self.register_buffer("pp_qpos", query_offsets(nq, pose_pool_query_radius), persistent=False)
             pose_dim_head = pose_dim * nq
             if pose_pool_head_layers:
                 # PoseMLP's head (o3b MLP with out_dims [3, 6, 3]): one network each for
@@ -509,8 +510,8 @@ class ShapeHier(OD3D_Model):
                 self.pp_out = nn.Linear(pose_dim_head, 12)
         elif pose_pool_detach:
             raise ValueError("ShapeHier: pose_pool_detach needs pose_pool: true")
-        elif pose_pool_enc or int(pose_pool_queries) != 1:
-            raise ValueError("ShapeHier: pose_pool_enc / pose_pool_queries need pose_pool: true")
+        elif pose_pool_enc or int(pose_pool_queries) != 1 or pose_self_attn_every:
+            raise ValueError("ShapeHier: pose_pool_enc / pose_pool_queries / pose_self_attn_every need pose_pool: true")
         self.pose_pool_enc = bool(pose_pool_enc) and pose_pool
         self.pose_pool_queries = int(pose_pool_queries) if pose_pool else 1
         self.pose_pool_rope_unit = float(pose_pool_rope_unit) if pose_pool_rope_unit else None

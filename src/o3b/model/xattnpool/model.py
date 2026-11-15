@@ -12,7 +12,9 @@ masked) + FFN, with self-attention among the queries every
 ``self_attn_every`` layers (0 = never; pointless with one query, where softmax
 over a single key is the identity).
 
-With several queries (``num_queries``), ``query_pool`` decides how their
+With several queries (``num_queries``), ``query_layout: spread`` places them at the
+origin and around it (``query_offsets``, ``query_radius``; default ``same``: all at
+``query_pos``), and ``query_pool`` decides how their
 outputs become the pooled feature: ``mean`` (default) averages them, ``concat``
 writes them side by side, (B, num_queries * dim), before the appended cls
 feature (H02-T14: a pose and a shape query, self-attending, -> 2 x 504 + 384).
@@ -186,6 +188,25 @@ class _Layer(nn.Module):
         return q + self.ffn(self.norm_ffn(q))
 
 
+def query_offsets(n: int, radius: float) -> torch.Tensor:
+    """(n, 3) positions of n queries around the origin, in cloud units (H23).
+
+    1: the origin alone. 5: the origin and the corners of a tetrahedron ``radius``
+    away. 7: the origin and the six axis directions ``radius`` away. ShapeHier's
+    pose queries and XAttnPool's (``query_layout``) share it, so both poolings
+    place their queries at the same points.
+    """
+    if n == 1:
+        off = torch.zeros(0, 3)
+    elif n == 5:
+        off = torch.tensor([[1., 1., 1.], [1., -1., -1.], [-1., 1., -1.], [-1., -1., 1.]]) / 3 ** 0.5
+    elif n == 7:
+        off = torch.cat([torch.eye(3), -torch.eye(3)])
+    else:
+        raise ValueError(f"query_offsets: n must be 1, 5 or 7, got {n}")
+    return torch.cat([torch.zeros(1, 3), off * float(radius)])
+
+
 def fibonacci_sphere(n: int) -> torch.Tensor:
     """n points spread uniformly on the unit sphere (Fibonacci lattice), (n, 3)."""
     i = torch.arange(n, dtype=torch.float64) + 0.5
@@ -230,6 +251,8 @@ class XAttnPool(OD3D_Model):
         surface_head: str = "mlp",
         surface_fold_grid_scale: float = 0.05,
         query_pool: str = "mean",
+        query_layout: str = "same",
+        query_radius: float = 0.5,
         moe_experts: int = 0,
         moe_top_k: int = 2,
     ):
@@ -277,8 +300,15 @@ class XAttnPool(OD3D_Model):
         self.rope_unit = rope_unit
         self.out_feat_append_in_feat = out_feat_append_in_feat
         self.queries = nn.Parameter(torch.randn(1, num_queries, dim) * 0.02)
-        self.register_buffer("query_pos", torch.tensor(query_pos, dtype=torch.float32),
-                             persistent=False)
+        # query_layout: "same" puts every query at query_pos; "spread" (H23) at query_pos
+        # plus query_offsets(num_queries, query_radius): the origin and, for 5, the
+        # corners of a tetrahedron around it, as ShapeHier's pose queries
+        if query_layout not in ("same", "spread"):
+            raise ValueError(f"XAttnPool: query_layout must be same or spread, got {query_layout}")
+        qp = torch.tensor(query_pos, dtype=torch.float32).reshape(1, 3).expand(num_queries, 3)
+        if query_layout == "spread":
+            qp = qp + query_offsets(num_queries, query_radius)
+        self.register_buffer("query_pos", qp.contiguous(), persistent=False)
         self.layers = nn.ModuleList([
             _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout,
                    self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
@@ -295,7 +325,7 @@ class XAttnPool(OD3D_Model):
         tok, tok_coord = tok.float(), tok_coord.float()
         B = tok.shape[0]
         q = self.queries.expand(B, -1, -1)
-        q_pos = (self.query_pos / self.rope_unit).expand(B, q.shape[1], 3)
+        q_pos = (self.query_pos / self.rope_unit)[None].expand(B, self.num_queries, 3)
         if self.surface_queries:
             S = self.surface_queries
             if self.surface_anchor == "learned":
