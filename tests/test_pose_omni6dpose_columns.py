@@ -114,3 +114,36 @@ def test_class_means_at_test_time():
     task(b, return_qualit=False)
     task.during_training = False
     assert task.finalize()[0] == {}                       # nothing kept in training
+
+
+def test_shape_cd_from_pred_mesh_and_points():
+    """shape_cd: the GT mesh placed by the GT pose scores ~0 against itself,
+    through pred_mesh + predicted pose and through camera-space points; off by
+    default; not during training."""
+    from o3b.data.datatypes.mesh import Mesh
+    verts = torch.tensor([[-1., -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+                          [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]]) * 0.5
+    faces = torch.tensor([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4],
+                          [2, 3, 7], [2, 7, 6], [1, 2, 6], [1, 6, 5], [0, 3, 7], [0, 7, 4]])
+    b = _batch(n=4, rot_deg=0.0, transl_m=0.0)
+    b.meshes = [Mesh(verts=verts, faces=faces) for _ in range(4)]
+    assert "shape_cd_l1_x1e3" not in PoseTask()(b, return_qualit=False)[0].mean()
+
+    b.pred_mesh = b.meshes
+    task = PoseTask(shape_cd=True, shape_cd_n_gt=4096)
+    cd_same = task(b, return_qualit=False)[0].mean()["shape_cd_l1_x1e3"]
+    b.pred_cam_tform4x4_obj = b.pred_cam_tform4x4_obj.clone()
+    b.pred_cam_tform4x4_obj[:, :3, 3] += 0.05                       # 5 cm off
+    cd_off = task(b, return_qualit=False)[0].mean()["shape_cd_l1_x1e3"]
+    assert cd_same < 20 and cd_off > 2 * cd_same                     # sampling noise only vs a shift
+
+    from o3b.task.pose.task import _sample_mesh_surface
+    from o3b.cv.geometry.transform import transf3d_broadcast
+    g = torch.Generator().manual_seed(7)
+    b.pred_pts3d_shape = torch.stack([transf3d_broadcast(pts3d=_sample_mesh_surface(m, 4096, g),
+                                                         transf4x4=b.cam_tform4x4_obj_ncds[i])
+                                      for i, m in enumerate(b.meshes)])
+    assert task(b, return_qualit=False)[0].mean()["shape_cd_l1_x1e3"] < 20
+
+    task.during_training = True
+    assert "shape_cd_l1_x1e3" not in task(b, return_qualit=False)[0].mean()

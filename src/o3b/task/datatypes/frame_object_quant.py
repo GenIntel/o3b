@@ -100,6 +100,9 @@ class FrameObjectQuantBatch:
     pose_vus_10deg_2cm_symexact: Optional[Tensor] = None
     pose_vus_10deg_5cm_symexact: Optional[Tensor] = None
 
+    # shape (PoseTask shape_cd, test only): Chamfer-L1 x1e-3 in camera space
+    shape_cd_l1_x1e3: Optional[Tensor] = None
+
     extra: dict = field(default_factory=dict)
 
     _FIELDS = (
@@ -137,6 +140,7 @@ class FrameObjectQuantBatch:
         "pose_vus_5deg_5cm_symexact",
         "pose_vus_10deg_2cm_symexact",
         "pose_vus_10deg_5cm_symexact",
+        "shape_cd_l1_x1e3",
     )
 
     def mean(self) -> dict:

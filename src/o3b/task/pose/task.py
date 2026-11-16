@@ -133,13 +133,32 @@ def _aabb_iou(size_a: torch.Tensor, size_b: torch.Tensor) -> torch.Tensor:
     return inter / union.clamp(min=1e-12)
 
 
+def _sample_mesh_surface(mesh, n: int, gen: torch.Generator) -> torch.Tensor:
+    """(n, 3) area-weighted points on ``mesh`` (CPU, drawn from ``gen``); a mesh
+    without faces is read as a point cloud. Same sampling as Trinity's
+    _sample_mesh_surface, which o3b cannot import."""
+    verts = mesh.verts.detach().float().cpu()
+    faces = getattr(mesh, "faces", None)
+    if faces is None or faces.numel() == 0:
+        return verts[torch.randint(verts.shape[0], (n,), generator=gen)]
+    tri = verts[faces.long().cpu()]
+    areas = 0.5 * torch.linalg.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0], dim=-1).norm(dim=-1)
+    idx = torch.multinomial(areas + 1e-12, n, replacement=True, generator=gen)
+    uv = torch.rand(n, 2, generator=gen)
+    su = uv[:, :1].sqrt()
+    w1, w2 = su * (1.0 - uv[:, 1:]), su * uv[:, 1:]
+    t = tri[idx]
+    return t[:, 0] + w1 * (t[:, 1] - t[:, 0]) + w2 * (t[:, 2] - t[:, 0])
+
+
 @register_task("PoseTask")
 class PoseTask(OD3D_Task):
     """Compare predicted against GT object pose for each frame-object."""
 
     def __init__(self, rot_acc_deg=(5.0, 10.0, 30.0), transl_acc_cm=(5.0, 10.0),
                  iou_acc=(0.25, 0.5, 0.75), cat_axes_align: bool = False,
-                 supercat_axes_align: bool = False, class_mean: bool = True):
+                 supercat_axes_align: bool = False, class_mean: bool = True,
+                 shape_cd: bool = False, shape_cd_n_gt: int = 2048):
         self.rot_acc_deg = tuple(rot_acc_deg)
         self.transl_acc_cm = tuple(transl_acc_cm)
         self.iou_acc = tuple(iou_acc)
@@ -153,6 +172,14 @@ class PoseTask(OD3D_Task):
         # Beyond 'Templates' / F2G-Pose tables. Needs batch.category and every
         # sample's values, kept here until finalize().
         self.class_mean = bool(class_mean)
+        # shape_cd: also score the predicted shape (test only), Chamfer-L1 x1e-3
+        # in camera space (metres) against shape_cd_n_gt points sampled on the
+        # GT NCDS mesh and placed by the GT NCDS pose -- the protocol of H02's
+        # eval_shape_cd_sope.py. The prediction is pred_pts3d_shape (camera
+        # space) or else pred_mesh (NCDS meshes, placed by the predicted pose).
+        self.shape_cd = bool(shape_cd)
+        self.shape_cd_n_gt = int(shape_cd_n_gt)
+        self._shape_cd_calls = 0
         self._cm_buf: list = []
         # cat_axes_align: also report *_catalign rotation metrics, with the
         # predicted axes re-labelled once per category by the best of the 24
@@ -441,6 +468,46 @@ class PoseTask(OD3D_Task):
                             calc_auc_for_vals_larger_than_thresh(
                                 v.float(), thresh_min=thr, thresh_max=1.0, steps=100))
 
+        if self.shape_cd and not self.during_training:
+            self._shape_cd(batch, quant, gt, pred)
         if self.class_mean and not self.during_training:
             self._keep_for_class_means(batch, quant)
         return quant, None
+
+    def _shape_cd(self, batch, quant, gt_pose, pred_pose) -> None:
+        from o3b.cv.geometry.metrics.dist import batch_chamfer_distance
+        from o3b.cv.geometry.transform import transf3d_broadcast
+        meshes = getattr(batch, "meshes", None)
+        if meshes is None:
+            self._warn_once("cd_gt", "PoseTask: shape_cd needs batch.meshes (the 'mesh' modality); "
+                            "shape_cd_l1_x1e3 is NOT computed.")
+            return
+        B = gt_pose.shape[0]
+        dev = gt_pose.device
+        pts = getattr(batch, "pred_pts3d_shape", None)
+        pred_meshes = getattr(batch, "pred_mesh", None)
+        if pts is None and pred_meshes is None:
+            self._warn_once("cd_pred", "PoseTask: shape_cd but the method wrote neither pred_pts3d_shape "
+                            "nor pred_mesh; shape_cd_l1_x1e3 is NOT computed.")
+            return
+        # one seed per call, so a run is repeatable batch by batch
+        gen = torch.Generator(device="cpu").manual_seed(self._shape_cd_calls)
+        self._shape_cd_calls += 1
+        out = torch.full((B,), float("nan"))
+        n = self.shape_cd_n_gt
+        for i in range(B):
+            if meshes[i] is None:
+                continue
+            gt_pts = transf3d_broadcast(pts3d=_sample_mesh_surface(meshes[i], n, gen).to(dev),
+                                        transf4x4=gt_pose[i].float())
+            if pts is not None:
+                p = pts[i].to(dev).float()
+            elif pred_meshes[i] is not None:
+                p = transf3d_broadcast(pts3d=_sample_mesh_surface(pred_meshes[i], n, gen).to(dev),
+                                       transf4x4=pred_pose[i].float())
+            else:
+                continue
+            if not torch.isfinite(p).all():
+                continue
+            out[i] = 1e3 * float(batch_chamfer_distance(p[None], gt_pts[None], uniform_weight_pts1=False)[0])
+        quant.shape_cd_l1_x1e3 = out
