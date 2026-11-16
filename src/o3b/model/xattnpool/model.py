@@ -19,6 +19,14 @@ outputs become the pooled feature: ``mean`` (default) averages them, ``concat``
 writes them side by side, (B, num_queries * dim), before the appended cls
 feature (H02-T14: a pose and a shape query, self-attending, -> 2 x 504 + 384).
 
+``query_pool: xattn`` (H31) pools the queries with one more layer: a learned query (at
+``query_pos``) cross-attends over the refined queries (+ FFN, pre-norm, then a LayerNorm),
+so ``num_queries`` outputs become one of width ``dim``.
+
+``self_attn_after: true`` (H31) puts a layer's self-attention among the queries *after*
+its cross-attention instead of before it, so with ``self_attn_every: 1`` the queries
+alternate cross-attention (read the tokens) and self-attention (compare what they read).
+
 ``moe_experts: 8`` (``moe_top_k: 2``) makes every layer's FFN a mixture of
 experts, as F2G-Pose's (H02-T21, ``o3b/model/moe.py``); its load-balancing
 loss is collected by the method.
@@ -163,8 +171,10 @@ class _Attn(nn.Module):
 
 
 class _Layer(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio, rope_freq, dropout, self_attn, moe_experts=0, moe_top_k=2):
+    def __init__(self, dim, num_heads, mlp_ratio, rope_freq, dropout, self_attn, moe_experts=0, moe_top_k=2,
+                 self_attn_after=False):
         super().__init__()
+        self.self_attn_after = bool(self_attn_after)
         self.self_attn = _Attn(dim, num_heads, rope_freq, dropout) if self_attn else None
         self.norm_sa = nn.LayerNorm(dim) if self_attn else None
         self.norm_q = nn.LayerNorm(dim)
@@ -181,11 +191,34 @@ class _Layer(nn.Module):
             self.ffn = make_ffn()
 
     def forward(self, q, q_pos, tok, tok_pos, tok_mask, self_mask=None):
-        if self.self_attn is not None:
-            h = self.norm_sa(q)
-            q = q + self.self_attn(h, q_pos, h, q_pos, pair_mask=self_mask)
+        if self.self_attn is not None and not self.self_attn_after:
+            q = self._sa(q, q_pos, self_mask)
         q = q + self.cross(self.norm_q(q), q_pos, self.norm_kv(tok), tok_pos, tok_mask)
+        if self.self_attn is not None and self.self_attn_after:
+            q = self._sa(q, q_pos, self_mask)
         return q + self.ffn(self.norm_ffn(q))
+
+    def _sa(self, q, q_pos, self_mask):
+        h = self.norm_sa(q)
+        return q + self.self_attn(h, q_pos, h, q_pos, pair_mask=self_mask)
+
+
+class QueryPool(nn.Module):
+    """H31: n refined queries (B, n, dim) -> one (B, dim): a learned query cross-attends
+    over them (one pre-norm layer, cross-attention + FFN), then a LayerNorm. All
+    positions at the origin, so PointROPE is the identity here."""
+
+    def __init__(self, dim, num_heads, mlp_ratio, rope_freq, dropout):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        self.layer = _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout, self_attn=False)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        B, n, _ = x.shape
+        z = x.new_zeros(B, 1, 3)
+        q = self.layer(self.query.expand(B, -1, -1).to(x.dtype), z, x, x.new_zeros(B, n, 3), None)
+        return self.norm(q)[:, 0]
 
 
 def query_offsets(n: int, radius: float) -> torch.Tensor:
@@ -255,10 +288,11 @@ class XAttnPool(OD3D_Model):
         query_radius: float = 0.5,
         moe_experts: int = 0,
         moe_top_k: int = 2,
+        self_attn_after: bool = False,
     ):
         super().__init__()
-        if query_pool not in ("mean", "concat"):
-            raise ValueError(f"XAttnPool: query_pool must be mean or concat, got {query_pool}")
+        if query_pool not in ("mean", "concat", "xattn"):
+            raise ValueError(f"XAttnPool: query_pool must be mean, concat or xattn, got {query_pool}")
         self.num_queries = num_queries
         self.query_pool = query_pool
         self.surface_queries = surface_queries
@@ -312,10 +346,12 @@ class XAttnPool(OD3D_Model):
         self.layers = nn.ModuleList([
             _Layer(dim, num_heads, mlp_ratio, rope_freq, dropout,
                    self_attn=bool(self_attn_every) and (i + 1) % self_attn_every == 0,
-                   moe_experts=moe_experts, moe_top_k=moe_top_k)
+                   moe_experts=moe_experts, moe_top_k=moe_top_k, self_attn_after=self_attn_after)
             for i in range(num_layers)
         ])
         self.norm_out = nn.LayerNorm(dim)
+        if query_pool == "xattn":
+            self.pool = QueryPool(dim, num_heads, mlp_ratio, rope_freq, dropout)
 
     def forward(self, frames_gt, frames_pred=None):
         tok, tok_coord, tok_mask = frames_pred.tokens, frames_pred.tokens_coord, frames_pred.tokens_mask
@@ -352,6 +388,8 @@ class XAttnPool(OD3D_Model):
         q = self.norm_out(q)
         if self.query_pool == "concat":
             pooled = q[:, :self.num_queries].flatten(1)              # (B, num_queries * dim)
+        elif self.query_pool == "xattn":
+            pooled = self.pool(q[:, :self.num_queries])              # (B, dim)
         else:
             pooled = q[:, :self.num_queries].mean(dim=1)             # (B, dim)
 

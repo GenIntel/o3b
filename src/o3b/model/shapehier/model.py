@@ -160,7 +160,13 @@ the origin needs keys and queries in one unit, so this requires
 ``pose_pool_rope_unit`` (cloud units per RoPE cell, for every level and stage; unset =
 each level's own unit, as before, which only an origin query can use).
 ``pose_self_attn_every: k`` lets the pose queries self-attend in every k-th of the
-``pose_layers`` layers (H23-T02: 4 layers, k = 2), before that layer's cross-attention.
+``pose_layers`` layers (H23-T02: 4 layers, k = 2), before that layer's cross-attention
+(after it with ``pose_self_attn_after: true``, H31: cross- and self-attention alternate).
+``pose_pool_query_layout: same`` (H31) puts every pose query at the origin (any number
+of them, each its own learned token; the per-level RoPE units still apply) instead of
+``query_offsets``' points. ``pose_pool_query_pool: xattn`` (H31) pools the queries into one
+with XAttnPool's ``QueryPool`` (a learned query cross-attending over them) before the
+head, which then reads ``pose_dim`` instead of the concatenation.
 
 ``pose_umeyama: true`` (H08-T03, after DROID-SLAM's predict -> measure -> correct)
 reads the pose out of the NOCS instead of regressing it, at every level in
@@ -187,7 +193,7 @@ import torch.nn.functional as F
 
 from o3b.model.model import OD3D_Model, register_model
 from o3b.model.shapemlp.model import _mlp
-from o3b.model.xattnpool.model import RopePos, _Layer, query_offsets, rope3d
+from o3b.model.xattnpool.model import QueryPool, RopePos, _Layer, query_offsets, rope3d
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +282,9 @@ class ShapeHier(OD3D_Model):
         pose_pool_query_radius: float = 0.5,
         pose_pool_rope_unit: float = None,
         pose_self_attn_every: int = 0,
+        pose_self_attn_after: bool = False,
+        pose_pool_query_layout: str = "spread",
+        pose_pool_query_pool: str = "concat",
         init_queries: bool = False,
         init_layers: int = 2,
         init_pos_layers: int = 0,
@@ -474,9 +483,16 @@ class ShapeHier(OD3D_Model):
             if pose_dim % pose_heads or (pose_dim // pose_heads) % 6:
                 raise ValueError("ShapeHier: pose_dim / pose_heads must be a multiple of 6 (PointROPE)")
             nq = int(pose_pool_queries)
-            if nq not in (1, 5, 7):
-                raise ValueError("ShapeHier: pose_pool_queries must be 1, 5 or 7")
-            if nq > 1 and not pose_pool_rope_unit:
+            if pose_pool_query_layout not in ("spread", "same"):
+                raise ValueError("ShapeHier: pose_pool_query_layout must be spread or same")
+            if pose_pool_query_pool not in ("concat", "xattn"):
+                raise ValueError("ShapeHier: pose_pool_query_pool must be concat or xattn")
+            spread = pose_pool_query_layout == "spread"
+            if spread and nq not in (1, 5, 7):
+                raise ValueError("ShapeHier: pose_pool_queries must be 1, 5 or 7 (query_layout spread)")
+            if nq < 1:
+                raise ValueError("ShapeHier: pose_pool_queries must be >= 1")
+            if spread and nq > 1 and not pose_pool_rope_unit:
                 raise ValueError("ShapeHier: pose_pool_queries > 1 needs pose_pool_rope_unit")
             self.pp_token = nn.Parameter(torch.randn(nq, pose_dim, generator=g) * 0.02)
             self.pp_glob = nn.Linear(in_dim, pose_dim)
@@ -486,15 +502,20 @@ class ShapeHier(OD3D_Model):
             # (layers k-1, 2k-1, ..., as XAttnPool's self_attn_every), before its cross-attention
             se = int(pose_self_attn_every)
             self.pp_blocks = nn.ModuleList([_Layer(pose_dim, pose_heads, pose_mlp_ratio, rope_freq, dropout,
-                                                   self_attn=bool(se) and (i + 1) % se == 0)
+                                                   self_attn=bool(se) and (i + 1) % se == 0,
+                                                   self_attn_after=pose_self_attn_after)
                                             for i in range(pose_layers)])
             self.pp_norm = nn.LayerNorm(pose_dim)
             if pose_pool_enc:                               # H22: LitePT's stages as a second key set
                 self.pp_kv_enc = nn.ModuleList([nn.Linear(d, pose_dim) for d in dims])
                 self.pp_level_enc = nn.Parameter(torch.randn(L, pose_dim, generator=g) * 0.02)
             # H23: origin (+ tetrahedron corners for 5, + the six axis directions for 7)
-            self.register_buffer("pp_qpos", query_offsets(nq, pose_pool_query_radius), persistent=False)
-            pose_dim_head = pose_dim * nq
+            qpos = query_offsets(nq, pose_pool_query_radius) if spread else torch.zeros(nq, 3)
+            self.register_buffer("pp_qpos", qpos, persistent=False)
+            # H31: the queries pooled into one by a learned query, or concatenated (as before)
+            if pose_pool_query_pool == "xattn":
+                self.pp_qpool = QueryPool(pose_dim, pose_heads, pose_mlp_ratio, rope_freq, dropout)
+            pose_dim_head = pose_dim if pose_pool_query_pool == "xattn" else pose_dim * nq
             if pose_pool_head_layers:
                 # PoseMLP's head (o3b MLP with out_dims [3, 6, 3]): one network each for
                 # translation, 6D rotation and size, concatenated to the 12 raw outputs
@@ -510,8 +531,11 @@ class ShapeHier(OD3D_Model):
                 self.pp_out = nn.Linear(pose_dim_head, 12)
         elif pose_pool_detach:
             raise ValueError("ShapeHier: pose_pool_detach needs pose_pool: true")
-        elif pose_pool_enc or int(pose_pool_queries) != 1 or pose_self_attn_every:
-            raise ValueError("ShapeHier: pose_pool_enc / pose_pool_queries / pose_self_attn_every need pose_pool: true")
+        elif (pose_pool_enc or int(pose_pool_queries) != 1 or pose_self_attn_every or pose_self_attn_after
+              or pose_pool_query_layout != "spread" or pose_pool_query_pool != "concat"):
+            raise ValueError("ShapeHier: pose_pool_enc / pose_pool_queries / pose_self_attn_* / pose_pool_query_* "
+                             "need pose_pool: true")
+        self.pose_pool_query_pool = pose_pool_query_pool if pose_pool else "concat"
         self.pose_pool_enc = bool(pose_pool_enc) and pose_pool
         self.pose_pool_queries = int(pose_pool_queries) if pose_pool else 1
         self.pose_pool_rope_unit = float(pose_pool_rope_unit) if pose_pool_rope_unit else None
@@ -614,7 +638,8 @@ class ShapeHier(OD3D_Model):
                 t = layer(t, q_pos, ekv, epos, emask)
             else:
                 t = layer(t, q_pos, kv, kv_pos, None)
-        t = self.pp_norm(t).reshape(B, -1)
+        t = self.pp_norm(t)
+        t = self.pp_qpool(t) if self.pose_pool_query_pool == "xattn" else t.reshape(B, -1)
         raw = torch.cat([h(t) for h in self.pp_heads], dim=-1) if self.pose_pool_head_layers else self.pp_out(t)
         frames_pred.cam_tform4x4_obj, frames_pred.obj_size3d = pose_from_raw(raw, frames_pred.obj_tform4x4_obj_nocs_0c)
 
