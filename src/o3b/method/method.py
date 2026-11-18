@@ -137,6 +137,12 @@ def build_method(cfg: MethodConfig) -> "Method":
 # ── Base class ─────────────────────────────────────────────────────────────────
 
 class Method:
+    # File inside ``train.checkpoint_dir`` that the method's ``checkpoint`` argument
+    # resumes an interrupted training from, e.g. "trinity.ckpt". A job that
+    # continues itself at the walltime (o3b.run, `resubmit_on_walltime`) sets
+    # ``checkpoint`` to it. None: the method cannot resume, a continuation restarts.
+    resume_checkpoint_name: str | None = None
+
     def forward(self, batch, return_qualit: bool = False):
         raise NotImplementedError
 

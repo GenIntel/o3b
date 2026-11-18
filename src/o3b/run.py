@@ -74,7 +74,112 @@ def _eval_metric_means(method, task, loader, distributed: bool, desc: str,
     return metrics, n_samples
 
 
+# ── continuation at the walltime ─────────────────────────────────────────────
+# A job that runs into its time limit submits its own continuation (see
+# `cli._make_sbatch_script`, platform key `resubmit_on_walltime`). The
+# continuation runs the identical command, so without help it would start a new
+# run from scratch under a new timestamp. The job script therefore exports
+#   O3B_RESUME_FILE     a JSON file that belongs to this submission, and
+#   O3B_RESUME_ATTEMPT  0 for the first job, n for its n-th continuation.
+# The first job records, per run of the job (a job can hold several ablation
+# combos), where it writes its checkpoints and whether it finished; a
+# continuation skips the finished runs and points the others back at their
+# directory and at the method's rolling checkpoint in it.
+# The key is the run name without its timestamp, which is all that differs
+# between the first job and a continuation.
+
+def _resume_env():
+    import os
+    path = os.environ.get("O3B_RESUME_FILE") or None
+    try:
+        attempt = int(os.environ.get("O3B_RESUME_ATTEMPT") or 0)
+    except ValueError:
+        attempt = 0
+    return path, attempt
+
+
+def _resume_key(run_name: str) -> str:
+    return run_name.split("__", 1)[-1]
+
+
+def _resume_read(path: str) -> dict:
+    import json, os
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            state = json.load(f)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _resume_update(path: str, key: str, **fields) -> None:
+    """Merge ``fields`` into the entry of ``key`` (main rank only; atomic)."""
+    import json, os
+    state = _resume_read(path)
+    state.setdefault(key, {}).update(fields)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(tmp, path)
+
+
+def _resume_checkpoint_name(method_cfg: dict):
+    """The file a method resumes from inside its checkpoint_dir, or None."""
+    try:
+        from o3b.method.method import _ensure_method_imported, _REGISTRY_METHODS
+        name = method_cfg.get("class_name")
+        _ensure_method_imported(name, method_cfg.get("method_module"))
+        return getattr(_REGISTRY_METHODS.get(name), "resume_checkpoint_name", None)
+    except Exception:
+        return None
+
+
+def _resume_apply(run_name: str, method_cfg, train_cfg, is_main: bool) -> None:
+    """Record this run's checkpoint_dir (first job) or return to it (continuation)."""
+    import os
+    path, attempt = _resume_env()
+    if not path or not isinstance(train_cfg, dict) or not train_cfg.get("checkpoint_dir"):
+        return
+    key = _resume_key(run_name)
+    prev = _resume_read(path).get(key, {}).get("checkpoint_dir") if attempt > 0 else None
+    if not prev:
+        # also a continuation whose earlier job never got as far as this run
+        # only for a method that can resume: the job script continues a job at the
+        # walltime only if this entry exists, and a method that cannot pick its
+        # checkpoint up again would restart from scratch in every continuation
+        if is_main and _resume_checkpoint_name(method_cfg):
+            _resume_update(path, key, checkpoint_dir=train_cfg["checkpoint_dir"])
+        return
+    train_cfg["checkpoint_dir"] = prev
+    name = _resume_checkpoint_name(method_cfg)
+    ckpt = os.path.join(prev, name) if name else None
+    if ckpt and os.path.isfile(ckpt):
+        method_cfg["checkpoint"] = ckpt
+        if is_main:
+            print(f"Resume:  continuation {attempt}, from {ckpt}")
+    elif is_main:
+        print(f"Resume:  continuation {attempt}, but no checkpoint in {prev} "
+              f"({name or 'the method names no resume checkpoint'}); starting as configured")
+
+
 def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
+    """One run of a job: `_run_bench_run_with_cfg_impl`, skipped in a continuation
+    job when an earlier job of the same submission already finished it."""
+    path, attempt = _resume_env()
+    key = _resume_key(run_name)
+    if path and attempt > 0 and _resume_read(path).get(key, {}).get("done"):
+        print(f"Resume:  continuation {attempt}, run already finished, skipping: {key}")
+        return
+    _run_bench_run_with_cfg_impl(run_raw, run_name)
+    if path:
+        from o3b import ddp
+        if ddp.is_main_process(ddp.get_rank()):
+            _resume_update(path, key, done=True)
+
+
+def _run_bench_run_with_cfg_impl(run_raw: dict, run_name: str) -> None:
     """Execute one benchmark evaluation pass given a fully-resolved config dict.
 
     Args:
@@ -222,6 +327,9 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         elif is_main:
             print("WARNING: platform.path_exps is unset — a method that trains "
                   "has nowhere to write its checkpoints")
+    # a continuation job goes back to the directory (and checkpoint) of the job
+    # it continues; the first job records its directory for that
+    _resume_apply(run_name, method_cfg, _train_cfg, is_main)
 
     # ── method (optional) ─────────────────────────────────────────────────────
     # The method runs on each batch before the task (e.g. a pose estimator that

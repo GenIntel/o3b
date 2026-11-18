@@ -34,6 +34,15 @@ resubmit_exclude_node: True   # false = retry anywhere, including the faulty nod
 #   - "uncorrectable ECC error"
 #   - "CUDA error: an illegal memory access"
 
+# A training that needs more than one walltime continues itself: 60 s before the
+# limit the job script submits itself again (here, where compute nodes may not
+# sbatch, it requeues the job) and o3b.run resumes the run from the checkpoint
+# in its own directory, so no `ckpts/*_resume.yaml` and no second `rrun` are
+# needed. Only a run whose method names a `resume_checkpoint_name` is continued;
+# evaluations and methods that cannot resume end at the limit as before.
+resubmit_on_walltime: True
+resubmit_walltime_max: 4      # continuations after the first job, so 5 walltimes at most
+
 branch: main
 pull: True
 pull_submodules: True

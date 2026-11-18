@@ -135,6 +135,11 @@ restart_upon_fail: False   # JSC accounting charges a requeued job again
 # every script carrying --requeue ("--requeue option is not supported"), so it
 # must be off here: the code default is on.
 resubmit_on_gpu_error: False
+# The continuation at the walltime is a fresh sbatch from the compute node
+# (booster: AllocNodes=ALL), not a requeue, so it carries no --requeue and is
+# charged like the manual resume it replaces.
+resubmit_on_walltime: True
+resubmit_walltime_max: 4
 
 deps:
   #- diff3f

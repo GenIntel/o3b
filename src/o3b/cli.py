@@ -1337,6 +1337,15 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     excl_node       = str(cfg.get("resubmit_exclude_node", True)).lower() in ("true", "1", "yes")
     patterns        = [str(p) for p in (cfg.get("resubmit_error_patterns", None) or [])] \
                           or _GPU_FAULT_PATTERNS
+    # A training that needs more than one walltime: 60 s before the limit slurm
+    # signals the batch shell (--signal=B:SIGUSR1@60 below) and the script
+    # submits its own continuation, which o3b.run points back at the run's
+    # checkpoint (see the "continuation at the walltime" block in o3b/run.py).
+    # `resubmit_walltime_max` bounds the chain, so a run that makes no progress
+    # cannot continue itself for ever.
+    walltime_resub  = bool(self_path) and str(cfg.get("resubmit_on_walltime", False)).lower() \
+                          in ("true", "1", "yes")
+    walltime_max    = int(cfg.get("resubmit_walltime_max", 4))
     # JSC (juwels/jupiter) rejects every job without a budget account; the LMB
     # cluster has no accounting and leaves this unset.
     account         = cfg.get("account", None)
@@ -1389,21 +1398,104 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     else:
         launch = f"bash {remote_setup_script}"
 
+    # Scanned instead of a `tee` copy: see the node-fault retry below. The
+    # walltime continuation counts its own requeues in it.
+    log_path = f"{path_home}/slurm_jobs/{job_name}_${{SLURM_JOB_ID}}.o"
+
+    if walltime_resub:
+        walltime_lines = [
+            "# --- automatic continuation at the time limit ---------------------",
+            "# slurm sends SIGUSR1 to this shell 60 s before the limit.  The trap",
+            "# submits this very script again, to start once this job has ended",
+            "# (two jobs must not write one checkpoint directory); $3 counts the",
+            "# continuations.  Where a compute node may not sbatch (LMB) the job is",
+            "# requeued instead: same job id, same arguments, same log, so those",
+            "# continuations are counted by their marker in the log.  o3b.run reads",
+            "# O3B_RESUME_FILE / O3B_RESUME_ATTEMPT and resumes from the run's last",
+            "# checkpoint; a job whose run registered no resumable checkpoint (an",
+            "# evaluation, a method that cannot resume) is not continued.",
+            f'O3B_SELF="{self_path}"',
+            f"O3B_WT_MAX={walltime_max}",
+            f'O3B_WT_LOG="{log_path}"',
+            'O3B_WT_DONE=$(( ${3:-0} + $(grep -c "^=== o3b: time limit, requeueing job "'
+            ' "$O3B_WT_LOG" 2>/dev/null || true) ))',
+            'export O3B_RESUME_FILE="${O3B_SELF}.resume.json"',
+            'export O3B_RESUME_ATTEMPT="$O3B_WT_DONE"',
+            'if [ "$O3B_WT_DONE" -gt 0 ]; then',
+            '    echo "=== o3b: continuation $O3B_WT_DONE/$O3B_WT_MAX after the time limit'
+            ' (job ${SLURM_JOB_ID:-?}) ==="',
+            "fi",
+            "o3b_walltime() {",
+            "    trap '' USR1",
+            '    if [ "$O3B_WT_DONE" -ge "$O3B_WT_MAX" ]; then',
+            '        echo "=== o3b: time limit, not continuing: all $O3B_WT_MAX continuations used ==="',
+            "        return",
+            "    fi",
+            '    if ! grep -q \'"checkpoint_dir"\' "$O3B_RESUME_FILE" 2>/dev/null; then',
+            '        echo "=== o3b: time limit, not continuing: no run of this job registered'
+            ' a checkpoint to resume from ==="',
+            "        return",
+            "    fi",
+            "    local next=$((O3B_WT_DONE + 1)) new",
+            '    if new="$(sbatch --parsable --dependency="afterany:${SLURM_JOB_ID:-0}"'
+            ' "$O3B_SELF" 1 "${2:-}" "$next" 2>&1)"; then',
+            '        echo "=== o3b: time limit, continuing as job $new'
+            ' (continuation $next/$O3B_WT_MAX) ==="',
+            "    else",
+            '        echo "=== o3b: sbatch from this node failed ($new), trying a requeue ==="',
+            '        echo "=== o3b: time limit, requeueing job ${SLURM_JOB_ID:-?}'
+            ' (continuation $next/$O3B_WT_MAX) ==="',
+            '        scontrol requeue "${SLURM_JOB_ID:-0}" \\',
+            '            || echo "=== o3b: neither sbatch nor requeue worked here: not continued ==="',
+            "    fi",
+            "}",
+            'trap \'o3b_walltime "$@"\' USR1',
+            "",
+        ]
+        # bash runs a trap only between commands, so the run goes to the
+        # background and the shell waits for it; a trapped signal ends `wait`
+        # early (status > 128) while the run lives on, hence the loop.
+        launch_lines = [
+            f"{launch} &",
+            "O3B_PID=$!",
+            "O3B_RC=0",
+            'wait "$O3B_PID" || O3B_RC=$?',
+            'while kill -0 "$O3B_PID" 2>/dev/null; do',
+            "    O3B_RC=0",
+            '    wait "$O3B_PID" || O3B_RC=$?',
+            "done",
+        ]
+    else:
+        walltime_lines = []
+        launch_lines = [launch, "O3B_RC=$?"]
+
     if not resubmit:
+        if not walltime_resub:
+            lines += [
+                "",
+                "set -euo pipefail",
+                "",
+                env_block,
+                "",
+                launch,
+            ]
+            return "\n".join(lines) + "\n"
+        # no `set -e`: the run's exit code is collected, not aborted on
         lines += [
             "",
-            "set -euo pipefail",
+            "set -uo pipefail",
             "",
             env_block,
             "",
-            launch,
+            *walltime_lines,
+            *launch_lines,
+            'exit "$O3B_RC"',
         ]
         return "\n".join(lines) + "\n"
 
     # Scanned instead of a `tee` copy: `#SBATCH -o` already points the job's
     # stdout+stderr here, so the text is on disk by the time the command returns
     # and a long training run does not get its whole output duplicated to /tmp.
-    log_path = f"{path_home}/slurm_jobs/{job_name}_${{SLURM_JOB_ID}}.o"
     # `set -e` is dropped: the failure below has to be caught, not aborted on.
     lines += [
         "",
@@ -1436,8 +1528,8 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         'echo "=== o3b: attempt $O3B_ATTEMPT/$O3B_MAX_ATTEMPTS started on'
         ' $(hostname -s) (job ${SLURM_JOB_ID:-?}) ==="',
         "",
-        launch,
-        "O3B_RC=$?",
+        *walltime_lines,
+        *launch_lines,
         "",
         "# tail bounds the read on a long run's log; tac/sed/tac then drops",
         "# everything up to and including the last attempt marker.  With the marker",
@@ -1484,7 +1576,7 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         " | tr ' ' '\\n' | sed -n 's/^ExcNodeList=//p')) ===\"",
         "    elif command -v sbatch >/dev/null 2>&1; then",
         '        sbatch ${O3B_NEW_EXCLUDE:+--exclude="$O3B_NEW_EXCLUDE"}'
-        ' "$O3B_SELF" "$O3B_NEXT" "$O3B_NEW_EXCLUDE"',
+        ' "$O3B_SELF" "$O3B_NEXT" "$O3B_NEW_EXCLUDE" "${3:-0}"',
         "    else",
         '        echo "=== o3b: neither requeue nor sbatch worked here —'
         ' cannot retry ==="',
