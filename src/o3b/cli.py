@@ -1331,8 +1331,15 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
     # else — see the epilogue below for how.  Off when the caller passes no
     # `self_path`, since there is nothing to retry then (`o3b platform setup`
     # takes that path).
-    resubmit        = bool(self_path) and str(cfg.get("resubmit_on_gpu_error", True)).lower() \
+    # `resubmit_on_failure` widens that to every non-zero exit (an out-of-memory
+    # kill, a filesystem hiccup, a crashed DataLoader worker): same attempt
+    # budget, but the node is only excluded when a fault pattern matched.  A
+    # deterministic bug then costs `resubmit_max_attempts` runs instead of one.
+    resubmit_any    = bool(self_path) and str(cfg.get("resubmit_on_failure", False)).lower() \
                           in ("true", "1", "yes")
+    resubmit        = resubmit_any or (
+        bool(self_path) and str(cfg.get("resubmit_on_gpu_error", True)).lower()
+        in ("true", "1", "yes"))
     max_attempts    = int(cfg.get("resubmit_max_attempts", 3))
     excl_node       = str(cfg.get("resubmit_exclude_node", True)).lower() in ("true", "1", "yes")
     patterns        = [str(p) for p in (cfg.get("resubmit_error_patterns", None) or [])] \
@@ -1537,14 +1544,25 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         'O3B_TAIL="$(tail -n 5000 "$O3B_LOG" 2>/dev/null | tac'
         ' | sed "/^=== o3b: attempt .* started on /q" | tac)"',
         "",
+        "O3B_FAULT=0",
+        'printf \'%s\\n\' "$O3B_TAIL" | grep -qE "$O3B_PATTERNS" && O3B_FAULT=1',
+        "# resubmit_on_failure: any failure is retried, unless the job is on its",
+        "# way out anyway (scancel signals this shell too, and a cancelled job",
+        "# must not requeue itself)",
+        f"O3B_ANY={1 if resubmit_any else 0}",
+        'if [ "$O3B_ANY" = 1 ] && ! scontrol show job "${SLURM_JOB_ID:-0}" -o 2>/dev/null'
+        ' | grep -q "JobState=RUNNING "; then O3B_ANY=0; fi',
+        "",
         'if [ "$O3B_RC" -ne 0 ] && [ "$O3B_ATTEMPT" -lt "$O3B_MAX_ATTEMPTS" ] && '
-        'printf \'%s\\n\' "$O3B_TAIL" | grep -qE "$O3B_PATTERNS"; then',
+        '{ [ "$O3B_FAULT" = 1 ] || [ "$O3B_ANY" = 1 ]; }; then',
         "    O3B_NEXT=$((O3B_ATTEMPT + 1))",
         # The batch script cannot tell which node of a multi-node allocation
         # raised the fault, so all of them are excluded.  Set
         # resubmit_exclude_node: false on a platform where that starves the queue.
         ('    O3B_BAD="$(scontrol show hostnames "${SLURM_JOB_NODELIST:-}" 2>/dev/null'
          ' | paste -sd, -)"') if excl_node else '    O3B_BAD=""',
+        "    # a failure without a fault pattern says nothing against the node",
+        '    [ "$O3B_FAULT" = 1 ] || O3B_BAD=""',
         "    # the job's own ExcNodeList carries the list down a requeue chain the",
         "    # way $2 does down an sbatch chain — a requeue re-runs this script with",
         "    # the original arguments, so O3B_EXCLUDE is back at the config default",
@@ -1554,7 +1572,8 @@ def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script:
         # excluded, and the list is otherwise passed on down the whole chain
         '    O3B_NEW_EXCLUDE="$(printf \'%s\\n\' "$O3B_EXCLUDE" "$O3B_CUR" "$O3B_BAD"'
         " | tr ',' '\\n' | grep -v '^$' | sort -u | paste -sd, -)\"",
-        '    echo "=== o3b: node fault on ${O3B_BAD:-?} (exit $O3B_RC) —'
+        '    echo "=== o3b: $([ "$O3B_FAULT" = 1 ] && echo "node fault on ${O3B_BAD:-?}"'
+        ' || echo failure) (exit $O3B_RC) —'
         ' retrying as attempt $O3B_NEXT/$O3B_MAX_ATTEMPTS,'
         ' excluding ${O3B_NEW_EXCLUDE:-<none>} ==="',
         "    # The requeue SIGTERMs this step; ignoring it buys the seconds needed",

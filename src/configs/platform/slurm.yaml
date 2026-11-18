@@ -27,6 +27,12 @@ restart_upon_fail: True
 resubmit_on_gpu_error: True
 resubmit_max_attempts: 3      # counts the first attempt, so 3 = at most 2 retries
 resubmit_exclude_node: True   # false = retry anywhere, including the faulty node
+# Retry after *any* non-zero exit, not only a fault pattern (out-of-memory kill,
+# filesystem hiccup, crashed DataLoader worker): same budget, the node is only
+# excluded on a fault pattern, a cancelled job is left alone. A deterministic
+# bug then runs resubmit_max_attempts times, and a training retried this way
+# starts over (only the time limit resumes from the checkpoint).
+resubmit_on_failure: True
 # Replaces the default pattern list (ERE, matched against the log tail). Keep any
 # addition specific to a *hardware* fault: a pattern that also matches a bug in
 # the run spends the whole retry budget on something that can never succeed.
